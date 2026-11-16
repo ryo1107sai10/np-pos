@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { apply, createDemo, exportStoreConfiguration, parseStoreConfiguration } from '../docs/engine.mjs';
 import { applySetSchedule, isValidInitialSetSchedule, suggestInitialSet } from '../docs/set-schedule.mjs';
 import { readInitialSetSchedule, renderInitialSetSchedule } from '../docs/set-schedule-ui.mjs';
 
@@ -89,4 +90,22 @@ test('reads a schedule saved from the form, including empty lists used to remove
   assert.deepEqual(readInitialSetSchedule(data), [evening, late]);
   data.append('initialSetEnd', '23:00');
   assert.throws(() => readInitialSetSchedule(data), /一覧/);
+});
+
+test('exchanges rules through store settings and preserves them when importing an older file', () => {
+  const at = time('22:00');
+  const original = createDemo('closed', at);
+  const configured = apply(original, { type: 'saveInitialSetSchedule', rules: [late] }, at);
+  assert.equal(configured.auditLog[0].action, 'saveInitialSetSchedule');
+  const file = JSON.stringify(exportStoreConfiguration(configured));
+  const restored = apply(original, { type: 'importStoreConfiguration', configuration: parseStoreConfiguration(file) }, at);
+  assert.equal(suggestInitialSet(restored, at).id, 'set90');
+
+  const priorFile = JSON.stringify(exportStoreConfiguration(original));
+  const legacy = apply(restored, { type: 'importStoreConfiguration', configuration: parseStoreConfiguration(priorFile) }, at);
+  assert.deepEqual(legacy.initialSetSchedule, [late]);
+  const reset = apply(configured, { type: 'saveInitialSetSchedule', rules: [] }, at);
+  const clearFile = JSON.stringify(exportStoreConfiguration(reset));
+  const cleared = apply(legacy, { type: 'importStoreConfiguration', configuration: parseStoreConfiguration(clearFile) }, at);
+  assert.deepEqual(cleared.initialSetSchedule, []);
 });
