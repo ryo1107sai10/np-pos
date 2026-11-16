@@ -2,7 +2,7 @@ import { getPrintTenderReceived } from './print-domain.mjs';
 
 export const printDocumentTitles = Object.freeze({ check: '会計確認伝票', receipt: 'レシート', invoice: '領収書' });
 
-const methods = { cash: '現金', card: 'カード', qr: 'QR決済', receivable: '売掛' };
+const methods = { cash: '現金', card: 'カード', qr: 'QR決済' };
 const timestamp = new Intl.DateTimeFormat('ja-JP', {
   timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
 });
@@ -51,19 +51,21 @@ function moneyRows(rows, {yen, escape}) {
     `<div><dt>${escape(label)}</dt><dd>${amount < 0 ? '−' : ''}${yen(Math.abs(amount))}</dd></div>`).join('')}</dl>`;
 }
 
-function lineItems(ticket, detailed, {escape, yen}) {
+function lineItems(ticket, detailed, inclusive, {escape, yen}) {
   const lines = (ticket.lines ?? []).filter(({cancelledAt}) => cancelledAt == null);
   if (!detailed || !lines.length) return '';
-  return `<section class="np-print-section"><h4>会計明細（税抜）</h4><ul class="np-print-items">${lines.map((line) => `
+  return `<section class="np-print-section"><h4>会計明細（${inclusive ? '税込' : '税抜'}）</h4><ul class="np-print-items">${lines.map((line) => `
     <li><span>${escape(line.name)}<small>${yen(line.price)} × ${quantities.format(line.quantity)}</small></span><strong>${yen(line.total)}</strong></li>`).join('')}
   </ul></section>`;
 }
 
 function chargeDetails(totals, api) {
-  const rows = [['小計（税抜）', totals.subtotal]];
+  const inclusive = totals.priceMode === 'inclusive';
+  const rows = [[inclusive ? '小計（税込）' : '小計（税抜）', totals.subtotal]];
   if (totals.discount) rows.push(['値引き', -totals.discount]);
   if (totals.service) rows.push(['サービス料', totals.service]);
-  rows.push([totals.cardFee ? '消費税（加算前）' : '消費税', totals.tax - (totals.cardFeeTax ?? 0)]);
+  const taxLabel = inclusive ? 'うち消費税' : '消費税';
+  rows.push([totals.cardFee ? `${taxLabel}（加算前）` : taxLabel, totals.tax - (totals.cardFeeTax ?? 0)]);
   if (totals.cardFee) rows.push(['カード会計加算（税込）',totals.cardFee]);
   return moneyRows(rows,api);
 }
@@ -77,15 +79,17 @@ function taxBreakdown({taxBreakdown}, api) {
 
 function paymentGroups(payments, prefix = '') {
   const byMethod = new Map();
-  for (const {method, amount} of payments) byMethod.set(method,(byMethod.get(method) ?? 0) + amount);
-  return [...byMethod.entries()].map(([method,amount]) => [prefix + (Object.hasOwn(methods,method) ? methods[method] : 'その他'),amount]);
+  for (const {method, amount} of payments) {
+    if (Object.hasOwn(methods,method)) byMethod.set(method,(byMethod.get(method) ?? 0) + amount);
+  }
+  return [...byMethod.entries()].map(([method,amount]) => [prefix + methods[method],amount]);
 }
 
 function receiptPayments(ticket, api) {
   const deposits = paymentGroups(ticket.deposits ?? [],'前受金・');
   const payments = paymentGroups(ticket.payments ?? []);
   if (!deposits.length && !payments.length) return '';
-  return `<section class="np-print-section"><h4>会計時の支払内訳</h4>${moneyRows([...deposits,...payments],api)}</section>`;
+  return `<section class="np-print-section"><h4>受取内訳</h4>${moneyRows([...deposits,...payments],api)}</section>`;
 }
 
 function amountLine(label, amount, {escape, yen}) {
@@ -106,10 +110,6 @@ function invoiceHeader(ticket, issuerAt, recipient, purpose, api) {
     <p class="np-print-recipient">${recipient ? `${escape(recipient)}${honorific}` : '宛名'}</p>
     ${amountLine('領収金額',getPrintTenderReceived(ticket),api)}
     <p class="np-print-purpose"><strong>但し書き</strong> ${escape(purpose || '—')}</p></div>`;
-}
-
-function invoiceBalance(totals, api) {
-  return moneyRows([['会計合計（税込）',totals.total],['会計時の売掛',totals.receivable]],api);
 }
 
 export function renderPrintPreview({ticket, totals, date, tables = [], kind, settings, storeName,
@@ -135,8 +135,8 @@ export function renderPrintPreview({ticket, totals, date, tables = [], kind, set
       ${when ? `<span>${kind === 'check' ? '確認日時' : '会計日時'} ${escape(when)}</span>` : ''}
     </div>
     ${kind === 'invoice' ? invoiceHeader(ticket,issuedAt ?? ticket.settledAt,recipient,purpose,api) : ''}
-    ${lineItems(ticket,settings.showItems !== false,api)}
-    ${kind === 'invoice' ? (totals.receivable ? `<section class="np-print-section">${invoiceBalance(totals,api)}</section>` : '')
+    ${lineItems(ticket,settings.showItems !== false,totals.priceMode === 'inclusive',api)}
+    ${kind === 'invoice' ? ''
       : `<section class="np-print-section">${chargeDetails(totals,api)}
         ${kind === 'check' ? confirmationAmount(totals,api) : amountLine('会計合計（税込）',totals.total,api)}</section>`}
     ${kind === 'receipt' ? receiptPayments(ticket,api) : ''}

@@ -154,7 +154,8 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
   function acceptState(scope, result, serial) {
     assertScope(scope);
     if (!Number.isSafeInteger(result.revision) || result.revision < 0) throw new CloudError('invalid-response', 'クラウドの応答を確認できませんでした。');
-    const restricted = Boolean(result.restricted || ['cast', 'trainee'].includes(result.role));
+    const role = result.role ?? current.store.role;
+    const restricted = Boolean(result.restricted || role === 'trainee' || (role === 'cast' && result.scope !== 'cast'));
     let store = current.store;
     const changedRole = result.role && store.role !== result.role;
     if (changedRole && serial < scope.roleSerial) return false;
@@ -476,6 +477,7 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
       if (auth) await sdk.signOut(auth);
     },
     listStores,
+    storeOverview() { return request('/stores/overview'); },
     async createStore(name) {
       const { store } = await request('/stores', { method: 'POST', body: { name } });
       await listStores();

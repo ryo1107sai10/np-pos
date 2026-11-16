@@ -96,6 +96,7 @@ function storeChooser(cloud, api) {
         <small>${roleName(store.role)}${store.hasState === false ? ' · 初期設定待ち' : ''}</small></span>
         ${current ? '<span class="np-cloud-role">利用中</span>' : icon('chevron-right', 14)}</button></li>`;
     }).join('')}</ul>` : '<p class="np-cloud-copy">所属する店舗はありません。招待を受けたメールアドレスでサインインすると店舗が表示されます。</p>'}
+    ${stores.some(({role})=>role==='admin') ? `<div class="np-cloud-buttons">${button('複数店舗の営業状況','cloud-overview',api,{glyph:'chart',disabled:busy})}</div>` : ''}
     <details class="np-cloud-create" data-cloud-section="create"><summary>店舗を作成</summary><div class="np-cloud-detail-body">
       <div class="np-cloud-form-row">${field('店舗名','cloud-store-name','text',`autocomplete="organization" maxlength="80"${busy ? ' disabled' : ''}`)}${button('作成する','cloud-create-store',api,{ glyph:'plus', disabled:busy })}</div>
     </div></details>
@@ -118,10 +119,17 @@ function storePreparation(cloud, api) {
 function memberControls(member, api, cloud) {
   const { escape } = api;
   if (member.primary || member.uid === cloud.user?.uid) return `<span class="np-cloud-role">${member.primary ? '店舗の作成者' : roleName(member.role)}</span>`;
+  const link = cloud.castAccounts?.find(({uid}) => uid === member.uid);
+  const choices = cloud.castAccountChoices ?? [];
+  const castControls = member.role === 'cast' && cloud.store?.hasState ? `<div class="np-cloud-cast-link">
+    <label class="field"><span>キャスト</span><select data-cloud-cast-id${cloud.busy ? ' disabled' : ''}><option value="">未設定</option>
+      ${link && !choices.some(({id})=>id === link.castId) ? `<option value="${escape(link.castId)}" selected>対象外のキャスト</option>` : ''}
+      ${choices.map(({id,name})=>`<option value="${escape(id)}"${id === link?.castId ? ' selected' : ''}>${escape(name)}</option>`).join('')}</select></label>
+    ${button('ひもづけを保存','cloud-bind-cast',api,{id:member.uid,disabled:cloud.busy})}</div>` : '';
   return `<div class="np-cloud-member-controls"><label class="field"><span class="sr-only">${escape(member.email)}の権限</span>
     <select name="cloud-member-role" data-cloud-member-role${cloud.busy ? ' disabled' : ''}>${roleOptions(member.role)}</select></label>
     ${button('更新', 'cloud-member-save', api, { id: member.uid, disabled: cloud.busy })}
-    ${button('アクセスを解除', 'cloud-member-revoke', api, { id: member.uid, tone: 'danger', disabled: cloud.busy })}</div>`;
+    ${button('アクセスを解除', 'cloud-member-revoke', api, { id: member.uid, tone: 'danger', disabled: cloud.busy })}${castControls}</div>`;
 }
 
 function membersPanel(cloud, api) {
@@ -166,6 +174,21 @@ function accountPanel(cloud, api) {
   ${verified === false ? '' : storeChooser(cloud, api)}
   ${membersPanel(cloud, api)}
   <div class="np-cloud-buttons">${button('デモを開く', 'cloud-demo', api, { glyph: 'arrow-left', tone: 'quiet' })}</div>`;
+}
+
+export function renderStoreOverview({overview,loading,error},{escape,icon,yen}) {
+  if (loading) return '<p class="notice" role="status">店舗の営業状況を読み込んでいます。</p>';
+  if (error) return `<p class="form-error" role="alert">${escape(error)}</p>`;
+  const stores = Array.isArray(overview?.stores) ? overview.stores : [];
+  if (!stores.length) return '<p class="form-copy">管理者として所属する店舗がありません。</p>';
+  const statuses = {open:'営業中',closed:'閉店',uninitialized:'初期設定待ち'};
+  return `<p class="form-copy">管理者として所属する店舗の、直近の営業日とその月の売上です。</p>
+    ${overview.truncated ? '<p class="ops-highlight">表示は20店舗までです。</p>' : ''}
+    <ul class="np-cloud-portfolio">${stores.map((store)=>`<li class="np-cloud-card"><div class="np-cloud-identity">
+      <strong>${escape(store.name)}</strong><small>${escape(store.date ?? '')} ／ ${escape(store.hasState ? statuses[store.status] ?? '—' : '初期設定待ち')}</small>
+      </div><dl class="lr-money-list"><div><dt>営業日の売上</dt><dd>${store.hasState ? yen(store.dailySales) : '—'}</dd></div>
+      <div><dt>月間売上</dt><dd>${store.hasState ? yen(store.monthlySales) : '—'}</dd></div></dl>
+      ${store.hasState ? button('この店舗を開く','cloud-select-store',{escape,icon},{id:store.id,glyph:'chevron-right'}) : ''}</li>`).join('')}</ul>`;
 }
 
 export function renderCloudPanel(cloud, api) {

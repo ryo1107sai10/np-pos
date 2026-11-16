@@ -107,8 +107,7 @@
 .np-ar-status-overdue { color: #a13352; border-color: #f4d8e1; background: #fff0f4; }
 .np-ar-status-paid { color: #176954; border-color: #cfeade; background: #edf9f3; }
 .np-ar-status-cancelled { color: #656a7b; border-color: #e2e5ea; background: #f5f5f7; }
-.np-directory-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
-.np-directory-stats-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.np-directory-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .np-directory-stat {
   display: grid;
   min-width: 0;
@@ -288,8 +287,7 @@
   .np-directory-panel-head { padding: 10px 11px; }
   .np-directory-toolbar { padding: 0 11px 10px; }
   .np-directory-toolbar-filter { grid-template-columns: minmax(0, 1fr) minmax(0, 7rem); }
-  .np-directory-stats { gap: 6px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .np-directory-stats-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .np-directory-stats { gap: 6px; }
   .np-directory-stat { gap: 4px; padding: 9px 7px; border-radius: 10px; }
   .np-directory-row { gap: 6px; padding: 9px 10px; }
   .np-customer-row { grid-template-columns: 31px minmax(0, 1fr) auto auto; }

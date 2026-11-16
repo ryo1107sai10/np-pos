@@ -6,6 +6,8 @@ import { getReceivableBalance, getReceivableStatus } from './receivables.mjs';
 import { cashMovementCategories, cashMovementKinds } from './cash-ledger.mjs';
 import { getPrintSettings, printDocumentKinds } from './print-domain.mjs';
 import { getPayrollDraft, getPayrollRates, getPayrollSettings, isDailyPayCommand, isPayrollCommand } from './payroll.mjs';
+import { isCastAttendanceReview, linkedCastForActor } from './cast-self.mjs';
+import { getCalculationSettings } from './calculation-settings.mjs';
 
 const ticketActions = new Set([
   'discount', 'approveDiscount', 'rejectDiscount', 'settle', 'cancelSettlement', 'reopenTicket',
@@ -72,6 +74,12 @@ function auditSettings(before, after, action) {
   if (!sameValue(before.layoutAreas, after.layoutAreas)) {
     beforeInfo.areas = before.layoutAreas ?? [...new Set(before.tables.map(({ area }) => area))];
     afterInfo.areas = after.layoutAreas ?? [...new Set(after.tables.map(({ area }) => area))];
+  }
+  const previousCalculation = getCalculationSettings(before);
+  const nextCalculation = getCalculationSettings(after);
+  if (!sameValue(previousCalculation,nextCalculation)) {
+    beforeInfo.calculationSettings = previousCalculation;
+    afterInfo.calculationSettings = nextCalculation;
   }
   if (!Object.keys(beforeInfo).length) return null;
   return {
@@ -313,9 +321,9 @@ export function buildOperationAudit(before, after, action, at, actor) {
     details = auditTicketCustomer(before, after, action);
   } else if (action.type === 'correctSettledTicketPayments') {
     details = auditPaymentCorrection(before, after, action);
-  } else if (isPayrollCommand(action.type)) {
-    details = auditPayroll(before, after, action);
-  } else if (action.type === 'saveShift' || action.type === 'removeShift') {
+  } else if (isPayrollCommand(action.type) || action.type === 'castRequestDailyPay') {
+    details = auditPayroll(before, after, action.type === 'castRequestDailyPay' ? {...action,type:'requestDailyPay'} : action);
+  } else if (action.type === 'saveShift' || action.type === 'removeShift' || action.type === 'castRequestShift') {
     const previous = before.shifts?.find(({id}) => id === action.shiftId);
     const current = after.shifts?.find(({id}) => previous ? id === previous.id : !before.shifts?.some((entry) => entry.id === id));
     const shift = current ?? previous;
@@ -324,11 +332,32 @@ export function buildOperationAudit(before, after, action, at, actor) {
       details = {businessDate:shift.date,target:target('shift',shift.id,person?.name ?? shift.castId),
         before:previous ?? null,after:current ?? null,reason:action.type === 'removeShift' ? 'シフトの削除' : 'シフトの登録・更新'};
     }
+  } else if (action.type === 'bindCastAccount') {
+    const previous = before.castAccounts?.find(({uid}) => uid === action.memberUid) ?? null;
+    const current = after.castAccounts?.find(({uid}) => uid === action.memberUid) ?? null;
+    if (!sameValue(previous,current)) details = {target:target('cast-account',action.memberUid,'キャストアカウント'),
+      before:previous,after:current,reason:current ? 'アカウントのひもづけ' : 'アカウントのひもづけ解除'};
+  } else if (['castClockIn','castClockOut'].includes(action.type) || isCastAttendanceReview(action.type)) {
+    const person = linkedCastForActor(before,actor.id);
+    const previous = (before.castAttendance ?? []).find((row) => action.attendanceId ? row.id === action.attendanceId
+      : row.castId === person?.id && row.status === 'open');
+    const current = (after.castAttendance ?? []).find((row) => previous ? row.id === previous.id
+      : row.castId === person?.id && row.status === 'open');
+    if (current && !sameValue(previous,current)) {
+      const cast = [...after.cast,...(after.archivedCast ?? [])].find(({id}) => id === current.castId);
+      details = {businessDate:current.date,target:target('attendance',current.id,cast?.name ?? current.castId),
+        before:previous ?? null,after:current,reason:textReason(action.reason) || ({open:'出勤打刻',pending:'退勤打刻',approved:'勤怠を承認'})[current.status]};
+    }
   } else if (action.type === 'saveInitialSetSchedule') {
     const previous = before.initialSetSchedule ?? [];
     const current = after.initialSetSchedule ?? [];
     if (!sameValue(previous,current)) details = {target:target('settings',null,'時間帯別セット'),
       before:previous,after:current,reason:'初回セットを提案する時間帯を更新'};
+  } else if (action.type === 'saveCalculationSettings') {
+    const previous = getCalculationSettings(before);
+    const current = getCalculationSettings(after);
+    if (!sameValue(previous,current)) details = {target:target('settings',null,'税とサービス料'),
+      before:previous,after:current,reason:'新規来店の会計計算設定を更新'};
   } else if (action.type === 'stockAdjust') {
     const previous = before.stock.find(({ id }) => id === action.stockId);
     const current = after.stock.find(({ id }) => id === action.stockId);

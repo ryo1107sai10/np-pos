@@ -1,3 +1,5 @@
+import { calculationTaxGroup } from './calculation-settings.mjs';
+
 const defaults = Object.freeze({enabled:false,rateBps:0});
 const standardTaxRate = 1_000;
 
@@ -28,14 +30,13 @@ export function getCardFee(state, payments = []) {
   return Number((cardAmount * BigInt(rateBps) + 5_000n) / 10_000n);
 }
 
-export function addCardFeeTax(taxBreakdown, grossFee) {
+export function addCardFeeTax(taxBreakdown, grossFee, taxRounding = 'floor') {
   const previousGroup = taxBreakdown.find(({rate}) => rate === standardTaxRate);
   const previousTax = previousGroup?.tax ?? 0;
   const gross = BigInt(previousGroup?.base ?? 0) + BigInt(previousTax) + BigInt(grossFee);
   // Combine the two standard-rate amounts before rounding the tax embedded in the gross total.
-  const tax = Number(gross * BigInt(standardTaxRate) / BigInt(10_000 + standardTaxRate));
-  const group = {rate:standardTaxRate,base:Number(gross) - tax,tax};
+  const group = calculationTaxGroup(gross, standardTaxRate, { priceMode: 'inclusive', taxRounding });
   const breakdown = [...taxBreakdown.filter(({rate}) => rate !== standardTaxRate),group]
     .sort((first,second) => second.rate - first.rate);
-  return {breakdown,feeTax:tax - previousTax};
+  return {breakdown,feeTax:group.tax - previousTax};
 }

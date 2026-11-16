@@ -3,8 +3,9 @@ const timestamp = new Intl.DateTimeFormat('ja-JP', {
   hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
 });
 const japaneseNumber = new Intl.NumberFormat('ja-JP', { maximumFractionDigits: 6 });
-const moneyFields = new Set(['amount', 'total', 'subtotal', 'discount', 'price', 'value', 'cost', 'balance', 'creditLimit', 'balanceBefore', 'expectedCash', 'actualCash', 'discrepancy', 'cardFee', 'collected', 'net', 'manualAdvance', 'hourlyRate', 'pointRate']);
-const roles = { admin: '店舗管理者', manager: 'マネージャー', staff: 'スタッフ' };
+const moneyFields = new Set(['amount', 'total', 'subtotal', 'discount', 'price', 'value', 'cost', 'expectedCash', 'actualCash', 'discrepancy', 'cardFee', 'net', 'manualAdvance', 'hourlyRate', 'pointRate']);
+const omittedAuditFields = new Set(['receivable', 'receivableSales', 'recoveries', 'recoveryRows', 'creditLimit', 'creditEnabled', 'creditOverride']);
+const roles = { admin: '店舗管理者', manager: 'マネージャー', staff: 'スタッフ', cast:'キャスト' };
 
 const auditLabels = {
   discount: '値引き', discountRequest: '値引き申請', approveDiscount: '値引き承認', rejectDiscount: '値引き却下',
@@ -14,7 +15,7 @@ const auditLabels = {
   saveStoreSettings: '店舗設定の変更', saveLayout: '卓レイアウトの変更', importStoreConfiguration: '店舗設定の読み込み',
   saveCustomer: '顧客情報の登録・変更', setTicketCustomer: '伝票の顧客設定', correctSettledTicketCustomer: '会計済み伝票の顧客訂正',
   mergeCustomers: '顧客の統合', linkCustomer: '来店と顧客の関連づけ',
-  importCustomers: '顧客の一括登録', recoverReceivable: '売掛の回収',
+  importCustomers: '顧客の一括登録',
   recordCashMovement: '入出金の記録', close: '閉店・レジ締め',
   savePrintSettings: '印刷設定の変更', issuePrintDocument: '伝票・領収書の発行',
   saveAutoExtensionSettings: '自動延長設定の変更', setTableAutoExtension: '卓別の自動延長設定', syncAutoExtensions: '自動延長',
@@ -23,18 +24,23 @@ const auditLabels = {
   savePayrollDraft: '給与の下書き保存', finalizePayroll: '給与の確定', savePayrollRate: '時給の変更', savePayrollSettings: '給与設定の変更',
   requestDailyPay: '日払いの申請', reviewDailyPay: '日払いの審査', payDailyPay: '日払いの支給',
   saveTicketNote: '伝票メモの変更', adjustTicketEnd: '終了時刻の調整',
+  bindCastAccount:'キャストアカウントの設定', castClockIn:'出勤打刻', castClockOut:'退勤打刻', reviewCastAttendance:'勤怠の確認',
+  castRequestShift:'勤務希望の申請', castRequestDailyPay:'本人の日払い申請',
+  saveCalculationSettings:'税とサービス料の計算設定',
   saveShift: 'シフトの登録・更新', removeShift: 'シフトの削除',
   saveInitialSetSchedule: '時間帯別セットの変更',
 };
 
 const valueLabels = {
+  calculationSettings:'会計の計算設定', serviceRateBps:'サービス料率', serviceRounding:'サービス料の端数',
+  taxRounding:'消費税の端数', serviceBase:'サービス料の計算基準', priceMode:'メニュー価格',
+  beforeDiscount:'値引き前',afterDiscount:'値引き後',exclusive:'税抜価格',inclusive:'税込価格',
+  floor:'切り捨て',round:'四捨五入',ceil:'切り上げ',
   amount: '金額', total: '合計', subtotal: '小計', discount: '値引き額', status: '状態', payments: '支払い',
   deposits: '前受金', quantity: '数量', name: '名称', price: '単価', managerDiscountRateBps: '値引き上限',
   discountRequest: '値引き申請', discountDetails: '適用した値引き', commission: '歩合', stockMovements: '在庫の増減',
   menu: 'メニュー・プラン', cast: 'キャスト', stock: '在庫品目', tables: '卓', areas: 'エリア', tableIds: '使用卓',
-  balance: '売掛残高', creditLimit: '売掛上限', balanceBefore: '計上前の残高', dueDate: '支払期日',
-  collected: '回収済額', unpaid: '未回収', partial: '一部回収', overdue: '期限超過',
-  creditOverride: '上限超過の承認', collection: '回収', changedFields: '変更項目', creditEnabled: '売掛利用', customerId: '顧客ID', customerName: '顧客名',
+  changedFields: '変更項目', customerId: '顧客ID', customerName: '顧客名',
   kind: '種類', category: '理由区分', destination: '相手先・移動先',
   expectedCash: 'レジ理論残高', actualCash: 'レジ実残高', discrepancy: 'レジ差額',
   issueNumber: '発行回数', width: '用紙幅（mm）', storeName: '印字する店名', address: '住所', phone: '電話番号',
@@ -43,7 +49,7 @@ const valueLabels = {
   paused: '今回の停止', source: '操作', manual: '通知から停止', checkout: '通知から会計へ',
   method: '決済方法', reason: '理由', points: 'ポイント', cost: '原価', value: '評価額',
   request: '承認申請', approved: '承認', rejected: '却下', pending: '承認待ち', paid: '会計済み',
-  cancelled: '取消済み', departed: '退店済み', open: '利用中', cash: '現金', card: 'カード', qr: 'QR決済', bank: '振込', receivable: '売掛',
+  cancelled: '取消済み', departed: '退店済み', open: '利用中', cash: '現金', card: 'カード', qr: 'QR決済', bank: '振込',
   hourlyRate: '時給', effectiveDate: '適用開始日', net: '支給額', work: '勤務', allowances: '手当', deductions: '控除', manualAdvance: '手入力の日払い済み額',
   pointRate: 'ポイント換金単価', commissionRounding: '歩合の端数処理', commissionUnit: '歩合の丸め単位', dailyPayLimitBps: '日払い上限率',
   draft: '下書き', final: '確定', requested: '申請中', castName: 'キャスト名', month: '給与対象月',
@@ -59,10 +65,11 @@ export function operationReason({ title = '理由', required = true } = {}) {
   return inputLabel(title, `<textarea name="reason" rows="2" maxlength="120"${required ? ' required' : ''} placeholder="具体的な理由を入力"></textarea>`);
 }
 
-export function renderDiscountForm({ticket, subtotal, limit, role, reasonCodes}, {escape, yen}) {
+export function renderDiscountForm({ticket, subtotal, limit, role, reasonCodes, priceMode}, {escape, yen}) {
   const existing = ticket.discountRequest;
   const mode = existing?.mode ?? 'amount';
-  return `<p class="form-copy">税抜小計 ${yen(subtotal)} · 適用中の値引き ${yen(ticket.discount)}</p>
+  const subtotalLabel = priceMode === 'inclusive' ? '税込小計' : '税抜小計';
+  return `<p class="form-copy">${subtotalLabel} ${yen(subtotal)} · 適用中の値引き ${yen(ticket.discount)}</p>
     ${existing ? `<p class="ops-highlight" role="status">${yen(existing.amount)}の承認待ちです。新しい申請で差し替えられます。</p>` : ''}
     <div class="form-grid">
       ${inputLabel('指定方法', `<select name="discountMode"><option value="amount"${mode === 'amount' ? ' selected' : ''}>金額（円）</option><option value="percent"${mode === 'percent' ? ' selected' : ''}>率（%）</option></select>`)}
@@ -70,17 +77,22 @@ export function renderDiscountForm({ticket, subtotal, limit, role, reasonCodes},
     </div>
     ${inputLabel('理由区分', `<select name="reasonCode" required><option value="">選択してください</option>${Object.entries(reasonCodes).map(([key,value]) => `<option value="${escape(key)}"${existing?.reasonCode === key ? ' selected' : ''}>${escape(value)}</option>`).join('')}</select>`)}
     ${inputLabel('理由の詳細', `<textarea name="reason" rows="2" maxlength="120" required placeholder="例　クーポンを受領したため">${escape(existing?.reason ?? '')}</textarea>`)}
-    <p class="field-help" id="discount-preview" aria-live="polite">${role === 'manager' ? `小計の${limit / 100}%を超える場合は管理者の承認が必要です。` : '値引きは税抜小計に適用します。'}</p>`;
+    <p class="field-help" id="discount-preview" aria-live="polite">${role === 'manager' ? `小計の${limit / 100}%を超える場合は管理者の承認が必要です。` : `値引きは${subtotalLabel}に適用します。`}</p>`;
+}
+
+function visibleAuditFields(value) {
+  return Object.entries(value).filter(([field]) => !omittedAuditFields.has(field));
 }
 
 function readableValue(value, key) {
   if (value == null) return value;
   if (key === 'endsAt' && Number.isFinite(new Date(value).getTime())) return timestamp.format(value);
-  if (key === 'managerDiscountRateBps' || key === 'rateBps' || key === 'dailyPayLimitBps') return `${value / 100}%`;
+  if (['managerDiscountRateBps','rateBps','dailyPayLimitBps','serviceRateBps'].includes(key)) return `${value / 100}%`;
   if (typeof value === 'number' && moneyFields.has(key)) return `¥${japaneseNumber.format(value)}`;
   if (typeof value === 'string') return valueLabels[value] ?? value;
-  if (Array.isArray(value)) return value.map((entry) => readableValue(entry));
-  if (typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([field, entry]) =>
+  if (Array.isArray(value)) return value.filter((entry) => entry?.method !== 'receivable'
+    && (key !== 'changedFields' || !omittedAuditFields.has(entry))).map((entry) => readableValue(entry));
+  if (typeof value === 'object') return Object.fromEntries(visibleAuditFields(value).map(([field, entry]) =>
     [valueLabels[field] ?? field, readableValue(entry, field)]));
   return value;
 }
@@ -98,27 +110,31 @@ function auditTarget(target) {
 
 function auditValues(title, value, escape) {
   if (value == null || typeof value !== 'object' || Array.isArray(value)) return `<div><h4>${title}</h4><pre>${escape(displayValue(value))}</pre></div>`;
-  return `<div><h4>${title}</h4><dl>${Object.entries(value).map(([key, entry]) => `<div><dt>${escape(valueLabels[key] ?? key)}</dt><dd><pre>${escape(displayValue(entry,key))}</pre></dd></div>`).join('')}</dl></div>`;
+  return `<div><h4>${title}</h4><dl>${visibleAuditFields(value).map(([key, entry]) => `<div><dt>${escape(valueLabels[key] ?? key)}</dt><dd><pre>${escape(displayValue(entry,key))}</pre></dd></div>`).join('')}</dl></div>`;
 }
 
 export function renderAuditLog({entries, loading, more, failed}, {escape, icon}) {
-  const rows = entries.map((entry) => {
+  const visible = entries.filter((entry) => entry.action !== 'recoverReceivable' && entry.target?.kind !== 'receivable'
+    && !(entry.action === 'saveCustomer' && entry.after?.changedFields?.length
+      && entry.after.changedFields.every((field) => omittedAuditFields.has(field))));
+  const rows = visible.map((entry) => {
     const at = new Date(entry.at);
     const date = Number.isFinite(at.getTime()) ? timestamp.format(at) : '—';
     const label = auditLabels[entry.action] ?? entry.action;
+    const reason = entry.action === 'settle' && entry.after?.receivable?.creditOverride ? '会計を確定' : entry.reason;
     return `<details class="ops-audit-row"><summary>
       <span class="ops-audit-header"><span class="ops-audit-action">${escape(label)}</span><span>${escape(auditTarget(entry.target))}</span></span>
       <span class="ops-audit-meta"><time>${escape(date)}</time><span>${escape(entry.actor?.label ?? entry.actor?.id ?? '—')}</span>
         ${roles[entry.actor?.role] ? `<span>${roles[entry.actor.role]}</span>` : ''}</span>
     </summary><div class="ops-audit-detail">
       ${['correctSettledTicketCustomer', 'correctSettledTicketPayments'].includes(entry.action) ? `<p class="ops-audit-reason"><strong>会計の営業日</strong> ${escape(entry.businessDate)}</p>` : ''}
-      ${entry.reason ? `<p class="ops-audit-reason"><strong>理由</strong> ${escape(entry.reason)}</p>` : ''}
+      ${reason ? `<p class="ops-audit-reason"><strong>理由</strong> ${escape(reason)}</p>` : ''}
       <div class="ops-audit-compare">${auditValues('変更前', entry.before, escape)}${auditValues('変更後', entry.after, escape)}</div>
     </div></details>`;
   }).join('');
   return `<div class="ops-audit">
     ${failed ? `<p role="alert" class="form-error">${escape(failed)}</p>` : ''}
-    ${rows || (loading || failed ? '' : '<p class="form-copy">監査ログはまだありません。値引きや在庫調整を記録すると表示されます。</p>')}
+    ${rows || (loading || failed ? '' : '<p class="form-copy">表示できる監査記録がありません。</p>')}
     ${loading ? '<p class="form-copy" role="status">監査ログを読み込んでいます。</p>' : ''}
     ${more || failed ? `<button type="button" class="btn btn-secondary" data-action="audit-more"${loading ? ' disabled' : ''}>${icon('history', 16)}${failed ? '読み込みを再試行' : '以前の記録を表示'}</button>` : ''}
     </div>`;

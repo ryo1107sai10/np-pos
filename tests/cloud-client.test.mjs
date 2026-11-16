@@ -11,7 +11,7 @@ const account = {
 const cloudConfig = { firebase: { apiKey: 'test-key', projectId: 'test-project' }, apiBase: 'https://api.example.test' };
 const failure = (code, status) => Response.json({ error: { code, message: code } }, { status });
 
-function service(t, { verified = true, role = 'admin', command, project = (value) => value } = {}) {
+function service(t, { verified = true, role = 'admin', command, readState, project = (value) => value } = {}) {
   let online = true;
   let revision = 0;
   let state = { revision: 0 };
@@ -48,6 +48,8 @@ function service(t, { verified = true, role = 'admin', command, project = (value
         return Response.json({ stores: [{ id: 'shop', name: '店', role, hasState: revision > 0 }] });
       }
       if (path.endsWith('/state')) {
+        const override = readState?.({role,revision,state,query});
+        if (override) return override;
         if (['cast', 'trainee'].includes(role)) return Response.json({ revision, role, restricted: true });
         return Response.json(query.get('since') === String(revision)
           ? { revision, role, unchanged: true } : { state: project(state, role), revision, role });
@@ -149,6 +151,57 @@ test('restricted roles do not receive operational data and an upgraded role relo
   await client.retrySync();
   assert.equal(client.snapshot.restricted, false);
   assert.deepEqual(client.snapshot.state, { revision: 0 });
+});
+
+test('cast clients accept only scoped responses and discard a late privileged response after demotion', async (t) => {
+  const personal = {cast:{id:'cast1',name:'本人'},date:'2026-11-16',shifts:[],attendances:[]};
+  let blockAdminRead = false;
+  let releaseAdmin;
+  let sawAdminRead;
+  let legacy = false;
+  const adminRead = new Promise((resolve) => {sawAdminRead = resolve;});
+  const {client,calls,snapshots,setRevision,setRole} = service(t,{
+    readState({role,revision,state}) {
+      if (role === 'admin' && blockAdminRead) {
+        sawAdminRead();
+        return new Promise((resolve) => { releaseAdmin = () => resolve(Response.json({revision,role,state})); });
+      }
+      if (role === 'cast') return Response.json(legacy ? {role,revision,state} : {role,revision,scope:'cast',state:personal});
+    },
+    command(payload,{setRevision}) {
+      assert.deepEqual(payload.command,{type:'castClockIn'});
+      assert.equal(payload.expectedRevision,1);
+      setRevision(2,{confidential:'another privileged snapshot'});
+      return Response.json({role:'cast',revision:2,scope:'cast',state:{...personal,openClock:{id:'clock1'}}});
+    },
+  });
+  setRevision(1,{confidential:'administrator data'});
+  await client.start();
+  await client.enterStore('shop');
+  assert.equal(client.snapshot.state.confidential,'administrator data');
+  blockAdminRead = true;
+  const older = client.retrySync();
+  await adminRead;
+  setRole('cast');
+  await client.retrySync();
+  assert.equal(client.snapshot.store.role,'cast');
+  assert.equal(client.snapshot.restricted,false);
+  assert.deepEqual(client.snapshot.state,personal);
+  releaseAdmin();
+  await older;
+  assert.equal(client.snapshot.store.role,'cast');
+  assert.deepEqual(client.snapshot.state,personal);
+
+  await client.submit({type:'castClockIn'});
+  assert.deepEqual(client.snapshot.state.openClock,{id:'clock1'});
+  assert.equal(client.snapshot.revision,2);
+  assert.equal(calls.filter(({path}) => path.endsWith('/commands')).length,1);
+  legacy = true;
+  await client.retrySync();
+  assert.equal(client.snapshot.restricted,true);
+  assert.equal(client.snapshot.state,null);
+  assert.throws(() => client.submit({type:'castClockOut'}),{code:'store-restricted'});
+  assert.ok(snapshots.filter(({store}) => store?.role === 'cast').every(({state}) => state?.confidential === undefined));
 });
 
 test('same-revision demotion removes privileged data before loading the staff projection', async (t) => {

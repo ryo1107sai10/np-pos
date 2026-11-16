@@ -6,7 +6,7 @@ import { apply, createDemo, quote, summary } from '../docs/engine.mjs';
 import { getTeamPerformance } from '../docs/team-performance.mjs';
 import worker from './index.mjs';
 import {
-  applyCommand, changeMember, createStore, inviteMember, listAudit, listMembers, listStores, migrateState, readState, revokeInvite,
+  applyCommand, changeMember, createStore, getStoreOverview, inviteMember, listAudit, listMembers, listStores, migrateState, readState, revokeInvite,
 } from './database.mjs';
 
 const schema = readFileSync(new URL('schema.sql', import.meta.url), 'utf8');
@@ -69,12 +69,168 @@ test('store membership isolates accounts and only a verified matching invite get
   await assert.rejects(changeMember(db, owner, tenant, owner.uid, 'staff'), { code: 'primary-member' });
   await changeMember(db, owner, tenant, helper.uid, 'cast');
   const payload = await readState(db, helper, tenant, 0);
-  assert.deepEqual(payload, { restricted: true, role: 'cast', revision: 0 });
+  assert.deepEqual(payload, { state: null, restricted: true, scope:'cast', role: 'cast', revision: 0 });
   await changeMember(db, owner, tenant, helper.uid);
   await assert.rejects(readState(db, helper, tenant, null), { code: 'store-access' });
+  assert.equal((await listStores(db,owner)).stores[0].hasState,false);
   const removed = await inviteMember(db, owner, tenant, outsider.email, 'manager');
   await revokeInvite(db, owner, tenant, removed.invite.id);
   assert.equal((await listStores(db, outsider)).stores.length, 0);
+});
+
+test('cast identity is linked by the store administrator and projected only for its authenticated owner', async (t) => {
+  const db = database();
+  const tenant = await store(db);
+  const alice = {uid:'cast-alice',email:'alice@example.test'};
+  const bob = {uid:'cast-bob',email:'bob@example.test'};
+  for (const [person,role] of [[alice,'cast'],[bob,'cast'],[helper,'manager'],[outsider,'staff']]) {
+    await inviteMember(db,owner,tenant,person.email,role);
+    await listStores(db,person);
+  }
+  let now = Date.parse('2026-11-16T21:00:00+09:00');
+  t.mock.method(Date,'now',() => now);
+  const date = '2026-11-16';
+  const read = (actor,revision = null) => readState(db,actor,tenant,revision);
+  const run = (actor,revision,name,action) => command(db,actor,tenant,revision,`cast-scope-test-${name}`,action);
+  const bind = (memberUid,castId) => ({type:'bindCastAccount',memberUid,castId});
+  await assert.rejects(run(owner,0,'uninitialized',bind(alice.uid,'cast1')),{code:'store-not-initialized'});
+  const source = createDemo('live',now);
+  source.castAccounts = [{uid:alice.uid,castId:'cast2'}];
+  const initialized = await migrateState(db,owner,tenant,{operationId:'cast-identity-import-01',snapshot:source});
+  assert.equal(initialized.state.castAccounts,undefined);
+  assert.deepEqual(await read(alice),{role:'cast',scope:'cast',revision:1,state:null,restricted:true});
+  await assert.rejects(run(helper,1,'privileged',bind(alice.uid,'cast1')),{code:'forbidden'});
+  await assert.rejects(run(owner,1,'manager-member',bind(helper.uid,'cast1')),{code:'invalid-cast-member'});
+  await assert.rejects(run(owner,1,'external-member',bind('unaffiliated','cast1')),{code:'invalid-cast-member'});
+  await run(owner,1,'bind-alice',bind(alice.uid,'cast1'));
+  await assert.rejects(run(owner,2,'already-linked',bind(bob.uid,'cast1')),{code:'rejected-command'});
+  await run(owner,2,'bind-bob',bind(bob.uid,'cast2'));
+  const aliceRead = await read(alice,3);
+  assert.equal(aliceRead.scope,'cast');
+  assert.equal(aliceRead.revision,3);
+  assert.equal(aliceRead.state.cast.id,'cast1');
+  assert.equal((await read(bob)).state.cast.id,'cast2');
+  for (const field of ['tables','tickets','customers','stock','auditLog','closedDays','castAccounts','cashMovements']) {
+    assert.equal(aliceRead.state[field],undefined);
+  }
+  assert.equal((await read(helper)).state.castAccounts,undefined);
+  assert.equal((await read(outsider)).state.castAccounts,undefined);
+  await assert.rejects(listAudit(db,alice,tenant),{code:'forbidden'});
+  await assert.rejects(listMembers(db,alice,tenant),{code:'forbidden'});
+  await assert.rejects(run(alice,3,'forged-id',{type:'castClockIn',castId:'cast2'}),{code:'invalid-command'});
+  await assert.rejects(run(alice,3,'operating-denied',{type:'open',openingCash:0}),{code:'forbidden'});
+
+  const shift = await run(alice,3,'request-shift',{type:'castRequestShift',date,startMinute:1200,endMinute:1500,note:'本人の勤務希望'});
+  assert.equal(shift.state.shifts[0].note,'本人の勤務希望');
+  assert.deepEqual((await read(bob)).state.shifts,[]);
+  assert.equal((await read(helper)).state.shifts[0].castId,'cast1');
+  await assert.rejects(run(alice,3,'stale-punch',{type:'castClockIn'}),{code:'revision-conflict'});
+  const punchedIn = await run(alice,4,'punch-in',{type:'castClockIn'});
+  assert.equal(punchedIn.state.openClock.castId,'cast1');
+  const clockInAt = punchedIn.state.openClock.clockInAt;
+  assert.equal(clockInAt,now);
+  assert.deepEqual((await read(bob)).state.attendances,[]);
+  now += 90 * 60_000;
+  const punchedOut = await run(alice,5,'punch-out',{type:'castClockOut'});
+  const [attendance] = punchedOut.state.attendances;
+  assert.equal(attendance.minutes,90);
+  assert.equal(attendance.status,'pending');
+  const review = {type:'reviewCastAttendance',attendanceId:attendance.id,decision:'approve'};
+  await assert.rejects(run(outsider,6,'review-denied',review),{code:'forbidden'});
+  const reviewed = await run(helper,6,'review-approved',review);
+  assert.equal(reviewed.state.castAttendance[0].status,'approved');
+  assert.equal((await read(outsider)).state.castAttendance,undefined);
+  assert.equal((await read(alice)).state.attendances[0].status,'approved');
+  assert.deepEqual((await read(owner)).state.attendances,[{castId:'cast1',date,minutes:90,status:'approved'}]);
+  const rated = await run(owner,7,'own-rate',{type:'savePayrollRate',effectiveDate:date,hourlyRate:3500,castId:'cast1'});
+  assert.equal(rated.revision,8);
+  const dailyPay = await run(alice,8,'daily-pay',{type:'castRequestDailyPay',month:'2026-11',amount:1000,reason:'本人の日払い申請'});
+  assert.equal(dailyPay.state.payroll.draft.hourlyPay,5250);
+  assert.equal(dailyPay.state.dailyPays[0].amount,1000);
+  assert.deepEqual((await read(bob)).state.dailyPays,[]);
+  assert.ok((await listAudit(db,owner,tenant)).events.some(({actor}) => actor.id === alice.uid));
+});
+
+test('changing or revoking cast membership atomically invalidates links and old workspace revisions', async () => {
+  const db = database();
+  const tenant = await store(db);
+  await inviteMember(db,owner,tenant,helper.email,'cast');
+  await listStores(db,helper);
+  const read = (actor) => readState(db,actor,tenant,null);
+  const run = (actor,revision,name,action) => command(db,actor,tenant,revision,`cast-revoke-test-${name}`,action);
+  await run(owner,0,'initialize',{type:'open',openingCash:0});
+  const bind = {type:'bindCastAccount',memberUid:helper.uid,castId:'cast1'};
+  await run(owner,1,'bind-cast',bind);
+  await changeMember(db,owner,tenant,helper.uid,'staff');
+  assert.equal((await read(owner)).revision,3);
+  assert.deepEqual((await read(owner)).state.castAccounts,[]);
+  assert.equal((await read(helper)).role,'staff');
+  await changeMember(db,owner,tenant,helper.uid,'cast');
+  assert.deepEqual(await read(helper),{state:null,scope:'cast',role:'cast',revision:3,restricted:true});
+  await assert.rejects(run(owner,2,'stale-bind',bind),{code:'revision-conflict'});
+  await run(owner,3,'bind-renewed',bind);
+  await changeMember(db,owner,tenant,helper.uid);
+  assert.equal((await read(owner)).revision,5);
+  assert.deepEqual((await read(owner)).state.castAccounts,[]);
+  await assert.rejects(read(helper),{code:'store-access'});
+  await inviteMember(db,owner,tenant,helper.email,'cast');
+  await listStores(db,helper);
+  assert.deepEqual(await read(helper),{state:null,scope:'cast',role:'cast',revision:5,restricted:true});
+  assert.equal((await listAudit(db,owner,tenant)).events.filter(({reason}) => /所属・権限変更/.test(reason)).length,2);
+});
+
+test('multi-store overview returns only administrator aggregates and caps the initial list', async (t) => {
+  const db = database();
+  const now = Date.parse('2026-11-16T21:00:00+09:00');
+  t.mock.method(Date,'now',() => now);
+  const date = '2026-11-16';
+  const main = (await createStore(db,owner,'本店')).store.id;
+  const invited = (await createStore(db,helper,'管理を委任された店舗')).store.id;
+  const managerOnly = (await createStore(db,outsider,'マネージャーのみの店舗')).store.id;
+  await inviteMember(db,helper,invited,owner.email,'admin');
+  await listStores(db,owner);
+  await inviteMember(db,outsider,managerOnly,owner.email,'manager');
+  await inviteMember(db,owner,main,outsider.email,'manager');
+  await listStores(db,owner);
+  await listStores(db,outsider);
+  const live = createDemo('live',now);
+  await migrateState(db,owner,main,{operationId:'overview-migrate-12345',snapshot:live});
+  const overview = await getStoreOverview(db,owner);
+  assert.equal(overview.stores.length,2);
+  assert.deepEqual(overview.stores.find(({id}) => id === main),{id:main,name:'本店',date,status:'open',
+    dailySales:summary(live).sales,monthlySales:summary(live).sales,hasState:true});
+  assert.deepEqual(overview.stores.find(({id}) => id === invited),{id:invited,name:'管理を委任された店舗',date,status:'closed',
+    dailySales:0,monthlySales:0,hasState:false});
+  assert.deepEqual((await getStoreOverview(db,outsider)).stores.map(({id}) => id),[managerOnly]);
+  await changeMember(db,helper,invited,owner.uid,'staff');
+  assert.deepEqual((await getStoreOverview(db,owner)).stores.map(({id}) => id),[main]);
+  for (let index = 0; index < 20; index++) await createStore(db,owner,`店舗 ${index + 1}`);
+  const limited = await getStoreOverview(db,owner);
+  assert.equal(limited.stores.length,20);
+  assert.equal(limited.truncated,true);
+  const unauthorized = await worker.fetch(new Request('https://api.test/api/stores/overview'),{FIREBASE_PROJECT_ID:'test-project',DB:db});
+  assert.equal(unauthorized.status,401);
+  assert.equal((await unauthorized.json()).error.code,'unauthenticated');
+});
+
+test('calculation settings are admin-only and migration rejects invalid ticket settings', async () => {
+  const db = database();
+  const tenant = await store(db);
+  await inviteMember(db,owner,tenant,helper.email,'manager');
+  await listStores(db,helper);
+  const settings = {serviceRateBps:1200,serviceRounding:'ceil',taxRounding:'round',serviceBase:'beforeDiscount',priceMode:'inclusive'};
+  const save = {type:'saveCalculationSettings',settings};
+  const run = (actor,revision,name,action) => command(db,actor,tenant,revision,`calculation-policy-${name}`,action);
+  await assert.rejects(run(helper,0,'manager-denied',save),{code:'forbidden'});
+  await assert.rejects(run(owner,0,'wrong-mode',{...save,settings:{...settings,priceMode:'unknown'}}),{code:'invalid-command'});
+  const saved = await run(owner,0,'saved-admin',save);
+  assert.deepEqual(saved.state.calculationSettings,settings);
+
+  const importTenant = await store(db);
+  const badSnapshot = createDemo('live');
+  badSnapshot.tickets[0].calculationSettings = {...settings,taxRounding:'invalid'};
+  await assert.rejects(migrateState(db,owner,importTenant,{operationId:'invalid-settings-import-01',snapshot:badSnapshot}),{code:'invalid-snapshot'});
+  assert.equal((await readState(db,owner,importTenant,null)).revision,0);
 });
 
 test('development engine rules execute server-side and only one conflicting seating commits', async () => {

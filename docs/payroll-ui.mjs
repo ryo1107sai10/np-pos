@@ -2,6 +2,7 @@ import { getDailyPayLimit, getPayrollDailyPays, getPayrollDraft, getPayrollRates
 
 const castMembers = (state) => [...state.cast, ...(state.archivedCast ?? [])];
 const hours = (minutes) => `${Math.floor(minutes / 60)}時間 ${minutes % 60}分`;
+const ruleBases = {fixed:'定額',hourlyPay:'時給分の割合',commission:'確定歩合の割合',pointPay:'ポイント換金分の割合',baseGross:'時給・歩合・ポイントの合計に対する割合'};
 
 function button(text, action, icon, glyph, tone = '') {
   return `<button type="button" class="btn ${tone}" data-action="${action}">${icon(glyph,16)}${text}</button>`;
@@ -14,6 +15,10 @@ function listAmounts(rows, {escape,yen}) {
 function details(pay, api) {
   return listAmounts([['時給分',pay.hourlyPay],['確定歩合',pay.commission],['ポイント換金',pay.pointPay],
     ['手当合計',pay.allowanceTotal],['控除合計',-pay.deductionTotal],['日払い済み',-pay.advance]],api);
+}
+
+function ruleAmounts(pay,api) {
+  return listAmounts((pay.statementItems ?? []).map(({label,kind,amount})=>[label,kind === 'deduction' ? -amount : amount]),api);
 }
 
 function panel(title, content) {
@@ -72,6 +77,7 @@ export function renderPayroll(state, api) {
     `<p class="field-help">承認済みの勤務時間 ${hours(pay.minutes)}</p>${pay.work.length ? workDetails(pay,api) : '<p class="field-help">勤務時間は給与の下書きで入力できます。</p>'}
     <details class="payroll-rate-history"><summary>登録済みの時給</summary>${rates.length ? listAmounts(rates.map(({effectiveDate,hourlyRate}) => [effectiveDate,hourlyRate]),api) : '<p class="field-help">このキャストの時給は登録されていません。</p>'}</details>`)}</div>
     ${pay.commissionDetails.length ? panel('確定歩合の内訳', listAmounts(pay.commissionDetails.map(({name,amount}) => [name,amount]),api)) : ''}
+    ${pay.statementItems?.length ? panel('計算テンプレートの内訳',ruleAmounts(pay,api)) : ''}
     ${panel('日払い',dailyPayRows(state,selection,api,finalized))}
     <p class="field-help">店舗で登録した手当と控除を集計します。源泉徴収・社会保険料の自動計算は対象外です。</p></div>`;
 }
@@ -121,12 +127,37 @@ export function readPayrollDraft(form, selection) {
     manualAdvance:Number(new FormData(form).get('manualAdvance'))};
 }
 
-export function renderPayrollSettings(state) {
+export function renderPayrollTemplateRows(rules,{escape,icon}) {
+  return rules.map((row,index)=>`<div class="payroll-rule-row" data-payroll-rule>
+    <div class="form-grid">
+      ${input('項目名',`<input name="payrollRuleLabel" maxlength="60" value="${escape(row.label ?? '')}" required>`)}
+      ${input('区分',`<select name="payrollRuleKind"><option value="allowance">手当</option><option value="deduction"${row.kind === 'deduction' ? ' selected' : ''}>控除</option></select>`)}
+      ${input('計算方法',`<select name="payrollRuleBasis">${Object.entries(ruleBases).map(([basis,name])=>`<option value="${basis}"${row.basis === basis ? ' selected' : ''}>${name}</option>`).join('')}</select>`)}
+      <label class="field"><span data-payroll-rule-unit>${row.basis && row.basis !== 'fixed' ? '割合（%）' : '金額（円）'}</span><input name="payrollRuleValue" type="number" min="0"
+        max="${row.basis && row.basis !== 'fixed' ? '100' : '100000000'}" step="${row.basis && row.basis !== 'fixed' ? '0.01' : '1'}"
+        value="${row.value == null ? '' : row.basis === 'fixed' ? row.value : row.value / 100}" inputmode="decimal" required></label>
+    </div><button type="button" class="btn btn-quiet" data-action="payroll-remove-rule" data-id="${index}">${icon('x',16)}削除</button></div>`).join('');
+}
+
+export function readPayrollTemplateRows(form) {
+  const data = new FormData(form);
+  const labels = data.getAll('payrollRuleLabel');
+  const kinds = data.getAll('payrollRuleKind');
+  const bases = data.getAll('payrollRuleBasis');
+  const values = data.getAll('payrollRuleValue');
+  return labels.map((label,index)=>({label,kind:kinds[index],basis:bases[index],value:values[index] === '' ? null
+    : bases[index] === 'fixed' ? Number(values[index]) : Math.round(Number(values[index]) * 100)}));
+}
+
+export function renderPayrollSettings(state,api) {
   const setting = getPayrollSettings(state);
   return `<div class="form-grid">${input('1ポイントあたりの換金額（円）',yenInput('payrollPointRate',setting.pointRate,true))}
     ${input('歩合の端数処理',`<select name="payrollRounding"><option value="floor"${setting.commissionRounding === 'floor' ? ' selected' : ''}>切り捨て</option><option value="nearest"${setting.commissionRounding === 'nearest' ? ' selected' : ''}>四捨五入</option></select>`)}
     ${input('歩合の丸め単位',`<select name="payrollUnit">${[1,10,100,1000].map((unit) => `<option value="${unit}"${setting.commissionUnit === unit ? ' selected' : ''}>${unit}円</option>`).join('')}</select>`)}
-    ${input('日払い上限の目安（%）',`<input type="number" name="dailyPayLimit" min="0" max="100" step="0.01" value="${setting.dailyPayLimitBps / 100}" required inputmode="decimal">`)}</div>`;
+    ${input('日払い上限の目安（%）',`<input type="number" name="dailyPayLimit" min="0" max="100" step="0.01" value="${setting.dailyPayLimitBps / 100}" required inputmode="decimal">`)}</div>
+    <section class="payroll-edit-section"><h3>支給明細の計算テンプレート</h3><p class="field-help">全キャストの下書きに共通で適用します。確定した明細は確定時点の金額で保存されます。</p>
+      <div data-payroll-rules>${renderPayrollTemplateRows(setting.statementRules ?? [],api)}</div>
+      ${button('計算項目を追加','payroll-add-rule',api.icon,'plus')}</section>`;
 }
 
 export function renderDailyPayRequest(state, selection, {yen}) {
@@ -152,5 +183,6 @@ export function renderPayrollPrint(record, {escape,yen,storeName}) {
     ${panel('勤務の内訳',pay.work.length ? workDetails(pay,{escape,yen}) : '<p>勤務時間の登録なし</p>')}
     ${pay.allowances.length ? panel('手当',listAmounts(pay.allowances.map(({label,amount}) => [label,amount]),{escape,yen})) : ''}
     ${pay.deductions.length ? panel('控除',listAmounts(pay.deductions.map(({label,amount}) => [label,amount]),{escape,yen})) : ''}
+    ${pay.statementItems?.length ? panel('計算テンプレートの内訳',ruleAmounts(pay,{escape,yen})) : ''}
     <p>店舗で登録した手当・控除を記載しています。源泉徴収・社会保険料の自動計算は対象外です。</p></div>`;
 }

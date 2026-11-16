@@ -3,7 +3,7 @@ import { isAssignedCustomer } from './customers.mjs';
 import { getTicketTableLabels, quote } from './engine.mjs';
 import { getReportPeriod } from './report-period.mjs';
 
-const methods = { cash:'現金', card:'カード', qr:'QR決済', receivable:'売掛' };
+const methods = { cash:'現金', card:'カード', qr:'QR決済' };
 const statuses = { paid:'会計済み', departed:'退店済み', cancelled:'会計取消', void:'伝票取消' };
 const time = new Intl.DateTimeFormat('ja-JP',{timeZone:'Asia/Tokyo',hour:'2-digit',minute:'2-digit',hourCycle:'h23'});
 let remembered;

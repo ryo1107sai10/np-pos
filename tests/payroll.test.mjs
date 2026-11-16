@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { apply, createDemo, quote, summary } from '../docs/engine.mjs';
-import { getDailyPayLimit, getDailyPayTotals, getPayrollDailyPays, getPayrollDraft, previewPayroll } from '../docs/payroll.mjs';
+import { getDailyPayLimit, getDailyPayTotals, getPayrollDailyPays, getPayrollDraft, getPayrollSettings, previewPayroll } from '../docs/payroll.mjs';
 import { buildDailyReportCsv } from '../docs/report-export.mjs';
 import { getReportDay, getReportPeriod } from '../docs/report-period.mjs';
 import { projectState, validateSnapshot, verifyCommand } from '../server/policy.mjs';
@@ -93,6 +93,61 @@ test('applies effective-dated hourly rates, approved attendance, point conversio
     assert.throws(() => verifyCommand(role,payDraft()),{code:'forbidden'});
     assert.equal(projectState(state,role,'member')?.payroll,undefined);
   }
+});
+
+test('ordered payroll statement rules use fixed and exact percentage amounts and stay frozen after finalization', () => {
+  let state = run(shop(),rate(3_500));
+  const statementRules = [
+    {label:'固定手当',kind:'allowance',basis:'fixed',value:500},
+    {label:'時給分の控除',kind:'deduction',basis:'hourlyPay',value:500},
+    {label:'歩合手当',kind:'allowance',basis:'commission',value:1_000},
+    {label:'ポイント調整',kind:'deduction',basis:'pointPay',value:250},
+    {label:'基本合計の控除',kind:'deduction',basis:'baseGross',value:2_000},
+  ];
+  const settings = (value) => ({type:'savePayrollSettings',settings:value});
+  state = run(state,settings({pointRate:30,commissionRounding:'floor',commissionUnit:100,statementRules}));
+  state = run(state,settings({dailyPayLimitBps:7_500}));
+  assert.deepEqual(getPayrollSettings(state).statementRules,statementRules);
+  const ordered = visit(state);
+  state = run(ordered.state,{type:'settle',ticketId:ordered.id,payments:[{method:'cash',amount:quote(ordered.state,ordered.id).remaining}]});
+  state = run(state,payDraft({allowances:[{label:'手入力の手当',amount:100}],deductions:[{label:'手入力の控除',amount:20}],manualAdvance:50}));
+  const pay = previewPayroll(state,getPayrollDraft(state,month,castId));
+  assert.deepEqual(pay.statementItems,statementRules.map((rule,index) => ({...rule,amount:[500,525,240,5,2616][index]})));
+  assert.deepEqual(pay.allowances,[{label:'手入力の手当',amount:100}]);
+  assert.equal(pay.allowanceTotal,840);
+  assert.equal(pay.deductionTotal,3166);
+  assert.equal(pay.net,10704);
+  state = run(state,finalize);
+  state = run(state,settings({statementRules:[]}));
+  assert.deepEqual(getPayrollSettings(state).statementRules,[]);
+  assert.deepEqual(getPayrollDraft(state,month,castId).snapshot,pay);
+  assert.deepEqual(validateSnapshot(state).payroll.records[0].snapshot,pay);
+  const tampered = structuredClone(state);
+  tampered.payroll.records[0].snapshot.statementItems[0].amount += 1;
+  assert.throws(() => validateSnapshot(tampered),{code:'invalid-snapshot'});
+});
+
+test('old statements migrate without a template and unsafe amounts or bases are rejected', () => {
+  let state = run(shop(),rate(3_500));
+  const rule = {label:'調整',kind:'deduction',basis:'fixed',value:20_000};
+  const settings = (statementRules) => ({type:'savePayrollSettings',settings:{statementRules}});
+  for (const invalid of [null,[{...rule,basis:'*'}],[{...rule,kind:'bonus'}],[{...rule,basis:'hourlyPay',value:10_001}],
+    [{...rule,value:-1}],Array(21).fill(rule)]) {
+    assert.throws(() => run(state,settings(invalid)),/支給明細/);
+  }
+  assert.throws(() => run(state,settings([rule]),now,manager),/権限/);
+  const borrowed = run(run(state,settings([rule])),payDraft());
+  assert.equal(previewPayroll(borrowed,getPayrollDraft(borrowed,month,castId)).net,-9500);
+  assert.throws(() => run(borrowed,finalize),/マイナス/);
+
+  state = run(run(state,payDraft()),finalize);
+  delete state.payroll.settings.statementRules;
+  delete state.payroll.records[0].snapshot.settings.statementRules;
+  delete state.payroll.records[0].snapshot.statementItems;
+  const migrated = validateSnapshot(state);
+  const final = getPayrollDraft(migrated,month,castId).snapshot;
+  assert.deepEqual(final.statementItems,[]);
+  assert.equal(final.net,10500);
 });
 
 test('daily pay approval and payout adjust one register entry and the locked month only', () => {

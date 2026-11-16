@@ -118,20 +118,20 @@ export function renderAnalytics(page, state, api) {
   if (product) {
     const itemTotal = products.reduce((total,{sales}) => total + sales,0);
     return `<div class="lr-view analytics-view">${controls}${caveat}
-      ${metrics([['商品小計',yen(itemTotal),'値引き・サービス料・税の計算前'],['商品数',products.length],['対象の営業日',days.length]])}
+      ${metrics([['商品小計',yen(itemTotal),'値引き・サービス料を加味する前の注文金額'],['商品数',products.length],['対象の営業日',days.length]])}
       ${panel('商品別の内訳',products.length ? productRows : '<p class="field-help">この期間に会計済みの商品はありません。</p>')}</div>`;
   }
   const comparison = previousSales == null ? '比較期間の営業データなし'
     : `直前の同じ日数の期間 ${yen(previousSales)}`;
   const tender = totals.hasCombinedOnlyPayments ? totals.payments : totals.tenderPayments;
-  const tenderRows = [...methods.map(([key,label]) => [label,yen(tender[key])]),['売掛',yen(totals.receivableSales)]];
+  const tenderRows = methods.map(([key,label]) => [label,yen(tender[key])]);
   if (!totals.hasCombinedOnlyPayments) tenderRows.push(['前受金の充当',yen(totals.depositsApplied)]);
   return `<div class="lr-view analytics-view">${controls}${caveat}
     ${metrics([['確定売上',yen(totals.sales),comparison],['客単価',yen(averageSpend),`${totals.guests}名`],
-      ['売掛比率',percent(totals.receivableSales,totals.sales)],['指名のある会計',complete ? percent(data.withNomination,totals.tickets) : '—'],
+      ['指名のある会計',complete ? percent(data.withNomination,totals.tickets) : '—'],
       ['サービス料比率',complete ? percent(data.service,totals.sales) : '—']])}
     <div class="lr-split">${barChart('売上の推移',days,'sales',api)}${barChart('客単価の推移',days,'averageSpend',api)}</div>
-    <div class="lr-split">${panel(totals.hasCombinedOnlyPayments ? '決済別入金（前受金を含む）と売掛' : '決済別内訳',rows(['区分','金額'],tenderRows,escape))}
+    <div class="lr-split">${panel(totals.hasCombinedOnlyPayments ? '決済別入金（前受金を含む）' : '決済別内訳',rows(['区分','金額'],tenderRows,escape))}
       ${panel('商品別売上 上位5件',products.length ? rows(['商品','数量','商品小計'],products.slice(0,5).map(({name,quantity,sales}) => [name,quantity,yen(sales)]),escape)
         : '<p class="field-help">この期間に会計済みの商品はありません。</p>')}</div>
     ${panel('営業日ごとの実績',rows(['営業日','確定売上','組数','客数','客単価'],days.map(({date,sales,tickets,guests,averageSpend:spend}) =>

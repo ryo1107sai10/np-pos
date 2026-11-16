@@ -1,3 +1,5 @@
+import { defaultItemTaxRateBps } from './calculation-settings.mjs';
+
 const tabs = [
   { id: 'menu', label: 'メニュー', glyph: 'store' },
   { id: 'plans', label: 'セット・延長', glyph: 'clock' },
@@ -183,13 +185,26 @@ function stockInspector(item, api) {
     <div class="store-editor-toggles">${toggle('在庫一覧に表示する', 'stock-visible', item.hidden !== true)}</div>`;
 }
 
+function menuCalculationInputs(item, icon) {
+  const taxRate = (item.taxRate ?? defaultItemTaxRateBps) / 100;
+  const serviceEligible = item.serviceEligible !== false;
+  return `<details class="store-editor-advanced"><summary>${icon('cash', 16)}<span>税率・サービス料</span>
+    <small>${taxRate}% · ${serviceEligible ? 'サービス料対象' : '対象外'}</small>${icon('chevron-down', 14)}</summary>
+    <div class="store-editor-advanced-body">
+      ${numberInput('消費税率（%）', 'tax-rate', taxRate, { max: 100, step: 0.01, required: true })}
+      <div class="store-editor-toggles">${toggle('サービス料の対象にする', 'service-eligible', serviceEligible)}</div>
+    </div>
+  </details>`;
+}
+
 function menuInspector(item, editor, api) {
   const ordinary = editor.tab === 'menu';
   const surcharge = item.id === surchargeId;
   const heading = ordinary ? '商品の設定' : surcharge ? '延長時の指名料' : `${item.category}の設定`;
   const category = ordinary ? `<label class="field"><span>カテゴリ</span><select name="store-category">${orderCategories.map((name) =>
     `<option${name === item.category ? ' selected' : ''}>${name}</option>`).join('')}</select></label>` : '';
-  const priceLabel = ordinary ? '価格（円・税抜）' : surcharge ? '料金（円 / 指名・税抜）' : '料金（円 / 人・税抜）';
+  const taxMode = { exclusive: '・税抜', inclusive: '・税込' }[api.priceMode] ?? '';
+  const priceLabel = ordinary ? `価格（円${taxMode}）` : `料金（円 / ${surcharge ? '指名' : '人'}${taxMode}）`;
   const visibility = ordinary ? '注文メニューに表示する' : surcharge ? '延長時に指名料を追加する' : '料金の選択肢に表示する';
   return `<h3 id="store-inspector-heading">${heading}</h3>
     ${textInput(ordinary ? '商品名' : '表示名', item.name, nameLimits.menu, api.escape)}
@@ -198,6 +213,7 @@ function menuInspector(item, editor, api) {
     <div class="store-editor-toggles">${toggle(visibility, 'enabled', item.enabled !== false)}
     ${ordinary ? toggle('「よく使う」に表示する', 'popular', item.popular) : ''}</div>
     ${item.category === 'セット' ? '<p class="field-help">来店登録に使う初回セットを1件以上残してください。</p>' : ''}
+    ${menuCalculationInputs(item, api.icon)}
     ${ordinary || surcharge ? `<details class="store-editor-advanced"><summary>${api.icon('users', 16)}<span>商品の標準歩合</span>${api.icon('chevron-down', 14)}</summary>
     <div class="store-editor-advanced-body">${commissionInputs(item.commission)}
     ${ordinary ? toggle('注文時にキャストの選択を必須にする', 'required-cast', item.requiresCast) : ''}</div></details>` : ''}
@@ -247,8 +263,12 @@ function commitMenuFields(dialog, entry, read) {
   entry.price = read('price').valueAsNumber;
   const category = read('category');
   const duration = read('duration');
+  const taxRate = Math.round(read('tax-rate').valueAsNumber * 100);
+  const serviceEligible = read('service-eligible').checked;
   if (category) entry.category = category.value;
   if (duration) entry.duration = duration.valueAsNumber;
+  if (taxRate !== (entry.taxRate ?? defaultItemTaxRateBps)) entry.taxRate = taxRate;
+  if (serviceEligible !== (entry.serviceEligible !== false)) entry.serviceEligible = serviceEligible;
   if (read('fixed')) {
     const commission = parseCommission(dialog);
     if (Object.keys(commission).length) entry.commission = commission;

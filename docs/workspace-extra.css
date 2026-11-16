@@ -27,12 +27,25 @@
 .payroll-edit-row input { min-width: 0; width: 100%; }
 .payroll-edit-row .icon-btn { min-height: 44px; }
 .payroll-edit-section .btn { min-height: 40px; }
+.payroll-rule-row { display: grid; justify-items: start; gap: 5px; padding: 8px; border: 1px solid #e6e9f3; border-radius: 9px; }
+.payroll-rule-row .form-grid { justify-self: stretch; grid-template-columns: repeat(2,minmax(0,1fr)); }
+.payroll-rule-row .field :is(input,select) { min-width: 0; width: 100%; }
 :is(.payroll-advances,.ops-notices-list) { display: grid; gap: 7px; margin: 9px 0 0; padding: 0; list-style: none; }
 :is(.payroll-advances,.ops-notices-list) li { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 7px; padding: 8px 0; border-top: 1px solid #e6e9f3; }
 :is(.payroll-advances,.ops-notices-list) small { display: block; color: var(--muted); }
 .ops-notice-section h3 { margin: 0 0 5px; }
 .ops-guide { margin: 3px 0; padding-left: 21px; }
 .ops-guide p { margin: 3px 0 10px; color: var(--muted); }
+.cast-self-list { display: grid; gap: 6px; margin: 8px 0 0; padding: 0; list-style: none; }
+.cast-self-list li { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; padding: 9px 0; border-top: 1px solid #e6e9f3; }
+.cast-self-list li > div { min-width: 0; overflow-wrap: anywhere; }
+.cast-self-list small { display: block; color: var(--muted); }
+.cast-self-status { display: grid; gap: 4px; justify-items: end; flex: none; }
+.cast-payslip summary { cursor: pointer; padding: 9px 0; }
+.cast-payslip summary strong { float: right; }
+.np-cloud-cast-link { display: flex; gap: 6px; align-items: flex-end; flex-wrap: wrap; width: 100%; }
+.np-cloud-cast-link .field { flex: 1 1 9rem; min-width: 0; }
+.np-cloud-portfolio { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,170px),1fr)); gap: 9px; margin: 0; padding: 0; list-style: none; }
 .workspace-print-heading { margin: 0 0 16px; }
 .workspace-print-heading h1 { margin-bottom: 4px; }
 .ticket-operation-note { margin: 6px 0; padding: 8px 10px; border-radius: 8px; background: #f2eef9; color: #504471; font-size: .82rem; white-space: pre-wrap; overflow-wrap: anywhere; }

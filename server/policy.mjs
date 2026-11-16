@@ -8,20 +8,23 @@ import { isValidPrintDocument, normalizePrintSettings } from '../docs/print-doma
 import { validateShiftsSnapshot } from '../docs/shifts.mjs';
 import { isValidInitialSetSchedule } from '../docs/set-schedule.mjs';
 import { getDailyPayByDate, isDailyPayCommand, isPayrollCommand, isPayrollMonth, normalizeAttendanceSnapshot, normalizePayrollSnapshot } from '../docs/payroll.mjs';
+import { getCastWorkspace, isCastSelfCommand, listCastAttendance, validateCastAttendanceSnapshot } from '../docs/cast-self.mjs';
+import { isValidCalculationSettings, normalizeCalculationSettings } from '../docs/calculation-settings.mjs';
 
 export const roles = new Set(['admin', 'manager', 'staff', 'cast', 'trainee']);
 const staffCommands = ['seat', 'move', 'order', 'extend', 'deposit', 'settle', 'depart', 'serve', 'issuePrintDocument', 'saveTicketNote',
   'syncAutoExtensions', 'setTableAutoExtension', 'pauseVisitAutoExtension', 'resumeVisitAutoExtension', 'setTicketCustomer'];
 const managerCommands = [...staffCommands, 'open', 'close', 'discount', 'stockAdjust', 'cancelDeposit', 'cancelLine', 'void', 'adjustTicketEnd',
-  'saveCustomer', 'recoverReceivable', 'recordCashMovement', 'saveShift', 'removeShift'];
+  'saveCustomer', 'recoverReceivable', 'recordCashMovement', 'saveShift', 'removeShift', 'reviewCastAttendance'];
 const roleCommands = {
+  cast: new Set(['castClockIn','castClockOut','castRequestShift','castRequestDailyPay']),
   staff: new Set(staffCommands),
   manager: new Set(managerCommands),
   admin: new Set([...managerCommands, 'saveLayout', 'importLayout', 'saveStoreSettings', 'importStoreConfiguration',
     'approveDiscount', 'rejectDiscount', 'saveControls', 'cancelSettlement', 'reopenTicket', 'correctSettledTicketPayments',
     'mergeCustomers', 'linkCustomer', 'correctSettledTicketCustomer', 'importCustomers', 'savePrintSettings',
     'saveAutoExtensionSettings', 'saveCardFeeSettings', 'savePayrollDraft', 'finalizePayroll', 'savePayrollRate', 'savePayrollSettings',
-    'requestDailyPay', 'reviewDailyPay', 'payDailyPay', 'saveInitialSetSchedule']),
+    'requestDailyPay', 'reviewDailyPay', 'payDailyPay', 'saveInitialSetSchedule', 'bindCastAccount', 'saveCalculationSettings']),
 };
 const reasonCommands = new Set(['discount', 'cancelSettlement', 'reopenTicket', 'cancelLine', 'recordCashMovement',
   'correctSettledTicketCustomer', 'correctSettledTicketPayments', 'adjustTicketEnd']);
@@ -55,6 +58,22 @@ export function verifyCommand(role, command) {
   if (reasonCommands.has(command.type)) {
     requireCondition(typeof command.reason === 'string' && command.reason.trim().length > 0,
       400, 'reason-required', '操作の理由を入力してください。');
+  }
+  if (command.type === 'bindCastAccount') {
+    const {memberUid,castId} = command;
+    requireCondition(typeof memberUid === 'string' && memberUid.length > 0 && memberUid.length <= 128 && memberUid === memberUid.trim()
+      && (castId === null || (typeof castId === 'string' && castId.length > 0 && castId.length <= 128 && castId === castId.trim())),
+    400,'invalid-command','キャストと連携するアカウントを選択してください。');
+  }
+  if (command.type === 'saveCalculationSettings') requireCondition(isValidCalculationSettings(command.settings),
+    400,'invalid-command','会計ルールの入力内容を確認してください。');
+  if (isCastSelfCommand(command.type)) {
+    requireCondition(!['castId','uid','memberUid','actor'].some((field) => Object.hasOwn(command,field)),
+      400,'invalid-command','ログイン中の本人アカウントで操作してください。');
+  }
+  if (command.type === 'reviewCastAttendance') {
+    requireCondition(typeof command.attendanceId === 'string' && command.attendanceId.length > 0 && command.attendanceId.length <= 128
+      && ['approve','reject'].includes(command.decision),400,'invalid-command','勤怠と確認結果を選択してください。');
   }
   if (isPayrollCommand(command.type)) {
     let valid;
@@ -145,13 +164,18 @@ function snapshotCashMovements(state) {
 
 export function projectState(state, role, actorUid) {
   if (role === 'admin') return state;
+  if (role === 'cast') return getCastWorkspace(state,actorUid);
   if (role !== 'manager' && role !== 'staff') return null;
   const next = structuredClone(state);
   delete next.auditLog;
   delete next.payroll;
   delete next.attendances;
   delete next.dailyPayByDate;
-  if (role === 'staff') delete next.shifts;
+  delete next.castAccounts;
+  if (role === 'staff') {
+    delete next.shifts;
+    delete next.castAttendance;
+  } else if (next.castAttendance !== undefined) next.castAttendance = listCastAttendance(state);
   for (const ticket of allSnapshotTickets(next)) delete ticket.settledBy;
   if (next.printDocuments) {
     next.printDocuments = next.printDocuments.filter(({ date }) => role === 'manager' || date === state.day.date)
@@ -296,6 +320,7 @@ function validPaymentCorrection(ticket) {
 
 function validTicket(ticket) {
   return ticketStatuses.has(ticket.status) && Array.isArray(ticket.tableIds)
+    && (ticket.calculationSettings === undefined || isValidCalculationSettings(ticket.calculationSettings))
     && (ticket.note === undefined || (typeof ticket.note === 'string' && ticket.note.length <= 400))
     && (ticket.settlementRevision === undefined || validYen(ticket.settlementRevision))
     && (ticket.autoExtensionResumedAt === undefined || validYen(ticket.autoExtensionResumedAt))
@@ -461,6 +486,8 @@ export function validateSnapshot(state) {
   let normalizedAttendances;
   try {
     validateShiftsSnapshot(state);
+    validateCastAttendanceSnapshot(state);
+    requireCondition(state.calculationSettings === undefined || isValidCalculationSettings(state.calculationSettings),400,'invalid-snapshot',message);
     requireCondition(isValidInitialSetSchedule(state.initialSetSchedule),400,'invalid-snapshot',message);
     normalizedPayroll = normalizePayrollSnapshot(state);
     normalizedAttendances = normalizeAttendanceSnapshot(state);
@@ -473,8 +500,11 @@ export function validateSnapshot(state) {
     throw new ApiError(400, 'invalid-snapshot', message);
   }
   const migrated = structuredClone(state);
+  if (migrated.calculationSettings !== undefined) migrated.calculationSettings = normalizeCalculationSettings(migrated.calculationSettings);
   if (normalizedPayroll !== undefined) migrated.payroll = normalizedPayroll;
   if (normalizedAttendances !== undefined) migrated.attendances = normalizedAttendances;
+  if (migrated.castAttendance !== undefined) migrated.castAttendance = listCastAttendance(state);
+  delete migrated.castAccounts;
   delete migrated.dailyPayByDate;
   delete migrated.auditLog;
   delete migrated.floorMonthSales;
@@ -503,6 +533,7 @@ export function validateSnapshot(state) {
   }
   for (const customer of migrated.customers ?? []) delete customer.createdByUid;
   for (const ticket of allSnapshotTickets(migrated)) {
+    if (ticket.calculationSettings !== undefined) ticket.calculationSettings = normalizeCalculationSettings(ticket.calculationSettings);
     delete ticket.seatedByUid;
     delete ticket.activeCustomerLink;
     delete ticket.settledBy;

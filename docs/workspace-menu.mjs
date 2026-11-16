@@ -1,6 +1,6 @@
 const groups = ['営業', '顧客・資金', '分析・レポート', 'スタッフ管理', '店舗設定', 'アカウント'];
 
-export function renderWorkspaceMenu({pages, page, ready, isOpen, hasTables, storeName, role, cloud}, {escape, icon, canOpenPage, permittedAction}) {
+export function renderWorkspaceMenu({pages, page, ready, isOpen, hasTables, storeName, role, cloud, showOverview}, {escape, icon, canOpenPage, permittedAction}) {
   const routes = ready ? Object.entries(pages).filter(([id]) => canOpenPage(id)).map(([id, route]) => ({
     id, title:route.title, glyph:route.icon, group:route.group, action:'navigate',
   })) : [];
@@ -20,11 +20,13 @@ export function renderWorkspaceMenu({pages, page, ready, isOpen, hasTables, stor
     {group:'店舗設定', title:'自動延長設定', glyph:'clock', action:'billing-settings', id:'auto'},
     ...(hasTables ? [{group:'店舗設定', title:'卓別の自動延長', glyph:'table', action:'table-auto-extension'}] : []),
     {group:'店舗設定', title:'カード会計加算', glyph:'card', action:'billing-settings', id:'card'},
+    {group:'店舗設定', title:'税・サービス料', glyph:'wallet', action:'calculation-settings'},
     {group:'店舗設定', title:'運用設定', glyph:'settings', action:'ops-settings'},
     {group:'店舗設定', title:'印刷設定', glyph:'printer', action:'print-settings'},
     {group:'店舗設定', title:'設定の移行', glyph:'download', action:'layout-transfer'},
   ] : [];
   const account = [
+    ...(showOverview ? [{group:'分析・レポート',title:'複数店舗の営業状況',glyph:'chart',action:'cloud-overview'}] : []),
     {group:'アカウント', title:'店舗・アカウント', glyph:'user', action:'cloud-open'},
     ...(ready ? [{group:'アカウント', title:'操作ガイド', glyph:'ticket', action:'ops-guide'}] : []),
     ...(!cloud ? [{group:'アカウント', title:'サンプル操作', glyph:'refresh', action:'demo'}] : []),

@@ -1,5 +1,6 @@
 import { apply, createDemo } from '../docs/engine.mjs';
 import { getNextAutoExtensionAt } from '../docs/auto-extension.mjs';
+import { getMonthlyReportSales, getReportDay } from '../docs/report-period.mjs';
 import { ApiError, canOperate, projectState, requireCondition, roles, validateSnapshot, verifyCommand } from './policy.mjs';
 
 const chunkLength = 200_000;
@@ -53,6 +54,28 @@ export async function listStores(db, actor) {
     FROM np_members m JOIN np_stores s ON s.id = m.store_id WHERE m.uid = ?
     ORDER BY s.created_at, s.id`, actor.uid);
   return { stores: rows.map(storeResponse) };
+}
+
+export async function getStoreOverview(db, actor) {
+  const limit = 20;
+  const rows = await readRows(db,`SELECT s.id,s.name FROM np_members m JOIN np_stores s ON s.id = m.store_id
+    WHERE m.uid = ? AND m.role = 'admin' ORDER BY s.created_at,s.id LIMIT ?`,actor.uid,limit + 1);
+  const stores = [];
+  for (const {id,name} of rows.slice(0,limit)) {
+    let current;
+    try { current = await snapshot(db,actor,id); }
+    catch (error) {
+      if (error instanceof ApiError && error.code === 'store-access') continue;
+      throw error;
+    }
+    if (current.role !== 'admin') continue;
+    const {date,status} = current.state.day;
+    const day = getReportDay(current.state,date);
+    const dailySales = day?.current.sales ?? 0;
+    stores.push({id,name,date,status,dailySales,monthlySales:getMonthlyReportSales(current.state,date.slice(0,7),day?.current),
+      hasState:current.revision > 0});
+  }
+  return {stores,...(rows.length > limit && {truncated:true})};
 }
 
 export async function createStore(db, actor, name) {
@@ -112,14 +135,19 @@ export async function changeMember(db, actor, storeId, uid, role) {
   const member = adminRequired(memberRequired(await findMembership(db, actor, storeId)));
   requireCondition(uid !== member.owner_uid, 409, 'primary-member', '最初の管理者の所属と権限は変更できません。');
   if (role !== undefined) requireCondition(roles.has(role), 400, 'invalid-role', '権限を選択してください。');
+  const target = await resultRow(db,'SELECT role FROM np_members WHERE store_id = ? AND uid = ?',storeId,uid);
+  requireCondition(target,404,'member-not-found','所属メンバーが見つかりません。');
+  if (target.role === 'cast' && role !== 'cast') return revokeCastMembership(db,actor,storeId,uid,role);
   const guards = `WHERE store_id = ? AND uid = ? AND uid <> (SELECT owner_uid FROM np_stores WHERE id = ?)
-    AND EXISTS (SELECT 1 FROM np_members a WHERE a.store_id = ? AND a.uid = ? AND a.role = 'admin') RETURNING uid`;
+    AND role = ? AND EXISTS (SELECT 1 FROM np_members a WHERE a.store_id = ? AND a.uid = ? AND a.role = 'admin') RETURNING uid`;
   const row = role === undefined
-    ? await resultRow(db, `DELETE FROM np_members ${guards}`, storeId, uid, storeId, storeId, actor.uid)
-    : await resultRow(db, `UPDATE np_members SET role = ? ${guards}`, role, storeId, uid, storeId, storeId, actor.uid);
+    ? await resultRow(db, `DELETE FROM np_members ${guards}`, storeId, uid, storeId, target.role, storeId, actor.uid)
+    : await resultRow(db, `UPDATE np_members SET role = ? ${guards}`, role, storeId, uid, storeId, target.role, storeId, actor.uid);
   if (!row) {
     adminRequired(memberRequired(await findMembership(db, actor, storeId)));
-    throw new ApiError(404, 'member-not-found', '所属メンバーが見つかりません。');
+    const fresh = await resultRow(db,'SELECT role FROM np_members WHERE store_id = ? AND uid = ?',storeId,uid);
+    requireCondition(fresh,404,'member-not-found','所属メンバーが見つかりません。');
+    throw new ApiError(409,'membership-conflict','メンバーの権限が更新されました。最新の内容を確認してください。');
   }
   return { ok: true };
 }
@@ -139,11 +167,12 @@ export async function revokeInvite(db, actor, storeId, inviteId) {
 async function snapshot(db, actor, storeId, since = null) {
   const rows = await readRows(db, `SELECT s.revision, m.role, c.position, c.payload FROM np_stores s
     JOIN np_members m ON m.store_id = s.id AND m.uid = ?
-    LEFT JOIN np_state_chunks c ON c.store_id = s.id AND m.role IN ('admin','manager','staff') AND (? IS NULL OR s.revision <> ?)
+    LEFT JOIN np_state_chunks c ON c.store_id = s.id AND m.role IN ('admin','manager','staff','cast')
+      AND (m.role = 'cast' OR ? IS NULL OR s.revision <> ?)
     WHERE s.id = ? ORDER BY c.position`, actor.uid, since, since, storeId);
   const { revision, role } = memberRequired(rows[0]);
   if (!canOperate(role)) return { restricted: true, role, revision };
-  if (since === revision) return { unchanged: true, role, revision };
+  if (since === revision && role !== 'cast') return { unchanged: true, role, revision };
   const chunks = rows.filter((row) => row.position !== null && row.position !== undefined).map(({ payload }) => payload);
   const state = chunks.length ? JSON.parse(chunks.join('')) : createDemo('closed');
   return { state, revision, role, chunks };
@@ -153,7 +182,10 @@ function visibleSnapshot(result, actorUid) {
   if (result.restricted || result.unchanged) return result;
   const state = { ...result.state };
   delete state.auditLog;
-  return { state: projectState(state, result.role, actorUid), revision: result.revision, role: result.role };
+  const projection = projectState(state, result.role, actorUid);
+  if (result.role === 'cast') return {state:projection,scope:'cast',role:'cast',revision:result.revision,
+    ...(!projection && {restricted:true})};
+  return { state:projection, revision: result.revision, role: result.role };
 }
 
 function autoExtensionDue(state, now) {
@@ -175,7 +207,7 @@ async function readVisibleState(db, actor, storeId) {
 export async function readState(db, actor, storeId, since) {
   const current = await snapshot(db, actor, storeId, since);
   const now = Date.now();
-  if (autoExtensionDue(current.state, now)) return saveAutoExtensionSync(db, actor, storeId, current, now);
+  if (current.role !== 'cast' && autoExtensionDue(current.state, now)) return saveAutoExtensionSync(db, actor, storeId, current, now);
   return visibleSnapshot(current, actor.uid);
 }
 
@@ -230,6 +262,67 @@ function matchingOperation(record, actor, fingerprint) {
 const currentOperation = `EXISTS (SELECT 1 FROM np_operations o JOIN np_stores s ON s.id = o.store_id
   WHERE o.store_id = ? AND o.operation_id = ? AND o.actor_uid = ? AND o.revision = ? AND s.revision = ?)`;
 
+function writeSnapshot(db, storeId, chunks, previousChunks, revision, conditionArgs) {
+  const statements = [];
+  for (const [position,payload] of chunks.entries()) {
+    if (payload === previousChunks[position]) continue;
+    statements.push(prepared(db, `INSERT INTO np_state_chunks (store_id, position, payload)
+      SELECT ?, ?, ? WHERE ${currentOperation} ON CONFLICT (store_id, position) DO UPDATE SET payload = excluded.payload`,
+    storeId,position,payload,...conditionArgs));
+  }
+  if (chunks.length < previousChunks.length) {
+    statements.push(prepared(db, `DELETE FROM np_state_chunks WHERE store_id = ? AND position >= ? AND ${currentOperation}`,
+      storeId,chunks.length,...conditionArgs));
+  }
+  statements.push(prepared(db,`UPDATE np_stores SET revision = ? WHERE id = ? AND ${currentOperation}`,revision,storeId,...conditionArgs));
+  return statements;
+}
+
+async function revokeCastMembership(db,actor,storeId,memberUid,role) {
+  const current = adminRequired(await snapshot(db,actor,storeId));
+  if (current.revision === 0) {
+    const filter = `WHERE store_id = ? AND uid = ? AND role = 'cast'
+      AND EXISTS (SELECT 1 FROM np_stores s WHERE s.id = ? AND s.revision = 0)
+      AND EXISTS (SELECT 1 FROM np_members m WHERE m.store_id = ? AND m.uid = ? AND m.role = 'admin') RETURNING uid`;
+    const values = [storeId,memberUid,storeId,storeId,actor.uid];
+    const row = role === undefined ? await resultRow(db,`DELETE FROM np_members ${filter}`,...values)
+      : await resultRow(db,`UPDATE np_members SET role = ? ${filter}`,role,...values);
+    requireCondition(row,409,'membership-conflict','メンバーの権限が更新されました。最新の内容を確認してください。');
+    return {ok:true};
+  }
+  const operationId = crypto.randomUUID();
+  const revision = current.revision + 1;
+  const oldLink = current.state.castAccounts?.find(({uid}) => uid === memberUid);
+  const state = oldLink ? {...current.state,castAccounts:current.state.castAccounts.filter(({uid}) => uid !== memberUid)} : current.state;
+  const now = Date.now();
+  const fingerprint = await getFingerprint('revokeCastMembership',{memberUid,role:role ?? null});
+  const args = [storeId,operationId,actor.uid,revision,current.revision];
+  const statements = [prepared(db, `INSERT INTO np_operations (store_id, operation_id, actor_uid, operation, fingerprint, revision, recorded_at)
+    SELECT s.id, ?, ?, 'revokeCastMembership', ?, ?, ? FROM np_stores s WHERE s.id = ? AND s.revision = ?
+    AND EXISTS (SELECT 1 FROM np_members m WHERE m.store_id = s.id AND m.uid = ? AND m.role = 'admin')
+    AND EXISTS (SELECT 1 FROM np_members t WHERE t.store_id = s.id AND t.uid = ? AND t.role = 'cast') ON CONFLICT DO NOTHING`,
+  operationId,actor.uid,fingerprint,revision,now,storeId,current.revision,actor.uid,memberUid)];
+  if (oldLink) {
+    const payload = JSON.stringify({id:operationId,at:now,action:'bindCastAccount',businessDate:current.state.day.date,
+      actor:{id:actor.uid,label:actor.email,role:'admin'},target:{kind:'cast',id:oldLink.castId,label:'キャスト本人アカウント'},
+      before:{castId:oldLink.castId},after:null,reason:'アカウントの所属・権限変更により連携を解除'});
+    statements.push(prepared(db,`INSERT INTO np_audit_events (store_id,operation_id,revision,payload)
+      SELECT ?, ?, ?, ? WHERE ${currentOperation}`,storeId,operationId,revision,payload,...args));
+  }
+  const memberFilter = `WHERE store_id = ? AND uid = ? AND role = 'cast' AND ${currentOperation}`;
+  if (role === undefined) statements.push(prepared(db,`DELETE FROM np_members ${memberFilter}`,storeId,memberUid,...args));
+  else statements.push(prepared(db,`UPDATE np_members SET role = ? ${memberFilter}`,role,storeId,memberUid,...args));
+  // Advance the revision even when there was no link, so in-flight binds cannot target a membership that has been revoked and renewed.
+  const chunks = oldLink ? snapshotChunks(state) : current.chunks;
+  statements.push(...writeSnapshot(db,storeId,chunks,current.chunks,revision,args));
+  const results = await db.batch(statements);
+  if (!results[0]?.meta?.changes) {
+    adminRequired(memberRequired(await findMembership(db,actor,storeId)));
+    throw new ApiError(409,'membership-conflict','メンバーの権限が更新されました。最新の内容を確認してください。');
+  }
+  return {ok:true};
+}
+
 async function saveOperation(db, actor, storeId, command, observed, observedAt) {
   const { operationId, operation, value, expectedRevision = 0 } = command;
   requireCondition(typeof operationId === 'string' && /^[a-zA-Z0-9_-]{16,100}$/.test(operationId),
@@ -245,7 +338,7 @@ async function saveOperation(db, actor, storeId, command, observed, observedAt) 
   }
   const syncExtensions = operation === 'command' && value.type === 'syncAutoExtensions';
   const now = observedAt ?? Date.now();
-  const due = operation === 'command' && autoExtensionDue(current.state, now);
+  const due = operation === 'command' && current.role !== 'cast' && autoExtensionDue(current.state, now);
   if (syncExtensions && (!due || current.revision !== expectedRevision)) return visibleSnapshot(current, actor.uid);
   const checkRevision = (revision, role) => {
     requireCondition(role === current.role, 403, 'forbidden', '操作の権限が変更されました。');
@@ -262,6 +355,15 @@ async function saveOperation(db, actor, storeId, command, observed, observedAt) 
     throw new ApiError(409, 'auto-extension-updated', '自動延長で伝票が更新されました。伝票を開き直して金額を確認してください。');
   }
   const operator = { id: actor.uid, label: actor.email, role: current.role };
+  const binding = operation === 'command' && value.type === 'bindCastAccount';
+  if (binding) requireCondition(current.revision > 0,409,'store-not-initialized','店舗の営業データを準備してからキャストを連携してください。');
+  const bindingUid = binding && value.castId !== null ? value.memberUid : null;
+  const requireBindableMember = async () => {
+    if (!bindingUid) return;
+    const target = await resultRow(db,'SELECT role FROM np_members WHERE store_id = ? AND uid = ?',storeId,bindingUid);
+    requireCondition(target?.role === 'cast',422,'invalid-cast-member','この店舗に参加済みのキャストアカウントを選択してください。');
+  };
+  await requireBindableMember();
   let next;
   let event;
   if (operation === 'migrate') {
@@ -290,26 +392,18 @@ async function saveOperation(db, actor, storeId, command, observed, observedAt) 
   const statements = [
     prepared(db, `INSERT INTO np_operations (store_id, operation_id, actor_uid, operation, fingerprint, revision, recorded_at)
       SELECT s.id, ?, m.uid, ?, ?, ?, ? FROM np_stores s JOIN np_members m ON m.store_id = s.id
-      WHERE s.id = ? AND s.revision = ? AND m.uid = ? AND m.role = ? ON CONFLICT DO NOTHING`,
-    operationId, operation === 'migrate' ? 'migrate' : value.type, fingerprint, revision, now, storeId, expectedRevision, actor.uid, current.role),
+      WHERE s.id = ? AND s.revision = ? AND m.uid = ? AND m.role = ?
+      AND (? IS NULL OR EXISTS (SELECT 1 FROM np_members c WHERE c.store_id = s.id AND c.uid = ? AND c.role = 'cast'))
+      ON CONFLICT DO NOTHING`,
+    operationId, operation === 'migrate' ? 'migrate' : value.type, fingerprint, revision, now, storeId, expectedRevision, actor.uid, current.role,
+    bindingUid,bindingUid),
   ];
   if (event) {
     const payload = JSON.stringify({ ...event, id: operationId, at: now, actor: operator });
     statements.push(prepared(db, `INSERT INTO np_audit_events (store_id, operation_id, revision, payload)
       SELECT ?, ?, ?, ? WHERE ${currentOperation}`, storeId, operationId, revision, payload, ...conditionArgs));
   }
-  for (const [position, payload] of chunks.entries()) {
-    if (payload === current.chunks[position]) continue;
-    statements.push(prepared(db, `INSERT INTO np_state_chunks (store_id, position, payload)
-      SELECT ?, ?, ? WHERE ${currentOperation} ON CONFLICT (store_id, position) DO UPDATE SET payload = excluded.payload`,
-    storeId, position, payload, ...conditionArgs));
-  }
-  if (chunks.length < current.chunks.length) {
-    statements.push(prepared(db, `DELETE FROM np_state_chunks WHERE store_id = ? AND position >= ? AND ${currentOperation}`,
-      storeId, chunks.length, ...conditionArgs));
-  }
-  statements.push(prepared(db, `UPDATE np_stores SET revision = ? WHERE id = ? AND ${currentOperation}`,
-    revision, storeId, ...conditionArgs));
+  statements.push(...writeSnapshot(db,storeId,chunks,current.chunks,revision,conditionArgs));
   const results = await db.batch(statements);
   if (!results[0]?.meta?.changes) {
     if (matchingOperation(await operationLog(db, storeId, operationId), actor, fingerprint) || syncExtensions) {
@@ -317,6 +411,7 @@ async function saveOperation(db, actor, storeId, command, observed, observedAt) 
     }
     const fresh = memberRequired(await findMembership(db, actor, storeId));
     checkRevision(fresh.revision, fresh.role);
+    await requireBindableMember();
     throw new ApiError(409, 'revision-conflict', '更新が重なりました。最新の内容を確認してください。');
   }
   return readVisibleState(db, actor, storeId);

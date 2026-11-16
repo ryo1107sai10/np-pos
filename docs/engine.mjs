@@ -1,4 +1,6 @@
 import { addCardFeeTax, getCardFee, getCardFeeSettings, normalizeCardFeeSettings } from './card-fee.mjs';
+import { calculationTaxGroup, defaultItemTaxRateBps, getCalculationSettings, getTicketCalculationSettings,
+  normalizeCalculationSettings, roundCalculationRate } from './calculation-settings.mjs';
 import { getStoreSettings, normalizeStoreSettings, replaceStoreSettings } from './store-settings.mjs';
 import { buildOperationAudit } from './operational-audit.mjs';
 import { applyPayrollCommand, isPayrollCommand } from './payroll.mjs';
@@ -9,6 +11,7 @@ import { createCashMovement, getCashMovements, getDailyRecoveryRows, totalCashMo
 import { applyPrintCommand } from './print-domain.mjs';
 import { applyShiftCommand } from './shifts.mjs';
 import { applySetSchedule, isValidInitialSetSchedule } from './set-schedule.mjs';
+import { applyCastSelfCommand, bindCastAccount, isCastAttendanceReview, isCastSelfCommand } from './cast-self.mjs';
 import { getLinkedTablesAutoExtensionEnabled, pauseVisitAutoExtension, resumeVisitAutoExtension, saveAutoExtensionSettings,
   setTableAutoExtension, syncAutomaticExtensions } from './auto-extension.mjs';
 
@@ -107,6 +110,7 @@ export function exportStoreConfiguration(state) {
     format: storeFileFormat, version: storeFileVersion,
     layout: exportLayout(state), settings: getStoreSettings(state),
     ...(state.initialSetSchedule && {initialSetSchedule:state.initialSetSchedule.map(({start,end,setId})=>({start,end,setId}))}),
+    ...(state.calculationSettings && {calculationSettings:getCalculationSettings(state)}),
   };
 }
 
@@ -121,6 +125,7 @@ export function parseStoreConfiguration(text) {
   const rules = file.initialSetSchedule;
   assert(isValidInitialSetSchedule(rules), '時間帯別セットの設定を確認してください。');
   return { layout: normalizeLayoutFile(file.layout), settings,
+    ...(file.calculationSettings !== undefined && {calculationSettings:normalizeCalculationSettings(file.calculationSettings)}),
     ...(rules && {initialSetSchedule:rules.map(({start,end,setId})=>({start,end,setId}))}) };
 }
 
@@ -245,7 +250,7 @@ function allocate(total, weights) {
 }
 
 function exactRate(total, rate) {
-  return Number(BigInt(total) * BigInt(rate) / 10_000n);
+  return roundCalculationRate(total, rate);
 }
 
 export function getItemCommission(item, person) {
@@ -276,24 +281,46 @@ export function quote(state, ticketId) {
 
 function calculateQuote(ticket) {
   const lines = ticket.lines.filter((line) => line.cancelledAt === null);
-  const subtotal = lines.reduce((total, line) => total + line.total, 0);
+  const settings = getTicketCalculationSettings(ticket);
+  const inclusive = settings.priceMode === 'inclusive';
+  const listedAmounts = lines.map(({ total }) => total);
+  const subtotal = listedAmounts.reduce((total, amount) => total + amount, 0);
   const discount = Math.min(ticket.discount, subtotal);
-  const discountByLine = allocate(discount, lines.map((line) => line.total));
-  const netByLine = lines.map((line, index) => line.total - discountByLine[index]);
-  const serviceWeights = lines.map((line, index) => line.serviceEligible ? netByLine[index] : 0);
-  const service = exactRate(serviceWeights.reduce((sum, weight) => sum + weight, 0), ticket.serviceRate);
+  const discountByLine = allocate(discount, listedAmounts);
+  const netByLine = listedAmounts.map((amount, index) => amount - discountByLine[index]);
+  const serviceBase = settings.serviceBase === 'beforeDiscount' ? listedAmounts : netByLine;
+  const serviceWeights = lines.map((line, index) => line.serviceEligible ? serviceBase[index] : 0);
+  const service = roundCalculationRate(serviceWeights.reduce((sum, weight) => sum + weight, 0),
+    settings.serviceRateBps, settings.serviceRounding);
   const serviceByLine = allocate(service, serviceWeights);
-  const groupedTax = new Map();
+  const byTaxRate = new Map();
+  lines.forEach(({ taxRate }, index) => {
+    const indices = byTaxRate.get(taxRate) ?? [];
+    indices.push(index);
+    byTaxRate.set(taxRate, indices);
+  });
+  const commissionSalesByLine = netByLine.slice();
+  const itemTaxBreakdown = [...byTaxRate].sort(([first], [second]) => second - first).map(([rate, indices]) => {
+    const taxable = indices.reduce((sum, index) => sum + netByLine[index] + serviceByLine[index], 0);
+    if (inclusive && rate > 0) {
+      // Commission uses discounted item sales before tax, without the separately charged service fee.
+      const itemAmounts = indices.map((index) => netByLine[index]);
+      const itemSubtotal = itemAmounts.reduce((sum, amount) => sum + amount, 0);
+      const embeddedTax = calculationTaxGroup(itemSubtotal, rate, settings).tax;
+      const taxByLine = allocate(embeddedTax, itemAmounts);
+      indices.forEach((index, offset) => { commissionSalesByLine[index] -= taxByLine[offset]; });
+    }
+    return calculationTaxGroup(taxable, rate, settings);
+  });
   const commission = new Map();
   const commissionDetails = [];
 
   lines.forEach((line, index) => {
-    groupedTax.set(line.taxRate, (groupedTax.get(line.taxRate) ?? 0) + netByLine[index] + serviceByLine[index]);
     if (line.castIds.length === 0) return;
     const count = line.castIds.length;
     line.castIds.forEach((castId, castIndex) => {
       const rule = line.castCommissions?.[castIndex] ?? line.commission;
-      const sales = equalShare(netByLine[index], count, castIndex);
+      const sales = equalShare(commissionSalesByLine[index], count, castIndex);
       const fixed = equalShare(rule.fixed * line.quantity, count, castIndex);
       const points = equalShare(Math.round(rule.points * pointsScale) * line.quantity, count, castIndex);
       const amount = fixed + exactRate(sales, Math.round(rule.rate * 100));
@@ -303,21 +330,20 @@ function calculateQuote(ticket) {
     });
   });
 
-  const itemTaxBreakdown = [...groupedTax].sort(([first], [second]) => second - first)
-    .map(([rate, base]) => ({ rate, base, tax: exactRate(base, rate) }));
   const itemTax = itemTaxBreakdown.reduce((total, group) => total + group.tax, 0);
-  const baseTotal = subtotal - discount + service + itemTax;
+  const baseTotal = subtotal - discount + service + (inclusive ? 0 : itemTax);
   const feePayment = ticket.payments.find(({method, cardFee}) => method === 'card' && cardFee > 0);
   const cardFee = ticket.payments.filter(({method}) => method === 'card')
     .reduce((total, payment) => total + (payment.cardFee ?? 0), 0);
   const {breakdown:taxBreakdown, feeTax:cardFeeTax} = cardFee > 0
-    ? addCardFeeTax(itemTaxBreakdown,cardFee) : {breakdown:itemTaxBreakdown,feeTax:0};
+    ? addCardFeeTax(itemTaxBreakdown,cardFee,settings.taxRounding) : {breakdown:itemTaxBreakdown,feeTax:0};
   const tax = itemTax + cardFeeTax;
   const total = baseTotal + cardFee;
   const deposit = totalOf(ticket.deposits);
   const receivable = totalOf(ticket.payments.filter(({ method }) => method === 'receivable'));
   const paid = totalOf(ticket.payments) - receivable;
   return { subtotal, discount, service, tax, total, deposit, paid, ...(receivable > 0 ? { receivable } : {}),
+    ...(inclusive ? {priceMode:'inclusive'} : {}),
     ...(cardFee > 0 ? {cardFee,cardFeeTax,baseTotal,cardFeeRateBps:feePayment.cardFeeRateBps} : {}),
     remaining: Math.max(0, total - deposit - paid - receivable),
     commission: outputCommission(commission), commissionDetails, taxBreakdown };
@@ -368,7 +394,7 @@ function addLine(state, ticket, menu, quantity, castIds, now, { includeHistorica
   const line = {
     id: createId(state, 'line'), menuId: menu.id, name: menu.name, category: menu.category, quantity, price: menu.price,
     total: menu.price * quantity, castIds: castIds.slice(), createdAt: now, stockUses: [], cancelledAt: null,
-    providedAt: null, taxRate: menu.taxRate ?? 1_000, serviceEligible: menu.serviceEligible !== false,
+    providedAt: null, taxRate: menu.taxRate ?? defaultItemTaxRateBps, serviceEligible: menu.serviceEligible !== false,
     commission: getItemCommission(menu), castNames: castIds.map((id) => castById.get(id).name),
     castCommissions: castIds.map((id) => getItemCommission(menu, castById.get(id))),
   };
@@ -476,12 +502,13 @@ function doSeat(state, action, now, actor) {
   const set = state.menu.find((entry) => entry.id === action.setId && entry.category === 'セット' && entry.enabled !== false);
   assert(set, '初回セットを選択してください。');
   const customer = customerForSeat(state, action);
+  const calculationSettings = getCalculationSettings(state);
   const ticket = {
     id: createId(state, 'ticket'), number: state.nextTicket++, tableIds, guests,
     tableHistory: tableIds.map((tableId) => ({ tableId, attachedAt: now, releasedAt: null })),
     ...customer, ...(customer.customerId ? { seatedByUid: actor.id } : {}), createdAt: now, status: 'open',
     endsAt: now + set.duration * minute, lines: [], discount: 0, deposits: [], payments: [], settledAt: null,
-    departedAt: null, serviceRate: 2_000, settlement: null,
+    departedAt: null, serviceRate: calculationSettings.serviceRateBps, calculationSettings, settlement: null,
   };
   state.tickets.push(ticket);
   addLine(state, ticket, set, guests, [], now);
@@ -915,6 +942,14 @@ export function apply(state, action, now = Date.now(), actor = demoActor) {
 
 function reduce(state, action, now, actor) {
   const next = structuredClone(state);
+  if (action.type === 'bindCastAccount') {
+    bindCastAccount(next, action, actor);
+    return next;
+  }
+  if (isCastSelfCommand(action.type) || isCastAttendanceReview(action.type)) {
+    applyCastSelfCommand(next, action, now, actor, (prefix) => createId(next,prefix));
+    return next;
+  }
   if (action.type === 'saveInitialSetSchedule') {
     applySetSchedule(next, action, actor);
     return next;
@@ -968,6 +1003,11 @@ function reduce(state, action, now, actor) {
     next.cardFeeSettings = normalizeCardFeeSettings(action.settings);
     return next;
   }
+  if (action.type === 'saveCalculationSettings') {
+    assert(actor.role === 'admin', '会計の計算設定は店舗管理者が変更できます。');
+    next.calculationSettings = normalizeCalculationSettings(action.settings);
+    return next;
+  }
   if (action.type === 'saveLayout') {
     doSaveLayout(next, action);
     return next;
@@ -982,11 +1022,13 @@ function reduce(state, action, now, actor) {
     return next;
   }
   if (action.type === 'importStoreConfiguration') {
-    const { layout, settings, initialSetSchedule } = action.configuration ?? {};
+    const { layout, settings, initialSetSchedule, calculationSettings } = action.configuration ?? {};
     const validated = settings === null ? null : validatedStoreSettings(settings, next);
+    const calculation = calculationSettings === undefined ? null : normalizeCalculationSettings(calculationSettings);
     assert(isValidInitialSetSchedule(initialSetSchedule), '時間帯別セットの設定を確認してください。');
     doImportLayout(next, layout);
     if (validated) replaceStoreSettings(next, validated);
+    if (calculation) next.calculationSettings = calculation;
     if (initialSetSchedule) next.initialSetSchedule = initialSetSchedule.map(({start,end,setId})=>({start,end,setId}));
     return next;
   }

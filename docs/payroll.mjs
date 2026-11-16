@@ -2,6 +2,7 @@ const dailyPayActions = new Set(['requestDailyPay', 'reviewDailyPay', 'payDailyP
 const payrollActions = new Set(['savePayrollDraft', 'finalizePayroll', 'savePayrollRate', 'savePayrollSettings', ...dailyPayActions]);
 const paidStatuses = new Set(['paid', 'departed']);
 const defaults = Object.freeze({ pointRate: 0, commissionRounding: 'nearest', commissionUnit: 1, dailyPayLimitBps: 8000 });
+const statementBases = new Set(['fixed','hourlyPay','commission','pointPay','baseGross']);
 const monthPattern = /^(?!0000)\d{4}-(?:0[1-9]|1[0-2])$/;
 const maxYen = 100_000_000;
 
@@ -50,7 +51,18 @@ function castById(state, castId) {
 }
 
 export function getPayrollSettings(state) {
-  return { ...defaults, ...state.payroll?.settings };
+  const {statementRules = [], ...saved} = state.payroll?.settings ?? {};
+  return { ...defaults, ...saved, statementRules:statementRules.map((row) => ({...row})) };
+}
+
+function normalizeStatementRules(rules) {
+  check(Array.isArray(rules) && rules.length <= 20, '支給明細の計算項目は20件以内で登録してください。');
+  return rules.map((row) => {
+    check(isRecord(row) && ['allowance','deduction'].includes(row.kind) && statementBases.has(row.basis),
+      '支給明細の項目区分と計算方法を選択してください。');
+    return {label:text(row.label,60,'支給明細の項目名'),kind:row.kind,basis:row.basis,
+      value:row.basis === 'fixed' ? money(row.value,'支給明細の固定額') : integer(row.value,0,10_000,'支給明細の率の設定値')};
+  });
 }
 
 function normalizeSettings(settings) {
@@ -58,7 +70,8 @@ function normalizeSettings(settings) {
     && [1, 10, 100, 1000].includes(settings.commissionUnit), '歩合の端数処理を指定してください。');
   return { pointRate: money(settings.pointRate, '1ポイントあたりの換金額'),
     commissionRounding: settings.commissionRounding, commissionUnit: settings.commissionUnit,
-    dailyPayLimitBps:integer(settings.dailyPayLimitBps ?? defaults.dailyPayLimitBps,0,10000,'日払い上限率の設定値') };
+    dailyPayLimitBps:integer(settings.dailyPayLimitBps ?? defaults.dailyPayLimitBps,0,10000,'日払い上限率の設定値'),
+    statementRules:normalizeStatementRules(settings.statementRules === undefined ? [] : settings.statementRules) };
 }
 
 export function getPayrollRates(state, castId) {
@@ -180,6 +193,32 @@ function attendanceWork(state, month, castId, manualWork) {
   return [...work.values()].sort((first, second) => first.date.localeCompare(second.date));
 }
 
+function calculateStatementItems(settings, hourlyPay, commission, pointPay) {
+  const baseGross = hourlyPay + commission + pointPay;
+  check([hourlyPay,commission,pointPay,baseGross].every((amount) => Number.isSafeInteger(amount) && amount >= 0),
+    '給与の計算範囲を超えています。');
+  const bases = {hourlyPay,commission,pointPay,baseGross};
+  return settings.statementRules.map((rule) => ({...rule,amount:rule.basis === 'fixed' ? rule.value
+    : Number((BigInt(bases[rule.basis]) * BigInt(rule.value) + 5_000n) / 10_000n)}));
+}
+
+function adjustmentTotals(allowances, deductions, statementItems) {
+  const allowanceTotal = allowances.reduce((sum,row) => sum + row.amount,0)
+    + statementItems.reduce((sum,row) => sum + (row.kind === 'allowance' ? row.amount : 0),0);
+  const deductionTotal = deductions.reduce((sum,row) => sum + row.amount,0)
+    + statementItems.reduce((sum,row) => sum + (row.kind === 'deduction' ? row.amount : 0),0);
+  check([allowanceTotal,deductionTotal].every(Number.isSafeInteger), '給与の計算範囲を超えています。');
+  return {allowanceTotal,deductionTotal};
+}
+
+function netPay(hourlyPay, commission, pointPay, allowanceTotal, deductionTotal, advance) {
+  check(Number.isSafeInteger(advance), '給与の計算範囲を超えています。');
+  const net = Number(BigInt(hourlyPay) + BigInt(commission) + BigInt(pointPay)
+    + BigInt(allowanceTotal) - BigInt(deductionTotal) - BigInt(advance));
+  check(Number.isSafeInteger(net), '給与の計算範囲を超えています。');
+  return net;
+}
+
 export function previewPayroll(state, input) {
   const record = normalizeInputs(state, input);
   const { month, castId, allowances, deductions, manualAdvance } = record;
@@ -198,15 +237,14 @@ export function previewPayroll(state, input) {
   const points = pointUnits / 1000;
   check(Number.isSafeInteger(pointUnits), 'ポイントの計算範囲を超えています。');
   const pointPay = Number((BigInt(pointUnits) * BigInt(settings.pointRate) + 500n) / 1000n);
-  const allowanceTotal = allowances.reduce((sum, row) => sum + row.amount, 0);
-  const deductionTotal = deductions.reduce((sum, row) => sum + row.amount, 0);
+  const statementItems = calculateStatementItems(settings,hourlyPay,commission,pointPay);
+  const {allowanceTotal,deductionTotal} = adjustmentTotals(allowances,deductions,statementItems);
   const paidDailyPay = getPayrollDailyPays(state,{month,castId}).filter(({status}) => status === 'paid')
     .reduce((sum,row) => sum + row.amount, 0);
   const advance = manualAdvance + paidDailyPay;
-  const net = hourlyPay + commission + pointPay + allowanceTotal - deductionTotal - advance;
-  check([hourlyPay,commission,pointPay,allowanceTotal,deductionTotal,net].every(Number.isSafeInteger), '給与の計算範囲を超えています。');
+  const net = netPay(hourlyPay,commission,pointPay,allowanceTotal,deductionTotal,advance);
   return { month, castId, castName:castById(state, castId).name, work, minutes, hourlyPay, rawCommission, commission,
-    commissionDetails, points, pointPay, allowances, deductions, allowanceTotal, deductionTotal, manualAdvance, paidDailyPay, advance, net, settings };
+    commissionDetails, points, pointPay, allowances, deductions, statementItems, allowanceTotal, deductionTotal, manualAdvance, paidDailyPay, advance, net, settings };
 }
 
 export function getDailyPayLimit(state, month, castId) {
@@ -268,7 +306,7 @@ function applyDailyPayCommand(state, action, now, { allocateId, recordCashPayout
 
 export function applyPayrollCommand(state, action, now, actor, services) {
   check(actor.role === 'admin', '給与の操作には店舗管理者の権限が必要です。');
-  state.payroll ??= { settings:{ ...defaults }, rates:[], records:[] };
+  state.payroll ??= { settings:getPayrollSettings(state), rates:[], records:[] };
   if (isDailyPayCommand(action.type)) {
     applyDailyPayCommand(state,action,now,services);
     return;
@@ -289,6 +327,8 @@ export function applyPayrollCommand(state, action, now, actor, services) {
   if (action.type === 'finalizePayroll') {
     check(previous, '給与の下書きを保存してから確定してください。');
     const {month,castId} = previous;
+    check(!(state.castAttendance ?? []).some((row) => row.castId === castId && row.date.slice(0,7) === month
+      && ['open','pending'].includes(row.status)), 'この給与期間に未確認の勤怠があります。退勤または勤怠確認を済ませてください。');
     check(!getPayrollDailyPays(state,{month,castId}).some(({status}) => ['requested','approved'].includes(status)),
       'この給与期間に未処理の日払いがあります。支給または却下を記録してください。');
     const snapshot = previewPayroll(state, previous);
@@ -316,21 +356,26 @@ function normalizeFinalSnapshot(state, record, snapshot) {
     return { ...entry, source:row.source, hourlyRate:money(row.hourlyRate,'時給') };
   });
   const minutes = normalizedWork.reduce((sum, row) => sum + row.minutes, 0);
-  const allowanceTotal = record.allowances.reduce((sum, row) => sum + row.amount, 0);
-  const deductionTotal = record.deductions.reduce((sum, row) => sum + row.amount, 0);
+  const statementItems = calculateStatementItems(settings,hourlyPay,commission,pointPay);
+  const {allowanceTotal,deductionTotal} = adjustmentTotals(record.allowances,record.deductions,statementItems);
+  const savedItems = snapshot.statementItems === undefined ? [] : snapshot.statementItems;
+  check(Array.isArray(savedItems) && savedItems.length === statementItems.length
+    && statementItems.every((expected,index) => isRecord(savedItems[index])
+      && Object.entries(expected).every(([key,value]) => savedItems[index][key] === value)),
+  '確定済みの支給明細の計算項目を確認してください。');
   const paidDailyPay = snapshot.paidDailyPay ?? 0;
   check([hourlyPay,rawCommission,commission,pointPay,advance,net].every((value) => Number.isSafeInteger(value) && value >= 0)
     && Number.isFinite(points) && points >= 0 && Array.isArray(commissionDetails)
     && snapshot.minutes === minutes
     && Number.isSafeInteger(paidDailyPay) && paidDailyPay >= 0 && advance === record.manualAdvance + paidDailyPay
-    && net === hourlyPay + commission + pointPay + allowanceTotal - deductionTotal - advance, '確定済みの支給額を確認してください。');
+    && net === netPay(hourlyPay,commission,pointPay,allowanceTotal,deductionTotal,advance), '確定済みの支給額を確認してください。');
   const detail = commissionDetails.map((row) => {
     check(isRecord(row) && Number.isSafeInteger(row.amount) && row.amount >= 0 && Number.isFinite(row.points) && row.points >= 0,
       '確定済みの歩合を確認してください。');
     return { name:text(row.name, 120,'歩合の項目'), amount:row.amount, points:row.points };
   });
   return { month:record.month, castId:record.castId, castName, work:normalizedWork, minutes, hourlyPay, rawCommission, commission,
-    commissionDetails:detail, points, pointPay, allowances:record.allowances, deductions:record.deductions,
+    commissionDetails:detail, points, pointPay, allowances:record.allowances, deductions:record.deductions, statementItems,
     allowanceTotal, deductionTotal, manualAdvance:record.manualAdvance, paidDailyPay, advance, net, settings };
 }
 

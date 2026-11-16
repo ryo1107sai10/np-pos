@@ -1,5 +1,5 @@
 import { createRemoteJWKSet, jwtVerify } from 'jose';
-import { applyCommand, changeMember, createStore, inviteMember, listAudit, listMembers, listStores, migrateState, readState, revokeInvite } from './database.mjs';
+import { applyCommand, changeMember, createStore, getStoreOverview, inviteMember, listAudit, listMembers, listStores, migrateState, readState, revokeInvite } from './database.mjs';
 import { ApiError, isRecord, requireCondition } from './policy.mjs';
 
 const firebaseKeys = createRemoteJWKSet(new URL(
@@ -119,10 +119,12 @@ async function route(request, env, url) {
     const row = await env.DB.prepare('SELECT 1 AS ready').first();
     return { ok: row?.ready === 1 };
   }
+  const overview = method === 'GET' && url.pathname === '/api/stores/overview';
   const match = /^\/api\/stores(?:\/([^/]+)\/(state|commands|migrate|members|invites|audit)(?:\/([^/]+))?)?$/.exec(url.pathname);
-  if (!match) throw new ApiError(404, 'not-found', 'ページが見つかりません。');
+  if (!overview && !match) throw new ApiError(404, 'not-found', 'ページが見つかりません。');
   const actor = await firebaseActor(request, env);
   const db = env.DB.withSession?.('first-primary') ?? env.DB;
+  if (overview) return getStoreOverview(db,actor);
   const [, rawStore, section, rawId] = match;
   if (!section) {
     if (method === 'GET') return listStores(db, actor);
