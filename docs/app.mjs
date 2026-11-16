@@ -5,6 +5,9 @@ import { bindLayoutEditor, commitLayoutFields, floorLayoutStage, handleLayoutEdi
 import { renderLayoutTransfer } from './layout-transfer.mjs';
 import { catalogDeletionBlocker, getStoreSettings, stockDeletionBlocker } from './store-settings.mjs';
 import { commitStoreSettingsEditor, handleStoreSettingsEditorAction, renderStoreSettingsEditor } from './store-settings-editor.mjs';
+import { cloudConfig } from './cloud-config.mjs';
+import { createCloudClient } from './cloud-client.mjs';
+import { renderCloudBanner, renderCloudEntry, renderCloudMigration, renderCloudPanel, renderCloudRestricted } from './cloud-ui.mjs';
 
 const app = document.querySelector('#app');
 const dialog = document.querySelector('#dialog');
@@ -12,6 +15,7 @@ const notifications = document.querySelector('#notifications');
 const storageKey = 'np-pos.demo.v1';
 const legacyStorageKey = 'lumi-pos.demo.v1';
 const floorViewStorageKey = 'np-pos.floor-view.v1';
+const cloudWorkspaceKey = 'np-pos.cloud-workspace.v1';
 const pages = {
   floor: { title: 'ホール', icon: 'grid', help: '席を選んで、来店・注文・延長・会計を操作できます。' },
   commission: { title: '歩合・成績', icon: 'users', help: 'キャストごとの歩合を、確定額と見込額で確認できます。' },
@@ -26,7 +30,11 @@ const categories = ['よく使う', 'ドリンク', 'ボトル', 'フード', '�
 const dateTime = new Intl.DateTimeFormat('ja-JP', { timeZone: 'Asia/Tokyo', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
 const prettyDate = new Intl.DateTimeFormat('ja-JP', { timeZone: 'Asia/Tokyo', month: 'long', day: 'numeric', weekday: 'short' });
 const number = new Intl.NumberFormat('ja-JP', { maximumFractionDigits: 6 });
+const ownerActions = new Set(['store-settings', 'stock-settings', 'edit-layout', 'layout-transfer', 'layout-export']);
+const managerActions = new Set(['open', 'close', 'stock-adjust', 'discount', 'cancel-line', 'cancel-deposit']);
+const cloudLabels = { admin: '店舗管理者', manager: 'マネージャー', staff: 'スタッフ', cast: 'キャスト', trainee: '体入' };
 
+let cloudState;
 let state = loadState();
 let page = readPage();
 let selected = state.tables.find((table) => getTicketForTable(state, table.id))?.id ?? null;
@@ -44,6 +52,12 @@ let lastMinute = '';
 let saveAvailable = true;
 let pendingStorage = false;
 let committing = false;
+let cloudMembers = { members: [], invites: [] };
+let cloudBusy = false;
+let cloudMessage = '';
+let cloudActionError = '';
+const cloud = createCloudClient(cloudConfig, { onChange: cloudUpdated, pollMs: 6000 });
+cloudState = cloud.snapshot;
 
 function escape(value = '') {
   return String(value).replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
@@ -54,11 +68,15 @@ function readSavedState() {
 }
 
 function loadState() {
+  return loadLocalData() ?? createDemo();
+}
+
+function loadLocalData() {
   try {
     const stored = JSON.parse(readSavedState());
     if (stored?.day && Array.isArray(stored.tables) && Array.isArray(stored.tickets) && Array.isArray(stored.menu)) return stored;
   } catch { /* A fresh sample is available when storage is blocked. */ }
-  return createDemo();
+  return null;
 }
 
 function saveState(next) {
@@ -81,6 +99,7 @@ function loadFloorView() {
 function setFloorView(view, nextArea = planArea) {
   floorView = view;
   planArea = nextArea;
+  if (cloudState?.store) return;
   try { localStorage.setItem(floorViewStorageKey, JSON.stringify({ view, area: planArea })); }
   catch { /* The current view remains available in memory. */ }
 }
@@ -111,11 +130,11 @@ function syncFloorSelection() {
 
 function readPage() {
   const key = window.location.hash.slice(1);
-  return Object.hasOwn(pages, key) ? key : 'floor';
+  return canOpenPage(key) ? key : 'floor';
 }
 
 function go(key) {
-  if (!Object.hasOwn(pages, key)) return;
+  if (!canOpenPage(key)) return;
   page = key;
   if (window.location.hash !== `#${key}`) history.replaceState(null, '', `#${key}`);
   window.scrollTo(0, 0);
@@ -127,7 +146,23 @@ function timer(endsAt, now = Date.now()) {
   return `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
 }
 
+function canOpenPage(key) {
+  return Object.hasOwn(pages, key) && (!cloudState?.store || key === 'floor'
+    || ['admin', 'manager'].includes(cloudState.store.role));
+}
+
+function permittedAction(action) {
+  if (!cloudState.store) return true;
+  if (!cloudState.state || !cloudState.store.hasState) return action === 'dismiss' || action.startsWith('cloud-');
+  const role = cloudState.store.role;
+  if (['demo', 'demo-start', 'demo-live'].includes(action)) return false;
+  if (ownerActions.has(action) || action.startsWith('store-editor-') || action.startsWith('layout-editor-')) return role === 'admin';
+  if (managerActions.has(action)) return role === 'admin' || role === 'manager';
+  return true;
+}
+
 function button(text, action, { glyph, tone = '', cls = '', id, data = '', disabled = false } = {}) {
+  if (!permittedAction(action)) return '';
   return `<button type="button" class="btn ${tone ? `btn-${tone}` : ''} ${cls}" data-action="${action}"${id === undefined ? '' : ` data-id="${escape(id)}"`} ${data}${disabled ? ' disabled' : ''}>${glyph ? icon(glyph, 16) : ''}${text}</button>`;
 }
 
@@ -157,15 +192,18 @@ function titles(ticket) {
 }
 
 function renderSide() {
+  const store = cloudState.store;
+  const workspaceName = store?.name ?? '銀座店';
+  const role = store ? cloudLabels[store.role] : '店舗管理者';
   return `<aside class="sidebar">
     <div class="brand" aria-label="NP POS"><img src="np-pos.svg" alt="" width="38" height="38"><span class="brand-word">NP <small>POS</small></span></div>
-    <div class="store"><span class="store-icon">${icon('store', 16)}</span><span class="store-name">銀座店<small>デモ店舗</small></span></div>
+    <div class="store"><span class="store-icon">${icon('store', 16)}</span><span class="store-name">${escape(workspaceName)}<small>${store ? 'クラウド店舗' : 'デモ店舗'}</small></span></div>
     <nav class="side-nav" aria-label="メインメニュー">
-      ${Object.entries(pages).map(([key, value]) => `<button type="button" class="nav-link" data-action="navigate" data-id="${key}" ${page === key ? 'aria-current="page"' : ''}>${icon(value.icon, 18)}<span>${value.title}</span></button>`).join('')}
+      ${(!store || (store.hasState && cloudState.state)) ? Object.entries(pages).filter(([key]) => canOpenPage(key)).map(([key, value]) => `<button type="button" class="nav-link" data-action="navigate" data-id="${key}" ${page === key ? 'aria-current="page"' : ''}>${icon(value.icon, 18)}<span>${value.title}</span></button>`).join('') : ''}
     </nav>
     <div class="side-bottom">
-      <button type="button" class="demo-button" data-action="demo" aria-label="サンプル操作" title="サンプル操作">${icon('refresh', 16)}<span>サンプル操作</span>${icon('chevron-right', 14)}</button>
-      <div class="operator"><span class="avatar">店</span><div><strong>店舗管理者</strong><small>デモモード</small></div></div>
+      ${store ? '' : `<button type="button" class="demo-button" data-action="demo" aria-label="サンプル操作" title="サンプル操作">${icon('refresh', 16)}<span>サンプル操作</span>${icon('chevron-right', 14)}</button>`}
+      <div class="operator"><span class="avatar">店</span><div><strong>${escape(role)}</strong><small>${store ? 'クラウドモード' : 'デモモード'}</small></div></div>
     </div>
   </aside>`;
 }
@@ -173,10 +211,10 @@ function renderSide() {
 function renderTop() {
   const isOpen = state.day.status === 'open';
   const date = prettyDate.format(new Date(`${state.day.date}T12:00:00+09:00`));
-  return `<div class="workspace-top"><div class="open-meta"><span class="workspace-store">${icon('store',15)}<span class="store-label">銀座店</span><span class="mobile-wordmark"><img src="np-pos.svg" width="20" height="20" alt="">NP POS</span></span><span class="meta-sep"></span>${icon('calendar',16)}<span>${date} 営業日</span></div><div class="workspace-time"><span class="live ${isOpen ? '' : 'closed'}"><span class="dot"></span>${isOpen ? '営業中' : '営業時間外'}</span><span class="meta-sep"></span><time id="workspace-time">${dateTime.format(Date.now())}</time><span>JST</span></div></div>
+  return `<div class="workspace-top"><div class="open-meta"><span class="workspace-store">${icon('store',15)}<span class="store-label">${escape(cloudState.store?.name ?? '銀座店')}</span><span class="mobile-wordmark"><img src="np-pos.svg" width="20" height="20" alt="">NP POS</span></span><span class="meta-sep"></span>${icon('calendar',16)}<span>${date} 営業日</span></div><div class="workspace-time"><span class="live ${isOpen ? '' : 'closed'}"><span class="dot"></span>${isOpen ? '営業中' : '営業時間外'}</span><span class="meta-sep"></span><time id="workspace-time">${dateTime.format(Date.now())}</time><span>JST</span></div></div>
     <header class="page-head"><div><h1>${pages[page].title}</h1><p>${pages[page].help}</p></div><div class="actions">
     ${page === 'floor' ? (isOpen ? button('閉店処理','close',{ glyph: 'checkout' }) + button('来店登録','seat',{ glyph: 'plus', tone: 'primary', disabled: state.tables.length === 0 }) : button('開店する','open',{ glyph: 'power', tone: 'primary' })) : ''}
-    ${page === 'stock' ? button('品目設定', 'stock-settings', { glyph: 'settings' }) : ''}</div></header>`;
+    ${page === 'stock' ? button('品目設定', 'stock-settings', { glyph: 'settings' }) : ''}${renderCloudEntry(cloudModel(), {escape, icon})}</div></header>`;
 }
 
 function renderMetrics() {
@@ -286,7 +324,7 @@ function renderDetail() {
     <div class="detail-meta"><span>${icon('users',13)}${ticket.guests}名${ticket.customer ? ` · ${escape(ticket.customer)}` : ''}</span><span>${settled ? `${icon('check',13)}退店待ち` : `${icon('clock',13)}<time data-ends="${ticket.endsAt}">${timer(ticket.endsAt)}</time>`}</span></div>
     ${ticket.tableIds.length > 1 ? `<div class="detail-links" aria-label="同じ伝票の卓">${ticket.tableIds.map(id=>`<span class="detail-link">${escape(tableName(id))}</span>`).join('')}</div>` : ''}
     <div class="detail-aux"><h3>注文明細 <small>${lines.length}</small></h3>${settled ? '' : button('卓移動・連結','move',{glyph:'move',id:ticket.id})}</div>
-    <ul class="ticket-lines">${lines.length ? lines.map((line) => `<li class="ticket-line"><span class="line-desc">${escape(line.name)} <em>×${line.quantity}</em>${line.castIds.length ? `<small>${lineStaffNames(line)}</small>` : ''}</span><span class="money">${yen(line.total)}</span>${!settled && !['セット','延長'].includes(line.category) ? `<button class="line-remove" type="button" data-action="cancel-line" data-id="${escape(line.id)}" data-ticket="${escape(ticket.id)}" aria-label="${escape(line.name)}を取り消す">${icon('x',13)}</button>` : ''}</li>`).join('') : '<li class="lines-empty">注文明細はありません。</li>'}</ul>
+    <ul class="ticket-lines">${lines.length ? lines.map((line) => `<li class="ticket-line"><span class="line-desc">${escape(line.name)} <em>×${line.quantity}</em>${line.castIds.length ? `<small>${lineStaffNames(line)}</small>` : ''}</span><span class="money">${yen(line.total)}</span>${!settled && permittedAction('cancel-line') && !['セット','延長'].includes(line.category) ? `<button class="line-remove" type="button" data-action="cancel-line" data-id="${escape(line.id)}" data-ticket="${escape(ticket.id)}" aria-label="${escape(line.name)}を取り消す">${icon('x',13)}</button>` : ''}</li>`).join('') : '<li class="lines-empty">注文明細はありません。</li>'}</ul>
     ${totalRows(q,{settlement:settled})}
     ${!settled ? `<div class="mini-tools">${button('前受金','deposit',{glyph:'wallet',tone:'quiet',id:ticket.id})}${button('値引き','discount',{glyph:'minus',tone:'quiet',id:ticket.id})}${quickItem ? button(escape(quickItem.name),'order',{glyph:'plus',tone:'quiet',id:ticket.id,data:'data-product="highball"'}) : ''}${button('卓履歴','seat-history',{glyph:'history',tone:'quiet',id:ticket.id})}</div>` : ''}
     <div class="detail-actions">${!settled ? `${button('注文','order',{glyph:'plus',tone:'secondary',id:ticket.id})}${button('延長','extend',{glyph:'clock',id:ticket.id,disabled:!extensionPlans().length})}${button('会計へ進む','settle',{glyph:'arrow-right',tone:'primary',id:ticket.id,cls:'btn-block'})}` : `${button('会計内訳','receipt',{glyph:'ticket',id:ticket.id,cls:'btn-block'})}${button('退店・卓を解放','depart',{glyph:'checkout',tone:'primary',id:ticket.id,cls:'btn-block'})}`}</div></div></aside>`;
@@ -298,9 +336,218 @@ function render({ preserveFocus = false } = {}) {
   const focusId = focused?.dataset.id;
   lastStatuses = state.tables.map((table)=>tableStatus(state,table.id)).join('|');
   lastMinute = dateTime.format(Date.now());
-  app.innerHTML = `<div class="shell">${renderSide()}<main class="workspace" id="workspace" tabindex="-1">${renderTop()}${page==='floor' ? renderFloor() : renderReport(page,state,{yen,summary,quote,escape,icon,showHiddenStock,reportDate,commissionCast})}</main></div>`;
+  const model = cloudModel();
+  const banner = renderCloudBanner(model, {escape, icon});
+  let content;
+  if (cloudState.store && (!cloudState.state || !cloudState.store.hasState)) {
+    content = `<header class="page-head"><h1>クラウド店舗</h1>${renderCloudEntry(model,{escape,icon})}</header>${banner}
+      ${cloudState.restricted ? renderCloudRestricted(model,{escape,icon}) : '<p class="notice">店舗・アカウントから営業データを準備してください。</p>'}`;
+  } else {
+    const view = page === 'floor' ? renderFloor() : renderReport(page,state,{yen,summary,quote,escape,icon,showHiddenStock,reportDate,commissionCast});
+    content = renderTop() + banner + view;
+  }
+  app.innerHTML = `<div class="shell">${renderSide()}<main class="workspace" id="workspace" tabindex="-1">${content}</main></div>`;
   document.title = `NP POS | ${pages[page].title}`;
   if (focusAction) [...app.querySelectorAll('[data-action]')].find((el) => el.dataset.action === focusAction && el.dataset.id === focusId)?.focus({ preventScroll: true });
+}
+
+function cloudModel() {
+  let hasLocalData = false;
+  if (modal?.type === 'cloud') {
+    try { hasLocalData = readSavedState() !== null; } catch { /* Storage can be disabled. */ }
+  }
+  const stores = cloudState.stores.map((store) => store.id === cloudState.store?.id ? cloudState.store : store);
+  return {
+    ...cloudState, ...cloudMembers, stores, mode: cloudState.store ? 'cloud' : 'demo',
+    hasLocalData, providers: cloudConfig.providers,
+    busy: cloudBusy, message: cloudMessage, actionError: cloudActionError || cloudState.error,
+  };
+}
+
+function rememberStore(store) {
+  try {
+    if (store && cloudState.user) localStorage.setItem(cloudWorkspaceKey, JSON.stringify({ uid: cloudState.user.uid, id: store.id }));
+    else localStorage.removeItem(cloudWorkspaceKey);
+  } catch { /* The workspace selection can still be made for this session. */ }
+}
+
+function cloudUpdated(next) {
+  const before = cloudState;
+  cloudState = next;
+  const contextChanged = before.store?.id !== next.store?.id || before.store?.role !== next.store?.role;
+  const accountChanged = before.user?.uid !== next.user?.uid || before.userVerified !== next.userVerified;
+  if (next.store && next.state) state = next.state;
+  else if (next.store && (contextChanged || before.state)) state = createDemo('closed');
+  else if (before.store && !next.store) state = loadState();
+  if (contextChanged) {
+    cloudMembers = {members: [], invites: []};
+    if (next.store && !canOpenPage(page)) page = 'floor';
+    if (dialog.open && modal?.type !== 'cloud') dialog.close();
+    pendingStorage = false;
+    selected = null; mobileDetails = false; area = null; filter = 'all'; reportDate = ''; commissionCast = '';
+    const view = next.store ? {view: 'list', area: null} : loadFloorView();
+    floorView = view.view; planArea = view.area;
+    if (before.store && !next.store) rememberStore(null);
+  }
+  if (contextChanged || before.state !== next.state) syncFloorSelection();
+  if ((contextChanged || accountChanged) && dialog.open && modal?.type === 'cloud') paintDialog();
+  if (contextChanged || before.state !== next.state || before.status !== next.status
+    || before.pending !== next.pending || accountChanged) render({preserveFocus: true});
+}
+
+async function refreshMembers() {
+  if (cloudState.store?.role === 'admin') cloudMembers = await cloud.listMembers();
+}
+
+async function restoreCloud() {
+  let hint;
+  try { hint = JSON.parse(localStorage.getItem(cloudWorkspaceKey)); } catch { /* Select a store manually. */ }
+  if (!hint) return;
+  await cloud.start();
+  if (hint.uid === cloudState.user?.uid && cloudState.stores.some(({id}) => id === hint.id)) {
+    await cloud.enterStore(hint.id).catch(() => {});
+  }
+}
+
+function initialCloudState() {
+  const fresh = createDemo('closed');
+  fresh.cast = [];
+  fresh.stock = fresh.stock.map((item) => ({...item, quantity: 0, value: 0}));
+  return fresh;
+}
+
+async function migrateBrowserData() {
+  const active = modal;
+  if (cloudBusy || active.storeId !== cloudState.store?.id) return;
+  const submit = dialog.querySelector('#submit-dialog');
+  submit.disabled = true;
+  cloudBusy = true;
+  try {
+    const result = await cloud.migrate(active.snapshot);
+    if (modal !== active) return;
+    dialog.close();
+    toast(result.queued ? '保存結果を確認しています。同期状況をご覧ください。'
+      : active.initialize ? '営業データを準備しました。' : 'このブラウザーのデータを移行しました。');
+  } catch (error) {
+    if (modal === active) showError(error.message);
+  } finally {
+    cloudBusy = false;
+    if (submit.isConnected) submit.disabled = false;
+  }
+}
+
+async function cloudAction(action, target) {
+  if (cloudBusy) return;
+  const id = target.dataset.id;
+  if (action === 'cloud-migrate' || action === 'cloud-initialize') {
+    if (cloudState.store?.role !== 'admin' || cloudState.store.hasState) return;
+    const initialize = action === 'cloud-initialize';
+    const snapshot = initialize ? initialCloudState() : loadLocalData();
+    if (!snapshot) { showError('移行できるデータが見つかりません。'); return; }
+    openDialog('cloud-migration', { snapshot, initialize });
+    return;
+  }
+
+  if (action === 'cloud-open') {
+    cloudMessage = ''; cloudActionError = '';
+    cloudBusy = true;
+    openDialog('cloud');
+  }
+  const active = modal;
+  const values = new FormData(dialog.querySelector('#dialog-form') ?? undefined);
+  const value = (key) => String(values.get(key) ?? '').trim();
+  const email = value('cloud-email');
+  const password = String(values.get('cloud-password') ?? '');
+  const memberRole = target.closest('.np-cloud-person')?.querySelector('[data-cloud-member-role]')?.value;
+  cloudBusy = true;
+  cloudMessage = ''; cloudActionError = '';
+  try {
+    switch (action) {
+      case 'cloud-open':
+        await cloud.start();
+        if (cloudState.userVerified && !cloudState.store) await cloud.listStores();
+        await refreshMembers();
+        break;
+      case 'cloud-google':
+        await cloud.signInGoogle();
+        break;
+      case 'cloud-email-sign-in':
+        await cloud.signInEmail(email, password);
+        break;
+      case 'cloud-email-register':
+        await cloud.registerEmail(email, password);
+        cloudMessage = '確認メールを送信しました。メールのリンクを開き、ここで更新を押してください。';
+        break;
+      case 'cloud-email-reset':
+        await cloud.resetPassword(email);
+        cloudMessage = '再設定メールを送信しました。受信ボックスを確認してください。';
+        break;
+      case 'cloud-email-verify':
+        await cloud.sendVerification();
+        cloudMessage = '確認メールを再送しました。';
+        break;
+      case 'cloud-refresh':
+        await cloud.refreshAuth();
+        await refreshMembers();
+        break;
+      case 'cloud-select-store':
+      case 'cloud-create-store': {
+        const storeId = action === 'cloud-create-store' ? (await cloud.createStore(value('cloud-store-name'))).id : id;
+        await cloud.enterStore(storeId);
+        rememberStore(cloudState.store);
+        if (cloudState.store?.hasState && dialog.open && modal === active) dialog.close();
+        else await refreshMembers();
+        break;
+      }
+      case 'cloud-invite':
+        await cloud.inviteMember(value('cloud-invite-email'), value('cloud-invite-role'));
+        cloudMessage = '招待を登録しました。同じ確認済みメールアドレスでサインインすると店舗が表示されます。';
+        await refreshMembers();
+        break;
+      case 'cloud-member-save':
+        await cloud.updateMember(id, memberRole);
+        await refreshMembers();
+        break;
+      case 'cloud-member-revoke':
+        if (window.confirm('このメンバーの店舗アクセスを解除しますか？')) await cloud.removeMember(id);
+        await refreshMembers();
+        break;
+      case 'cloud-invite-revoke':
+        await cloud.cancelInvite(id);
+        await refreshMembers();
+        break;
+      case 'cloud-sign-out':
+        await cloud.signOut();
+        rememberStore(null);
+        if (dialog.open && modal === active) dialog.close();
+        break;
+      case 'cloud-demo':
+        cloud.leaveStore();
+        rememberStore(null);
+        if (dialog.open && modal === active) dialog.close();
+        break;
+      case 'cloud-sync-retry':
+        await cloud.retrySync();
+        break;
+      case 'cloud-sync-discard':
+        if (cloudState.conflict && window.confirm('この操作の送信待ちを取り消し、最新の営業データを読み込みますか？')) {
+          cloud.clearQueue();
+          await cloud.retrySync();
+        }
+        break;
+    }
+  } catch (error) {
+    if (dialog.open && modal === active) cloudActionError = error.message;
+    else toast(error.message);
+  } finally {
+    cloudBusy = false;
+    if (dialog.open && modal === active && modal?.type === 'cloud') {
+      paintDialog();
+      const emailInput = dialog.querySelector('[name=cloud-email]');
+      if (emailInput && email) emailInput.value = email;
+    }
+    render({preserveFocus: true});
+  }
 }
 
 function toast(message) {
@@ -325,6 +572,20 @@ async function commit(command, message, after) {
   const activeModal = modal;
   const submit = dialog.querySelector('#submit-dialog');
   if (submit) submit.disabled = true;
+  if (cloudState.store) {
+    try {
+      if (activeModal.storeId !== cloudState.store.id) throw new Error('店舗を開き直してから操作してください。');
+      const result = await cloud.submit(command, activeModal.revision);
+      if (!dialog.open || modal !== activeModal) return;
+      if (!result.queued && after) after(result.state ?? state);
+      dialog.close();
+      render();
+      if (result.queued) toast('送信待ちです。接続が回復すると同期を確認します。');
+      else if (message) toast(message);
+    } catch (error) { if (modal === activeModal) showError(error.message); }
+    finally { committing = false; if (submit?.isConnected) submit.disabled = false; }
+    return;
+  }
   const update = () => {
     if (!dialog.open || modal !== activeModal) return;
     let latest;
@@ -351,6 +612,7 @@ async function commit(command, message, after) {
 }
 
 function freshLayoutTarget() {
+  if (cloudState.store) return false;
   try { return saveAvailable && readSavedState() === null; }
   catch { return false; }
 }
@@ -410,7 +672,7 @@ async function readStoreFile(input) {
 
 function openDialog(type, data = {}) {
   if (!dialog.open) priorFocus = document.activeElement;
-  modal = { type, ...data };
+  modal = { type, storeId: cloudState.store?.id, revision: cloudState.revision, ...data };
   paintDialog();
   if (!dialog.open) dialog.showModal();
 }
@@ -443,6 +705,21 @@ function paintDialog(layoutFileInput) {
   const q = ticket ? quote(state,id) : null;
   const headline = ticket ? `<div class="modal-context">${icon('table',16)}<strong>${escape(titles(ticket))}</strong><span>${ticket.guests}名${ticket.customer ? ` · ${escape(ticket.customer)}` : ''}</span></div>` : '';
   switch (modal.type) {
+    case 'cloud':
+      present('店舗・アカウント', renderCloudPanel(cloudModel(), {escape, icon}), null, { style: 'cloud-dialog' });
+      return;
+    case 'cloud-migration': {
+      const snapshot = modal.snapshot;
+      const details = {
+        storeName: cloudState.store?.name, date: snapshot.day.date, tableCount: snapshot.tables.length,
+        ticketCount: snapshot.tickets.length, closedDayCount: snapshot.closedDays.length, movementCount: snapshot.movements.length,
+      };
+      const body = modal.initialize ? '<p class="form-copy">ひな形の卓とメニューを使い、在庫数と営業履歴が空の状態から始めます。</p>'
+        : renderCloudMigration(details, {escape, icon});
+      present(modal.initialize ? '営業データを準備' : 'このブラウザーのデータを移行', body,
+        modal.initialize ? '営業データを準備する' : '店舗に移行する', {style: 'cloud-dialog'});
+      return;
+    }
     case 'layout-transfer': {
       const fileFocused = document.activeElement === layoutFileInput;
       const confirm = modal.configuration?.settings ? 'この設定を読み込む' : 'このレイアウトを読み込む';
@@ -578,7 +855,7 @@ function renderProductDetails() {
   const availableCast = state.cast.filter((person) => person.enabled !== false);
   const baseCommission = commissionLabel(getItemCommission(item));
   const usesOverrides = availableCast.some((person) => person.commissionOverride);
-  const showChoices = item.requiresCast || availableCast.some((person) => commissionLabel(getItemCommission(item, person)));
+  const showChoices = item.requiresCast || item.acceptsCast || availableCast.some((person) => commissionLabel(getItemCommission(item, person)));
   let castChoices = '';
   if (showChoices && availableCast.length) {
     const choices = availableCast.map((person) => {
@@ -637,6 +914,8 @@ function modalFromAction(target) {
 
 function clickAction(target) {
   const {action,id} = target.dataset;
+  if (!permittedAction(action)) return;
+  if (action.startsWith('cloud-')) { void cloudAction(action, target); return; }
   if (action === 'navigate') { mobileDetails = false; go(id); return; }
   if (action === 'filter') { filter=id; render({preserveFocus:true}); return; }
   if (action === 'toggle-hidden-stock') {
@@ -762,7 +1041,7 @@ function clickAction(target) {
   if (action==='cancel-deposit') {
     const ticketId=modal.ticketId;
     const entry=state.tickets.find(item=>item.id===ticketId).deposits.find(item=>item.id===id);
-    modal={type:'cancel-deposit',ticketId,depositId:id};
+    modal={...modal,type:'cancel-deposit',ticketId,depositId:id};
     present('前受金を取り消す',`<p class="form-copy">${methods[entry.method]}で記録した前受金 ${yen(entry.amount)} を取り消します。</p>`,'前受金を取り消す');
     return;
   }
@@ -775,6 +1054,9 @@ function submitDialog(form) {
   const numeric = (key) => Number(value(key));
   const id = modal.ticketId;
   switch(modal.type) {
+    case 'cloud-migration':
+      void migrateBrowserData();
+      break;
     case 'layout-transfer': {
       if (!modal.configuration) return;
       const message = modal.configuration.settings ? '店舗設定と卓レイアウトを読み込みました。' : '卓レイアウトを読み込みました。';
@@ -892,7 +1174,10 @@ dialog.addEventListener('submit',(event)=> {
 dialog.addEventListener('close',()=> {
   if (!dialog.open) {
     modal=null;
-    if (pendingStorage) { pendingStorage = false; state = loadState(); syncFloorSelection(); render(); }
+    if (pendingStorage) {
+      pendingStorage = false;
+      if (!cloudState.store) { state = loadState(); syncFloorSelection(); render(); }
+    }
     if (priorFocus?.isConnected) priorFocus.focus({preventScroll:true});
     else app.querySelector('#workspace')?.focus({preventScroll:true});
     priorFocus=null;
@@ -906,12 +1191,14 @@ document.addEventListener('keydown', (event) => {
 window.addEventListener('hashchange',()=>{page=readPage(); render();});
 window.addEventListener('storage',(event)=>{
   if (event.key!==storageKey && event.key!==legacyStorageKey) return;
+  if (cloudState.store) return;
   if (dialog.open) { pendingStorage = true; return; }
   state=loadState(); syncFloorSelection(); render({preserveFocus:true});
 });
 
 syncFloorSelection();
 render();
+void restoreCloud();
 setInterval(()=> {
   if (document.hidden) return;
   const now=Date.now();

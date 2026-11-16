@@ -1,0 +1,9 @@
+.DS_Store
+.env
+.env.*
+.dev.vars
+.dev.vars.*
+.wrangler/
+node_modules/
+firebase-debug.log
+wrangler-log-*.log

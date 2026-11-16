@@ -1,0 +1,22 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "np-pos-cloud",
+  "main": "server/index.mjs",
+  "compatibility_date": "2026-11-16",
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 0.05,
+    "traces": { "enabled": true, "head_sampling_rate": 0.05 }
+  },
+  "vars": {
+    "FIREBASE_PROJECT_ID": "np-pos-cloud-20261116",
+    "ALLOWED_ORIGINS": "https://ryo1107sai10.github.io"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "np-pos-cloud",
+      "database_id": "a98244d4-0ea9-473e-a511-ab2538827435"
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "name": "np-pos-cloud",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test *.test.mjs"
+  },
+  "dependencies": {
+    "jose": "6.1.3"
+  }
+}

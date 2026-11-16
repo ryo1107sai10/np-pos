@@ -1,0 +1,143 @@
+.np-cloud-entry { display: inline-flex; max-width: 100%; }
+.np-cloud-entry .btn { min-height: 44px; white-space: normal; }
+
+.np-cloud-banner, .np-cloud-card {
+  min-width: 0;
+  border: 1px solid #dfe4f1;
+  border-radius: 15px;
+  background: #fff;
+  box-shadow: 0 4px 14px #27334c0b;
+}
+.np-cloud-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px 10px;
+  margin: 0 0 14px;
+  padding: 8px 11px;
+  background: linear-gradient(105deg,#f6f1fd,#fff 72%);
+}
+.np-cloud-banner-warning { border-color: #e9d9b7; background: linear-gradient(105deg,#fff7e6,#fff 72%); }
+.np-cloud-symbol {
+  flex: 0 0 36px;
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border: 1px solid #e5dcf7;
+  border-radius: 10px;
+  background: #f3eefc;
+  color: #5642ac;
+}
+.np-cloud-banner-store, .np-cloud-store-text, .np-cloud-identity { display: grid; gap: 2px; min-width: 0; }
+.np-cloud-banner-store { flex: 1 1 110px; }
+.np-cloud-banner-store strong, .np-cloud-store-text strong, .np-cloud-identity strong { color: #202c47; overflow-wrap: anywhere; }
+.np-cloud-banner-store span, .np-cloud-store-text small, .np-cloud-identity small { color: #5c6880; font-size: 11px; overflow-wrap: anywhere; }
+.np-cloud-state, .np-cloud-role {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid #e2ddf0;
+  border-radius: 99px;
+  background: #f5f2fb;
+  color: #534180;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 625;
+  line-height: 1.35;
+}
+.np-cloud-state-connected { border-color: #cfebe1; background: #eaf8f2; color: #1b6f5b; }
+.np-cloud-banner-warning .np-cloud-state { border-color: #ecdfc2; background: #fff7e6; color: #72471b; }
+.np-cloud-banner .btn { min-height: 44px; padding: 5px 9px; }
+
+.cloud-dialog.modal { width: min(690px, calc(100% - 28px)); }
+.cloud-dialog .modal-body { padding: 14px 17px 17px; }
+.np-cloud-panel { display: grid; gap: 11px; min-width: 0; }
+.np-cloud-card { display: grid; gap: 9px; padding: 13px; }
+.np-cloud-card h3 { color: #202c47; font-size: 14px; font-weight: 730; line-height: 1.35; }
+.np-cloud-card h3.np-cloud-heading { display: flex; align-items: center; gap: 7px; }
+.np-cloud-heading .icon { color: #6955b5; }
+.np-cloud-card p, .np-cloud-copy { color: #53617a; font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
+.np-cloud-intro, .np-cloud-account { grid-template-columns: auto minmax(0, 1fr); align-items: center; }
+.np-cloud-intro { background: linear-gradient(115deg,#f3eefa,#fbfbff 58%,#fff); }
+.np-cloud-intro h3 { margin-bottom: 3px; }
+.np-cloud-account { grid-template-columns: auto minmax(0, 1fr) auto; }
+.np-cloud-section-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 6px; }
+.np-cloud-buttons { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+.np-cloud-panel .btn, .np-cloud-restricted .btn { max-width: 100%; min-height: 44px; white-space: normal; }
+.np-cloud-google > .btn { width: 100%; }
+.np-cloud-sign-in .np-cloud-reset { justify-self: start; }
+.np-cloud-panel details { min-width: 0; border: 1px solid #e3e6f1; border-radius: 10px; }
+.np-cloud-panel summary {
+  display: list-item;
+  min-height: 44px;
+  padding: 12px 10px;
+  color: #413477;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+}
+.np-cloud-panel details[open] > summary { border-bottom: 1px solid #e9e9f2; }
+.np-cloud-detail-body { display: grid; gap: 9px; min-width: 0; padding: 10px; }
+.np-cloud-sign-in > .np-cloud-detail-body { padding: 0; }
+.np-cloud-detail-body .field, .np-cloud-person .field { min-width: 0; }
+.np-cloud-detail-body input, .np-cloud-detail-body select, .np-cloud-person select { width: 100%; max-width: 100%; }
+.np-cloud-form-row, .np-cloud-invite-form { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: end; gap: 8px; }
+.np-cloud-invite-form { grid-template-columns: minmax(0,1fr) minmax(100px, .55fr); }
+.np-cloud-stores, .np-cloud-people { display: grid; gap: 6px; min-width: 0; margin: 0; padding: 0; list-style: none; }
+.np-cloud-store-row, .np-cloud-person {
+  display: grid;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  padding: 7px 9px;
+  border: 1px solid #e2e6f0;
+  border-radius: 10px;
+  background: #fcfcff;
+  text-align: start;
+}
+.np-cloud-store-row { grid-template-columns: auto minmax(0,1fr) auto; min-height: 52px; }
+.np-cloud-store-row:hover, .np-cloud-store-row[aria-pressed="true"] { border-color: #d6c9f1; background: #f7f3fc; }
+.np-cloud-store-row .np-cloud-symbol { width: 32px; height: 32px; }
+.np-cloud-store-row > .icon { color: #5d4a9a; }
+.np-cloud-person { grid-template-columns: minmax(0,1fr) auto; }
+.np-cloud-person > .np-cloud-role { justify-self: start; }
+.np-cloud-member-controls { display: flex; min-width: 0; flex-wrap: wrap; align-items: end; gap: 5px; }
+.np-cloud-member-controls .btn { padding: 5px 7px; }
+.np-cloud-member-controls select { min-height: 44px; }
+.np-cloud-subheading { margin: 0 0 5px; color: #596680; font-size: 12px; }
+.np-cloud-message {
+  border: 1px solid #e1ddf0;
+  border-radius: 10px;
+  background: #f7f5fd;
+  color: #4d4870;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.np-cloud-message-error { border-color: #efd5df; background: #fff4f7; color: #872b4b; }
+.np-cloud-migration-counts {
+  display: grid;
+  grid-template-columns: repeat(2,minmax(0,1fr));
+  gap: 7px;
+  margin: 0;
+}
+.np-cloud-migration-counts > div { display: grid; gap: 3px; padding: 8px; border: 1px solid #e5e7f1; border-radius: 9px; }
+.np-cloud-migration-counts dt { color: #566781; font-size: 11px; }
+.np-cloud-migration-counts dd { margin: 0; color: #252e4d; font-weight: 730; font-size: 16px; font-variant-numeric: tabular-nums; }
+@media (max-width: 610px) {
+  .page-head:has(.np-cloud-entry) { display: grid; grid-template-columns: minmax(0,1fr); gap: 8px; }
+  .cloud-dialog .modal-body { padding: 10px 11px 12px; }
+  .np-cloud-card { border-radius: 12px; padding: 10px; }
+  .np-cloud-person { grid-template-columns: minmax(0,1fr); }
+  .np-cloud-person > .btn { justify-self: start; }
+  .np-cloud-account { grid-template-columns: auto minmax(0,1fr); }
+  .np-cloud-account > .btn { grid-column: 2; justify-self: start; }
+  .np-cloud-banner { gap: 6px 8px; margin-bottom: 10px; }
+}
+@media (max-width: 380px) {
+  .np-cloud-form-row, .np-cloud-invite-form { grid-template-columns: minmax(0,1fr); }
+  .np-cloud-form-row > .btn { justify-self: start; }
+}
