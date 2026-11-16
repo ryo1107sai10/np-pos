@@ -1,11 +1,14 @@
 import { addCardFeeTax, getCardFee, getCardFeeSettings, normalizeCardFeeSettings } from './card-fee.mjs';
 import { getStoreSettings, normalizeStoreSettings, replaceStoreSettings } from './store-settings.mjs';
 import { buildOperationAudit } from './operational-audit.mjs';
+import { applyPayrollCommand, isPayrollCommand } from './payroll.mjs';
 import { applyCustomerCommand, customerForSeat, findCustomer, findSettledCustomerTicket, isAssignedCustomer, setTicketCustomer } from './customers.mjs';
 import { correctSettledTicketReceivable, getCustomerReceivableBalance, getReceivableBalance, getReceivableRecoveryTotals,
   receivableCollectionMethods } from './receivables.mjs';
 import { createCashMovement, getCashMovements, getDailyRecoveryRows, totalCashMovements } from './cash-ledger.mjs';
 import { applyPrintCommand } from './print-domain.mjs';
+import { applyShiftCommand } from './shifts.mjs';
+import { applySetSchedule, isValidInitialSetSchedule } from './set-schedule.mjs';
 import { getLinkedTablesAutoExtensionEnabled, pauseVisitAutoExtension, resumeVisitAutoExtension, saveAutoExtensionSettings,
   setTableAutoExtension, syncAutomaticExtensions } from './auto-extension.mjs';
 
@@ -103,6 +106,7 @@ export function exportStoreConfiguration(state) {
   return {
     format: storeFileFormat, version: storeFileVersion,
     layout: exportLayout(state), settings: getStoreSettings(state),
+    ...(state.initialSetSchedule && {initialSetSchedule:state.initialSetSchedule.map(({start,end,setId})=>({start,end,setId}))}),
   };
 }
 
@@ -114,7 +118,10 @@ export function parseStoreConfiguration(text) {
   assert(legacy || file.version === storeFileVersion, 'このバージョンの店舗設定ファイルには対応していません。');
   const input = legacy ? { menu: file.settings?.menu, cast: file.settings?.cast } : file.settings;
   const settings = validatedStoreSettings(input, null, !legacy);
-  return { layout: normalizeLayoutFile(file.layout), settings };
+  const rules = file.initialSetSchedule;
+  assert(isValidInitialSetSchedule(rules), '時間帯別セットの設定を確認してください。');
+  return { layout: normalizeLayoutFile(file.layout), settings,
+    ...(rules && {initialSetSchedule:rules.map(({start,end,setId})=>({start,end,setId}))}) };
 }
 
 export function yen(amount) {
@@ -637,6 +644,7 @@ function reverseSettlement(state, ticket, action, now, actor) {
   ticket.deposits = [];
   ticket.payments = [];
   delete ticket.paymentsCorrectedAt;
+  delete ticket.settledBy;
   ticket.settlement = null;
   ticket.settledAt = null;
   ticket.status = 'cancelled';
@@ -820,6 +828,27 @@ function operationalReason(value, label) {
   return reason;
 }
 
+function saveTicketNote(ticket, note, actor) {
+  assert(['admin','manager','staff'].includes(actor.role), '伝票メモを変更する権限がありません。');
+  assert(typeof note === 'string' && note.trim().length <= 400, '伝票メモを400文字以内で入力してください。');
+  const value = note.trim();
+  if (value) ticket.note = value;
+  else delete ticket.note;
+}
+
+function adjustTicketEnd(ticket, action, now, actor) {
+  assert(['admin','manager'].includes(actor.role), '終了時刻の調整にはマネージャー以上の権限が必要です。');
+  operationalReason(action.reason, '終了時刻を調整する理由');
+  const {minutes} = action;
+  assert(Number.isInteger(minutes) && minutes !== 0 && Math.abs(minutes) <= 180, '調整は前後180分以内の整数で入力してください。');
+  const endsAt = ticket.endsAt + minutes * minute;
+  assert(Number.isSafeInteger(endsAt) && Number.isSafeInteger(ticket.createdAt) && endsAt >= ticket.createdAt,
+    '来店時刻以降の終了時刻を指定してください。');
+  ticket.endsAt = endsAt;
+  // Shortening into overtime starts a new scheduling interval, so it cannot backdate automatic charges.
+  if (endsAt <= now) ticket.autoExtensionResumedAt = Math.max(ticket.autoExtensionResumedAt ?? 0, now);
+}
+
 function validateDiscountAmount(ticket, amount, subtotal) {
   assert(amount <= subtotal, '値引きは小計以下を入力してください。');
   const changed = calculateQuote({ ...ticket, discount: amount });
@@ -886,6 +915,27 @@ export function apply(state, action, now = Date.now(), actor = demoActor) {
 
 function reduce(state, action, now, actor) {
   const next = structuredClone(state);
+  if (action.type === 'saveInitialSetSchedule') {
+    applySetSchedule(next, action, actor);
+    return next;
+  }
+  if (action.type === 'saveShift' || action.type === 'removeShift') {
+    applyShiftCommand(next, action, actor, now, () => createId(next, 'shift'));
+    return next;
+  }
+  if (isPayrollCommand(action.type)) {
+    applyPayrollCommand(next, action, now, actor, {
+      allocateId: () => createId(next, 'daily-pay'),
+      recordCashPayout: (amount) => {
+        assert(summary(next).expectedCash >= amount, '日払い額がレジの理論残高を超えています。');
+        const movement = createCashMovement(next,{kind:'withdrawal',category:'other',amount,
+          reason:'日払いの現金支給',destination:'給与前払い'},now,actor,() => createId(next,'cash'));
+        (next.cashMovements ??= []).push(movement);
+        return movement.id;
+      },
+    });
+    return next;
+  }
   if (action.type === 'saveAutoExtensionSettings') {
     saveAutoExtensionSettings(next, action, now, actor);
     return next;
@@ -932,10 +982,12 @@ function reduce(state, action, now, actor) {
     return next;
   }
   if (action.type === 'importStoreConfiguration') {
-    const { layout, settings } = action.configuration ?? {};
+    const { layout, settings, initialSetSchedule } = action.configuration ?? {};
     const validated = settings === null ? null : validatedStoreSettings(settings, next);
+    assert(isValidInitialSetSchedule(initialSetSchedule), '時間帯別セットの設定を確認してください。');
     doImportLayout(next, layout);
     if (validated) replaceStoreSettings(next, validated);
+    if (initialSetSchedule) next.initialSetSchedule = initialSetSchedule.map(({start,end,setId})=>({start,end,setId}));
     return next;
   }
   if (action.type === 'open') {
@@ -987,6 +1039,12 @@ function reduce(state, action, now, actor) {
   }
   requireOrderable(ticket);
   switch (action.type) {
+    case 'saveTicketNote':
+      saveTicketNote(ticket, action.note, actor);
+      break;
+    case 'adjustTicketEnd':
+      adjustTicketEnd(ticket, action, now, actor);
+      break;
     case 'setTicketCustomer':
       setTicketCustomer(next, ticket, action, actor);
       break;
@@ -1068,6 +1126,7 @@ function reduce(state, action, now, actor) {
       ticket.settlement = quote(next, ticket.id);
       ticket.status = 'paid';
       ticket.settledAt = now;
+      ticket.settledBy = { ...actor };
       ticket.settlementRevision = (ticket.settlementRevision ?? 0) + 1;
       break;
     }

@@ -1,0 +1,55 @@
+.np-shifts, .np-shift-days, .np-shift-editor { display: grid; gap: 12px; min-width: 0; }
+.np-shift-toolbar,.np-shift-summary,.np-shift-day header,.np-shift-navigation {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.np-shift-toolbar, .np-shift-day {
+  border: 1px solid var(--line);
+  border-radius: 15px;
+  background: var(--panel);
+  padding: 11px;
+}
+.np-shift-navigation { flex-wrap: nowrap; min-width: 0; }
+.np-shift-navigation .field { flex: 1 1 auto; min-width: 0; }
+.np-shift-navigation .field input { min-width: 0; width: 100%; }
+.np-shift-navigation > :first-child svg { rotate: 180deg; }
+.np-shift-toolbar .btn, .np-shift-toolbar .seg button, .np-shift-toolbar input, .np-shift-day .btn { min-height: 44px; }
+.np-shift-new { margin-inline-start: auto; }
+.np-shift-summary { justify-content: space-between; margin: 0; font-size: .86rem; }
+.np-shift-summary span { color: var(--muted); }
+.np-shift-days { grid-template-columns: repeat(auto-fit,minmax(min(100%,300px),1fr)); align-items: start; }
+.np-shift-day header { justify-content: space-between; }
+.np-shift-day h3 { margin: 0; font-size: .97rem; }
+.np-shift-day ul { list-style: none; margin: 3px 0 0; padding: 0; }
+.np-shift-row {
+  display: grid;
+  grid-template-columns: minmax(0,1fr) max-content max-content auto;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-height: 46px;
+  margin-top: 4px;
+  padding: 5px 7px;
+  text-align: start;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: var(--text);
+  background: var(--panel-high);
+}
+.np-shift-row:hover { border-color: #c3b5e4; }
+.np-shift-row strong,.np-shift-row small { overflow-wrap: anywhere; }
+.np-shift-row small { grid-column: 1 / -1; color: var(--muted); }
+.np-shift-time { font-size: .83rem; font-variant-numeric: tabular-nums; }
+.np-shift-status { padding: 3px 6px; border-radius: 999px; color: #795219; background: #fcf2da; white-space: nowrap; font-size: .75rem; }
+.np-shift-confirmed { color: #21564b; background: #e7f5ee; }
+.np-shift-editor > .btn { justify-self: flex-start; }
+.np-shift-editor .form-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
+.np-shift-editor :is(select,input):not([type=checkbox]) { min-width: 0; width: 100%; }
+.np-shift-overnight { display: flex; align-items: center; gap: 8px; width: fit-content; min-height: 44px; }
+
+@media (max-width: 480px) {
+  .np-shift-new { margin-inline-start: 0; }
+  .np-shift-toolbar :is(input,select), .np-shift-editor :is(input,select) { font-size: 16px; }
+}

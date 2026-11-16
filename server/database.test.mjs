@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { apply, createDemo, quote, summary } from '../docs/engine.mjs';
+import { getTeamPerformance } from '../docs/team-performance.mjs';
 import worker from './index.mjs';
 import {
   applyCommand, changeMember, createStore, inviteMember, listAudit, listMembers, listStores, migrateState, readState, revokeInvite,
@@ -121,8 +122,9 @@ test('offline-safe envelope protects one-time migration and returns complete chu
   await assert.rejects(migrateState(db, owner, tenant, { operationId: 'migration-invalid1', snapshot: {} }), { code: 'invalid-snapshot' });
   const applied = await migrateState(db, owner, tenant, { operationId: 'migration-confirm1', snapshot: original });
   assert.equal(applied.revision, 1);
-  const expected = { ...original };
+  const expected = structuredClone(original);
   delete expected.auditLog;
+  for (const ticket of expected.tickets) delete ticket.settledBy;
   assert.deepEqual(applied.state, expected);
   const retried = await migrateState(db, owner, tenant, { operationId: 'migration-confirm1', snapshot: original });
   assert.equal(retried.revision, 1);
@@ -1113,7 +1115,7 @@ test('only an admin can correct settled tenders, preserving the gross amount and
       { code: 'invalid-snapshot' });
   }
   const migrated = await migrateState(db, owner, newTenant, { operationId: 'migration-corrected-payments', snapshot: corrected.state });
-  const { seatedByUid: _seatedByUid, ...migratableReceipt } = receipt;
+  const { seatedByUid: _seatedByUid, settledBy: _settledBy, ...migratableReceipt } = receipt;
   assert.deepEqual(migrated.state.closedDays[0].ticketSnapshots, [migratableReceipt]);
 
   const legacyTenant = await store(db);
@@ -1179,7 +1181,7 @@ test('a tender correction changes only receivable principal and retains original
   assert.equal(event.after.receivable.dueDate, dueDate);
 });
 
-test('migration strips forged active customer links from every ticket view', async () => {
+test('migration strips forged customer links and settlement actors from every ticket view', async () => {
   const db = database();
   const tenant = await store(db);
   await inviteMember(db, owner, tenant, helper.email, 'manager');
@@ -1202,11 +1204,86 @@ test('migration strips forged active customer links from every ticket view', asy
   applyBrowser({ type: 'open', date: '2026-11-17', openingCash: 0 });
   applyBrowser(seat);
   const ticketViews = (state) => [state.tickets[0], state.closedDays[0].ticketSnapshots[0], state.cancelledSettlements[0].receipt];
-  for (const ticket of ticketViews(browser)) ticket.activeCustomerLink = { id: 'fake', name: '偽のリンク' };
+  for (const ticket of ticketViews(browser)) {
+    ticket.activeCustomerLink = { id: 'fake', name: '偽のリンク' };
+    ticket.settledBy = { id: owner.uid, label: owner.email, role: 'staff' };
+  }
   const migrated = await migrateState(db, owner, tenant, { operationId: 'forged-ticket-link-migration', snapshot: browser });
   for (const { state } of [migrated, await readState(db, helper, tenant)]) {
-    assert.ok(ticketViews(state).every(({ activeCustomerLink }) => activeCustomerLink === undefined));
+    assert.ok(ticketViews(state).every(({ activeCustomerLink, settledBy }) => activeCustomerLink === undefined && settledBy === undefined));
   }
+});
+
+test('verified operators remain attributed across corrections and archives only in the administrator report', async (t) => {
+  const db = database();
+  const tenant = await store(db);
+  await inviteMember(db,owner,tenant,helper.email,'manager');
+  await inviteMember(db,owner,tenant,outsider.email,'staff');
+  await Promise.all([listStores(db,helper),listStores(db,outsider)]);
+  const date = '2026-11-16';
+  let now = Date.parse(`${date}T21:00:00+09:00`);
+  t.mock.method(Date,'now',() => now);
+  const run = (actor,revision,suffix,action) => command(db,actor,tenant,revision,`team-attribution-${suffix}`,action);
+  const seat = {type:'seat',tableIds:['a1'],setId:'set60',guests:1};
+  const settle = (ticketId) => ({type:'settle',ticketId,payments:[{method:'cash',amount:6600}],
+    settledBy:{id:owner.uid,label:owner.email,role:'manager'}});
+  await run(owner,0,'opening',{type:'open',date,openingCash:0});
+  const seated = await run(helper,1,'manager-seat',seat);
+  const [first] = seated.state.tickets;
+  const managed = await run(helper,2,'manager-settle',settle(first.id));
+  assert.equal(managed.state.tickets[0].settledBy,undefined);
+  await run(helper,3,'manager-depart',{type:'depart',ticketId:first.id});
+  const next = await run(outsider,4,'staff-seat',seat);
+  const second = next.state.tickets.at(-1);
+  const staffPaid = await run(outsider,5,'staff-settle',settle(second.id));
+  assert.ok(staffPaid.state.tickets.every(({settledBy}) => settledBy === undefined));
+  const originals = (await readState(db,owner,tenant)).state.tickets.map(({settledBy}) => settledBy);
+  assert.deepEqual(originals,[{id:helper.uid,label:helper.email,role:'manager'},{id:outsider.uid,label:outsider.email,role:'staff'}]);
+  const corrected = await run(owner,6,'payment-correction',{type:'correctSettledTicketPayments',ticketId:second.id,
+    payments:[{method:'card',amount:6600}],reason:'カード利用控えを確認'});
+  assert.deepEqual(corrected.state.tickets.map(({settledBy}) => settledBy),originals);
+  const inService = getTeamPerformance(corrected.state,{start:date,end:date});
+  assert.equal(inService.sales,13200);
+  assert.equal(inService.tickets,2);
+  assert.equal(inService.unattributed,0);
+  await run(outsider,7,'staff-depart',{type:'depart',ticketId:second.id});
+  await run(owner,8,'close',{type:'close',actualCash:6600});
+  now += 86_400_000;
+  const after = await run(owner,9,'following-day',{type:'open',date:'2026-11-17',openingCash:0});
+  assert.deepEqual(after.state.closedDays[0].ticketSnapshots.map(({settledBy}) => settledBy),originals);
+  assert.deepEqual(getTeamPerformance(after.state,{start:date,end:date}).rows,inService.rows);
+  const onlyStaff = getTeamPerformance(after.state,{start:date,end:date},'staff');
+  assert.deepEqual(onlyStaff.rows.map(({label,sales}) => ({label,sales})),[{label:outsider.email,sales:6600}]);
+  const managerState = (await readState(db,helper,tenant)).state;
+  assert.ok(managerState.closedDays[0].ticketSnapshots.every(({settledBy}) => settledBy === undefined));
+});
+
+test('managers maintain shifts, administrators see audit, and malformed migrated shifts are rejected', async () => {
+  const db = database();
+  const tenant = await store(db);
+  await inviteMember(db,owner,tenant,helper.email,'manager');
+  await inviteMember(db,owner,tenant,outsider.email,'staff');
+  await Promise.all([listStores(db,helper),listStores(db,outsider)]);
+  const run = (actor,revision,suffix,action) => command(db,actor,tenant,revision,`cloud-shifts-${suffix}`,action);
+  const shift = {type:'saveShift',castId:'cast1',date:'2026-11-16',status:'requested',startMinute:1260,endMinute:1560,note:'夜シフト'};
+  await assert.rejects(run(outsider,0,'denied-save',shift),{code:'forbidden'});
+  const request = await run(helper,0,'request',shift);
+  const [saved] = request.state.shifts;
+  const accepted = await run(helper,1,'confirm',{...shift,shiftId:saved.id,status:'confirmed'});
+  const [confirmed] = accepted.state.shifts;
+  assert.equal(confirmed.status,'confirmed');
+  assert.equal((await readState(db,outsider,tenant)).state.shifts,undefined);
+  await assert.rejects(listAudit(db,helper,tenant),{code:'forbidden'});
+  const events = (await listAudit(db,owner,tenant)).events.filter(({action}) => action === 'saveShift');
+  assert.deepEqual(events.map(({actor,businessDate,before,after}) => [actor.id,businessDate,before?.status,after.status]),
+    [[helper.uid,shift.date,'requested','confirmed'],[helper.uid,shift.date,undefined,'requested']]);
+
+  const destination = await store(db);
+  const malformed = structuredClone((await readState(db,owner,tenant)).state);
+  malformed.shifts.push({...confirmed,id:'overlapping-shift',startMinute:1300});
+  await assert.rejects(migrateState(db,owner,destination,{operationId:'cloud-shift-overlap-migration',snapshot:malformed}),{code:'invalid-snapshot'});
+  const migrated = await migrateState(db,owner,destination,{operationId:'cloud-shift-valid-migration',snapshot:(await readState(db,owner,tenant)).state});
+  assert.deepEqual(migrated.state.shifts,[confirmed]);
 });
 
 test('browser migration validates a visit pause timestamp and source as a pair', async () => {

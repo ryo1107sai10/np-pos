@@ -2,6 +2,7 @@ import { cashMovementCategories, cashMovementKinds, getDailyRecoveryRows } from 
 import { receivableCollectionMethods } from './receivables.mjs';
 import { getTicketCommissionDetails, getTicketTableLabels } from './engine.mjs';
 import { getReportPeriod } from './report-period.mjs';
+import { getDailyPayTotals } from './payroll.mjs';
 
 const formatDay = new Intl.DateTimeFormat('ja-JP', {
   month: 'short', day: 'numeric', weekday: 'short', timeZone: 'Asia/Tokyo',
@@ -303,10 +304,13 @@ function cashLedgerHistory(state, period, current, api) {
 }
 
 function cashTotals(current, api) {
-  return panel('手動の入出金', moneyRows([
+  const dailyCash = asNumber(current.dailyPayTotals?.cash);
+  return panel('入出金と日払い', moneyRows([
     ['入金', current.cashIn ?? 0],
-    ['出金', asNumber(current.cashOut) - asNumber(current.expenses)],
+    ['その他の出金', asNumber(current.cashOut) - asNumber(current.expenses) - dailyCash],
     ['経費', current.expenses ?? 0],
+    ['日払い支給（現金）', dailyCash],
+    ['日払い支給（振込）', asNumber(current.dailyPayTotals?.bank)],
   ], api));
 }
 
@@ -317,7 +321,7 @@ function renderCash(state, api, period, current) {
     <div class="lr-report-toolbar">${dayPicker(state, period.date, api)}
       ${canRecord ? `<button type="button" class="btn btn-primary" data-action="record-cash">${icon('plus',16)}入出金を記録</button>` : ''}</div>
     ${describeClosing(period, current, api)}
-    <div class="lr-split">${registerBreakdown(state, period, current, api)}${cashTotals(current, api)}</div>
+    <div class="lr-split">${registerBreakdown(state, period, current, api)}${cashTotals({...current,dailyPayTotals:getDailyPayTotals(state,period.date)}, api)}</div>
     ${cashLedgerHistory(state, period, current, api)}</div>`;
 }
 
@@ -422,9 +426,9 @@ function totalMethods(amounts) {
 
 function renderPeriodDays(period, api) {
   const {yen, escape, icon} = api;
-  const headings = ['営業日', '確定売上', '決済入金', '売掛回収', '経費'];
+  const headings = ['営業日', '確定売上', '決済入金', '売掛回収', '経費', '日払い支給'];
   const rows = period.days.slice().reverse().map(({date, current}) => {
-    const amounts = [current.sales,totalMethods(current.payments),totalMethods(current.recoveries),current.expenses];
+    const amounts = [current.sales,totalMethods(current.payments),totalMethods(current.recoveries),current.expenses,totalMethods(current.dailyPayTotals)];
     return `<tr>
       <td><button type="button" class="lr-link" data-action="report-day" data-id="${escape(date)}"
         aria-label="${escape(date)}の日報を表示"><time datetime="${escape(date)}">${escape(date)}</time>${icon('chevron-right',14)}</button></td>

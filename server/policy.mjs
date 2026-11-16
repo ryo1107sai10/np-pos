@@ -5,22 +5,26 @@ import { getMonthlyReportSales } from '../docs/report-period.mjs';
 import { isAssignedCustomer } from '../docs/customers.mjs';
 import { getRecoveryRows, isValidCashMovement } from '../docs/cash-ledger.mjs';
 import { isValidPrintDocument, normalizePrintSettings } from '../docs/print-domain.mjs';
+import { validateShiftsSnapshot } from '../docs/shifts.mjs';
+import { isValidInitialSetSchedule } from '../docs/set-schedule.mjs';
+import { getDailyPayByDate, isDailyPayCommand, isPayrollCommand, isPayrollMonth, normalizeAttendanceSnapshot, normalizePayrollSnapshot } from '../docs/payroll.mjs';
 
 export const roles = new Set(['admin', 'manager', 'staff', 'cast', 'trainee']);
-const staffCommands = ['seat', 'move', 'order', 'extend', 'deposit', 'settle', 'depart', 'serve', 'issuePrintDocument',
+const staffCommands = ['seat', 'move', 'order', 'extend', 'deposit', 'settle', 'depart', 'serve', 'issuePrintDocument', 'saveTicketNote',
   'syncAutoExtensions', 'setTableAutoExtension', 'pauseVisitAutoExtension', 'resumeVisitAutoExtension', 'setTicketCustomer'];
-const managerCommands = [...staffCommands, 'open', 'close', 'discount', 'stockAdjust', 'cancelDeposit', 'cancelLine', 'void',
-  'saveCustomer', 'recoverReceivable', 'recordCashMovement'];
+const managerCommands = [...staffCommands, 'open', 'close', 'discount', 'stockAdjust', 'cancelDeposit', 'cancelLine', 'void', 'adjustTicketEnd',
+  'saveCustomer', 'recoverReceivable', 'recordCashMovement', 'saveShift', 'removeShift'];
 const roleCommands = {
   staff: new Set(staffCommands),
   manager: new Set(managerCommands),
   admin: new Set([...managerCommands, 'saveLayout', 'importLayout', 'saveStoreSettings', 'importStoreConfiguration',
     'approveDiscount', 'rejectDiscount', 'saveControls', 'cancelSettlement', 'reopenTicket', 'correctSettledTicketPayments',
     'mergeCustomers', 'linkCustomer', 'correctSettledTicketCustomer', 'importCustomers', 'savePrintSettings',
-    'saveAutoExtensionSettings', 'saveCardFeeSettings']),
+    'saveAutoExtensionSettings', 'saveCardFeeSettings', 'savePayrollDraft', 'finalizePayroll', 'savePayrollRate', 'savePayrollSettings',
+    'requestDailyPay', 'reviewDailyPay', 'payDailyPay', 'saveInitialSetSchedule']),
 };
 const reasonCommands = new Set(['discount', 'cancelSettlement', 'reopenTicket', 'cancelLine', 'recordCashMovement',
-  'correctSettledTicketCustomer', 'correctSettledTicketPayments']);
+  'correctSettledTicketCustomer', 'correctSettledTicketPayments', 'adjustTicketEnd']);
 const paymentMethods = new Set(['cash', 'card', 'qr']);
 const ticketStatuses = new Set(['open', 'paid', 'departed', 'void', 'cancelled']);
 const emptyCommission = { fixed: 0, rate: 0, points: 0 };
@@ -52,9 +56,27 @@ export function verifyCommand(role, command) {
     requireCondition(typeof command.reason === 'string' && command.reason.trim().length > 0,
       400, 'reason-required', '操作の理由を入力してください。');
   }
+  if (isPayrollCommand(command.type)) {
+    let valid;
+    if (command.type === 'savePayrollSettings') valid = isRecord(command.settings);
+    else if (command.type === 'savePayrollRate') valid = typeof command.castId === 'string'
+      && isBusinessDate(command.effectiveDate) && validYen(command.hourlyRate);
+    else if (command.type === 'requestDailyPay') valid = typeof command.castId === 'string' && isPayrollMonth(command.month)
+      && validYen(command.amount) && command.amount > 0;
+    else if (isDailyPayCommand(command.type)) valid = typeof command.dailyPayId === 'string' && command.dailyPayId.length <= 128
+      && (command.type === 'reviewDailyPay' ? ['approve','reject'].includes(command.decision) : ['cash','bank'].includes(command.method));
+    else valid = typeof command.castId === 'string' && isPayrollMonth(command.month);
+    requireCondition(valid, 400, 'invalid-command', '給与の入力内容を確認してください。');
+  }
   if (command.type === 'seat') {
     requireCondition(command.newCustomer == null, 400, 'invalid-command',
       '顧客の新規登録は顧客管理から行ってください。来店登録では登録済みの顧客を選べます。');
+  }
+  if (command.type === 'saveTicketNote' || command.type === 'adjustTicketEnd') {
+    const validTicketId = typeof command.ticketId === 'string' && command.ticketId.length > 0 && command.ticketId.length <= 128;
+    const validChange = command.type === 'saveTicketNote' ? typeof command.note === 'string' && command.note.trim().length <= 400
+      : Number.isInteger(command.minutes) && command.minutes !== 0 && Math.abs(command.minutes) <= 180;
+    requireCondition(validTicketId && validChange, 400, 'invalid-command', '伝票と入力内容を確認してください。');
   }
   if (command.type === 'setTicketCustomer' || command.type === 'correctSettledTicketCustomer') {
     const { ticketId, customerId } = command;
@@ -126,6 +148,11 @@ export function projectState(state, role, actorUid) {
   if (role !== 'manager' && role !== 'staff') return null;
   const next = structuredClone(state);
   delete next.auditLog;
+  delete next.payroll;
+  delete next.attendances;
+  delete next.dailyPayByDate;
+  if (role === 'staff') delete next.shifts;
+  for (const ticket of allSnapshotTickets(next)) delete ticket.settledBy;
   if (next.printDocuments) {
     next.printDocuments = next.printDocuments.filter(({ date }) => role === 'manager' || date === state.day.date)
       .map((document) => document.actor?.id === actorUid ? document : printDocumentMetadata(document));
@@ -147,6 +174,7 @@ export function projectState(state, role, actorUid) {
     }
   }
   if (role === 'manager') {
+    next.dailyPayByDate = getDailyPayByDate({payroll:state.payroll});
     const recoveriesByDate = recoveryRowsByDate(state);
     next.recoveryTotalsForDay = summary(state).recoveries;
     next.recoveryRowsForDay = recoveriesByDate.get(state.day.date) ?? [];
@@ -268,6 +296,7 @@ function validPaymentCorrection(ticket) {
 
 function validTicket(ticket) {
   return ticketStatuses.has(ticket.status) && Array.isArray(ticket.tableIds)
+    && (ticket.note === undefined || (typeof ticket.note === 'string' && ticket.note.length <= 400))
     && (ticket.settlementRevision === undefined || validYen(ticket.settlementRevision))
     && (ticket.autoExtensionResumedAt === undefined || validYen(ticket.autoExtensionResumedAt))
     && isValidVisitAutoExtensionPause(ticket)
@@ -428,7 +457,13 @@ export function validateSnapshot(state) {
 
   let normalizedPrintSettings;
   let normalizedCardFeeSettings;
+  let normalizedPayroll;
+  let normalizedAttendances;
   try {
+    validateShiftsSnapshot(state);
+    requireCondition(isValidInitialSetSchedule(state.initialSetSchedule),400,'invalid-snapshot',message);
+    normalizedPayroll = normalizePayrollSnapshot(state);
+    normalizedAttendances = normalizeAttendanceSnapshot(state);
     if (state.cardFeeSettings !== undefined) normalizedCardFeeSettings = normalizeCardFeeSettings(state.cardFeeSettings);
     if (state.printSettings !== undefined) normalizedPrintSettings = normalizePrintSettings(state.printSettings);
     parseStoreConfiguration(JSON.stringify(exportStoreConfiguration(state)));
@@ -438,6 +473,9 @@ export function validateSnapshot(state) {
     throw new ApiError(400, 'invalid-snapshot', message);
   }
   const migrated = structuredClone(state);
+  if (normalizedPayroll !== undefined) migrated.payroll = normalizedPayroll;
+  if (normalizedAttendances !== undefined) migrated.attendances = normalizedAttendances;
+  delete migrated.dailyPayByDate;
   delete migrated.auditLog;
   delete migrated.floorMonthSales;
   delete migrated.recoveryTotalsForDay;
@@ -467,6 +505,7 @@ export function validateSnapshot(state) {
   for (const ticket of allSnapshotTickets(migrated)) {
     delete ticket.seatedByUid;
     delete ticket.activeCustomerLink;
+    delete ticket.settledBy;
   }
   return migrated;
 }

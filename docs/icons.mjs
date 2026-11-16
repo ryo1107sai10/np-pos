@@ -27,6 +27,7 @@ const paths = {
   download: '<path d="M12 3v12m-4-4 4 4 4-4M5 16v4h14v-4"/>',
   edit: '<path d="m14 5 5 5M4 20l4.5-1 11-11a2.2 2.2 0 0 0 0-3.1l-1.4-1.4a2.2 2.2 0 0 0-3.1 0l-11 11L4 20Z"/>',
   more: '<path d="M5 12h.01m7 0h.01m7 0h.01" stroke-width="3"/>',
+  menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
   x: '<path d="m6 6 12 12M6 18 18 6"/>',
   check: '<path d="m5 12 4 4L19 6"/>',
   wallet: '<path d="M20 7V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h13a2 2 0 0 0 2-2v-2M3 7h16a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-4a3 3 0 0 1 0-6h6m-6 3h.01"/>',

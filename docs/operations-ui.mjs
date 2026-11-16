@@ -3,7 +3,7 @@ const timestamp = new Intl.DateTimeFormat('ja-JP', {
   hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
 });
 const japaneseNumber = new Intl.NumberFormat('ja-JP', { maximumFractionDigits: 6 });
-const moneyFields = new Set(['amount', 'total', 'subtotal', 'discount', 'price', 'value', 'cost', 'balance', 'creditLimit', 'balanceBefore', 'expectedCash', 'actualCash', 'discrepancy', 'cardFee', 'collected']);
+const moneyFields = new Set(['amount', 'total', 'subtotal', 'discount', 'price', 'value', 'cost', 'balance', 'creditLimit', 'balanceBefore', 'expectedCash', 'actualCash', 'discrepancy', 'cardFee', 'collected', 'net', 'manualAdvance', 'hourlyRate', 'pointRate']);
 const roles = { admin: '店舗管理者', manager: 'マネージャー', staff: 'スタッフ' };
 
 const auditLabels = {
@@ -20,6 +20,11 @@ const auditLabels = {
   saveAutoExtensionSettings: '自動延長設定の変更', setTableAutoExtension: '卓別の自動延長設定', syncAutoExtensions: '自動延長',
   pauseVisitAutoExtension: '来店単位の自動延長停止', resumeVisitAutoExtension: '来店単位の自動延長再開', saveCardFeeSettings: 'カード会計加算設定の変更',
   importLayout: '卓レイアウトの読み込み', saveControls: '運用設定の変更', migrate: '営業データの移行',
+  savePayrollDraft: '給与の下書き保存', finalizePayroll: '給与の確定', savePayrollRate: '時給の変更', savePayrollSettings: '給与設定の変更',
+  requestDailyPay: '日払いの申請', reviewDailyPay: '日払いの審査', payDailyPay: '日払いの支給',
+  saveTicketNote: '伝票メモの変更', adjustTicketEnd: '終了時刻の調整',
+  saveShift: 'シフトの登録・更新', removeShift: 'シフトの削除',
+  saveInitialSetSchedule: '時間帯別セットの変更',
 };
 
 const valueLabels = {
@@ -39,6 +44,11 @@ const valueLabels = {
   method: '決済方法', reason: '理由', points: 'ポイント', cost: '原価', value: '評価額',
   request: '承認申請', approved: '承認', rejected: '却下', pending: '承認待ち', paid: '会計済み',
   cancelled: '取消済み', departed: '退店済み', open: '利用中', cash: '現金', card: 'カード', qr: 'QR決済', bank: '振込', receivable: '売掛',
+  hourlyRate: '時給', effectiveDate: '適用開始日', net: '支給額', work: '勤務', allowances: '手当', deductions: '控除', manualAdvance: '手入力の日払い済み額',
+  pointRate: 'ポイント換金単価', commissionRounding: '歩合の端数処理', commissionUnit: '歩合の丸め単位', dailyPayLimitBps: '日払い上限率',
+  draft: '下書き', final: '確定', requested: '申請中', castName: 'キャスト名', month: '給与対象月',
+  reviewReason: '審査理由', paidDate: '支給営業日', cashMovementId: '入出金記録ID', floor: '切り捨て', nearest: '四捨五入',
+  note: '伝票メモ', endsAt: '終了時刻',
 };
 
 function inputLabel(label, control) {
@@ -65,7 +75,8 @@ export function renderDiscountForm({ticket, subtotal, limit, role, reasonCodes},
 
 function readableValue(value, key) {
   if (value == null) return value;
-  if (key === 'managerDiscountRateBps' || key === 'rateBps') return `${value / 100}%`;
+  if (key === 'endsAt' && Number.isFinite(new Date(value).getTime())) return timestamp.format(value);
+  if (key === 'managerDiscountRateBps' || key === 'rateBps' || key === 'dailyPayLimitBps') return `${value / 100}%`;
   if (typeof value === 'number' && moneyFields.has(key)) return `¥${japaneseNumber.format(value)}`;
   if (typeof value === 'string') return valueLabels[value] ?? value;
   if (Array.isArray(value)) return value.map((entry) => readableValue(entry));

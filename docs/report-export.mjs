@@ -9,6 +9,7 @@ const columns = [
   ...methods.map(([,label]) => `${label}前受金受取`),
   '前受金充当', '売掛発生', ...recoveryMethods.map(([,label]) => `売掛回収（${label}）`),
   'その他の現金入金', '現金出金（経費除く）', '現金経費', 'レジ理論残高', 'レジ実残高', '差額', '差額理由',
+  '日払い支給（現金・出金に含む）', '日払い支給（振込）',
 ];
 
 export function buildDailyReportCsv(period, storeName) {
@@ -21,6 +22,7 @@ export function buildDailyReportCsv(period, storeName) {
     current.depositsApplied, current.receivableSales, ...recoveryMethods.map(([method]) => current.recoveries[method]),
     current.cashIn, current.cashOut - current.expenses, current.expenses,
     current.expectedCash, closed?.actualCash, closed?.discrepancy, closed?.reason,
+    current.dailyPayTotals?.cash ?? 0, current.dailyPayTotals?.bank ?? 0,
   ]);
   return encodeCsv([columns, ...rows]);
 }

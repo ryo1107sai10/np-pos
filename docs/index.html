@@ -10,6 +10,8 @@
   <link rel="stylesheet" href="style.css">
   <link rel="stylesheet" href="clarity.css">
   <link rel="stylesheet" href="reports.css">
+  <link rel="stylesheet" href="workspace-extra.css">
+  <link rel="stylesheet" href="shifts.css">
   <link rel="stylesheet" href="floor-layout.css">
   <link rel="stylesheet" href="layout-transfer.css">
   <link rel="stylesheet" href="store-settings.css">
@@ -18,11 +20,14 @@
   <link rel="stylesheet" href="customer-ui.css">
   <link rel="stylesheet" href="print-ui.css">
   <link rel="stylesheet" href="auto-extension-ui.css">
+  <link rel="stylesheet" href="workspace-menu.css">
+  <link rel="stylesheet" href="ticket-history.css">
   <script type="module" src="app.mjs"></script>
 </head>
 <body>
   <a class="skip-link" href="#workspace">メインへ移動</a>
   <div id="app"></div>
+  <dialog id="workspace-menu" class="workspace-menu" aria-labelledby="workspace-menu-title"></dialog>
   <dialog id="dialog" aria-labelledby="dialog-title"></dialog>
   <div id="notifications" aria-live="polite"></div>
   <div id="auto-extension-live" class="sr-only" role="status" aria-live="polite"></div>

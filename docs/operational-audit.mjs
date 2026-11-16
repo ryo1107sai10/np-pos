@@ -5,6 +5,7 @@ import { getStoreSettings } from './store-settings.mjs';
 import { getReceivableBalance, getReceivableStatus } from './receivables.mjs';
 import { cashMovementCategories, cashMovementKinds } from './cash-ledger.mjs';
 import { getPrintSettings, printDocumentKinds } from './print-domain.mjs';
+import { getPayrollDraft, getPayrollRates, getPayrollSettings, isDailyPayCommand, isPayrollCommand } from './payroll.mjs';
 
 const ticketActions = new Set([
   'discount', 'approveDiscount', 'rejectDiscount', 'settle', 'cancelSettlement', 'reopenTicket',
@@ -150,6 +151,19 @@ function auditTicket(before, after, action) {
   };
 }
 
+function auditTicketDetails(before, after, action) {
+  const previous = before.tickets.find(({ id }) => id === action.ticketId);
+  const current = after.tickets.find(({ id }) => id === action.ticketId);
+  if (!previous || !current) return null;
+  const memo = action.type === 'saveTicketNote';
+  const key = memo ? 'note' : 'endsAt';
+  const oldValue = previous[key] ?? null;
+  const newValue = current[key] ?? null;
+  if (oldValue === newValue) return null;
+  return { target:target('ticket',current.id,`伝票 No. ${current.number}`), before:{[key]:oldValue}, after:{[key]:newValue},
+    reason:memo ? (newValue ? '伝票メモを保存' : '伝票メモを解除') : textReason(action.reason) };
+}
+
 function auditCustomers(before, after, action) {
   const previous = before.customers ?? [];
   const latest = after.customers ?? [];
@@ -250,10 +264,47 @@ function auditPaymentCorrection(before, after, action) {
   };
 }
 
+function auditPayroll(before, after, action) {
+  if (isDailyPayCommand(action.type)) {
+    const rows = after.payroll.dailyPays;
+    const next = action.type === 'requestDailyPay' ? rows.at(-1) : rows.find(({id}) => id === action.dailyPayId);
+    const previous = before.payroll?.dailyPays?.find(({id}) => id === next.id) ?? null;
+    const labels = { requested:'日払いを申請', approved:'日払いを承認', rejected:'日払いを却下', paid:'日払いを支給' };
+    return { target:target('daily-pay',next.id,`${next.month} ${next.castName}`), before:previous, after:next,
+      reason:textReason(action.reason) || labels[next.status] };
+  }
+  if (action.type === 'savePayrollSettings') {
+    const previous = getPayrollSettings(before);
+    const next = getPayrollSettings(after);
+    if (!sameValue(previous,next)) return { target:target('settings',null,'給与設定'), before:previous, after:next, reason:'給与設定を更新' };
+    return null;
+  }
+  const person = [...after.cast, ...(after.archivedCast ?? [])].find(({id}) => id === action.castId);
+  if (action.type === 'savePayrollRate') {
+    const rate = (state) => getPayrollRates(state,action.castId).find(({effectiveDate}) => effectiveDate === action.effectiveDate) ?? null;
+    const previous = rate(before);
+    const next = rate(after);
+    if (!sameValue(previous,next)) return { target:target('payroll',action.castId,`${person.name}の時給`), before:previous, after:next, reason:'適用開始日付きの時給を保存' };
+    return null;
+  }
+  const view = (state) => {
+    const record = getPayrollDraft(state,action.month,action.castId);
+    if (!record) return null;
+    const { status, work, allowances, deductions, manualAdvance, snapshot } = record;
+    return { status, work, allowances, deductions, manualAdvance, ...(snapshot ? { net:snapshot.net } : {}) };
+  };
+  const previous = view(before);
+  const next = view(after);
+  return sameValue(previous,next) ? null : { target:target('payroll',action.castId,`${action.month} ${person.name}`),
+    before:previous, after:next, reason:action.type === 'finalizePayroll' ? '給与を確定' : '給与の下書きを保存' };
+}
+
 export function buildOperationAudit(before, after, action, at, actor) {
   let details;
   if (ticketActions.has(action.type)) {
     details = auditTicket(before, after, action);
+  } else if (action.type === 'saveTicketNote' || action.type === 'adjustTicketEnd') {
+    details = auditTicketDetails(before, after, action);
   } else if (settingActions.has(action.type)) {
     details = auditSettings(before, after, action);
   } else if (customerActions.has(action.type)) {
@@ -262,6 +313,22 @@ export function buildOperationAudit(before, after, action, at, actor) {
     details = auditTicketCustomer(before, after, action);
   } else if (action.type === 'correctSettledTicketPayments') {
     details = auditPaymentCorrection(before, after, action);
+  } else if (isPayrollCommand(action.type)) {
+    details = auditPayroll(before, after, action);
+  } else if (action.type === 'saveShift' || action.type === 'removeShift') {
+    const previous = before.shifts?.find(({id}) => id === action.shiftId);
+    const current = after.shifts?.find(({id}) => previous ? id === previous.id : !before.shifts?.some((entry) => entry.id === id));
+    const shift = current ?? previous;
+    if (shift && !sameValue(previous,current)) {
+      const person = [...after.cast,...(after.archivedCast ?? [])].find(({id}) => id === shift.castId);
+      details = {businessDate:shift.date,target:target('shift',shift.id,person?.name ?? shift.castId),
+        before:previous ?? null,after:current ?? null,reason:action.type === 'removeShift' ? 'シフトの削除' : 'シフトの登録・更新'};
+    }
+  } else if (action.type === 'saveInitialSetSchedule') {
+    const previous = before.initialSetSchedule ?? [];
+    const current = after.initialSetSchedule ?? [];
+    if (!sameValue(previous,current)) details = {target:target('settings',null,'時間帯別セット'),
+      before:previous,after:current,reason:'初回セットを提案する時間帯を更新'};
   } else if (action.type === 'stockAdjust') {
     const previous = before.stock.find(({ id }) => id === action.stockId);
     const current = after.stock.find(({ id }) => id === action.stockId);

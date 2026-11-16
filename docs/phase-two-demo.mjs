@@ -94,3 +94,18 @@ export function createBillingDemo(now = Date.now()) {
   sample = step(sample,{type:'seat',tableIds:['a1'],guests:2,setId:'set60'},seatedAt);
   return step(sample,{type:'seat',tableIds:['a2'],guests:1,setId:'set60'},seatedAt);
 }
+
+export function createPayrollDemo(now = Date.now()) {
+  let state = createPhaseTwoDemo('live',now);
+  const date = state.day.date;
+  const month = date.slice(0,7);
+  const castId = 'cast1';
+  const step = (action) => { state = apply(state,action,now,demoAdmin); };
+  step({type:'savePayrollRate',castId,effectiveDate:`${month}-01`,hourlyRate:3500});
+  step({type:'savePayrollDraft',month,castId,work:[{date,minutes:180}],
+    allowances:[{label:'交通費',amount:500}],deductions:[]});
+  step({type:'requestDailyPay',castId,month,amount:1000,reason:'サンプルの日払い申請'});
+  step({type:'saveShift',castId,date,startMinute:1200,endMinute:1500,status:'confirmed'});
+  step({type:'saveShift',castId:'cast2',date,startMinute:1260,endMinute:1560,status:'requested'});
+  return state;
+}

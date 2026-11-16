@@ -1,0 +1,53 @@
+.analytics-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 165px), 1fr)); gap: 10px; }
+.analytics-metrics > div { display: grid; align-content: start; gap: 6px; padding: 14px; }
+.analytics-metrics span, .analytics-metrics small { color: var(--muted); }
+.analytics-metrics strong { color: var(--text); font-size: clamp(1.2rem, 2vw, 1.55rem); overflow-wrap: anywhere; }
+.analytics-table { max-width: 100%; overflow-x: auto; }
+.analytics-table table { width: 100%; border-collapse: collapse; font-size: .83rem; }
+.analytics-table th, .analytics-table td { padding: 8px 9px; border-bottom: 1px solid #e6e9f3; text-align: right; }
+.analytics-table th:first-child { text-align: left; min-width: 5rem; overflow-wrap: anywhere; }
+.analytics-table thead th { color: var(--muted); font-size: .75rem; }
+.analytics-table tr:last-child > * { border-bottom: 0; }
+.analytics-chart { display: grid; gap: 7px; margin: 0; padding: 8px 0 2px; list-style: none; font-size: .78rem; }
+.analytics-chart li { display: grid; grid-template-columns: 3.2rem minmax(0,1fr) minmax(4.3rem,max-content); align-items: center; gap: 7px; }
+.analytics-chart time { color: var(--muted); }
+.analytics-chart li > span { height: 9px; overflow: hidden; border-radius: 10px; background: #eeedf8; }
+.analytics-chart li i { display: block; height: 100%; border-radius: inherit; background: #7765bd; }
+.analytics-chart strong { text-align: right; font-variant-numeric: tabular-nums; }
+.payroll-total { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-end; gap: 10px; }
+.payroll-total h2 { margin: 7px 0 4px; }
+.payroll-total p { margin: 0; color: var(--muted); }
+.payroll-total strong { font-size: clamp(1.55rem, 5vw, 2.1rem); }
+.payroll-rate-history { margin-top: 12px; color: var(--muted); }
+.payroll-rate-history summary { min-height: 38px; align-content: center; cursor: pointer; }
+.payroll-edit-section { display: grid; justify-items: start; gap: 8px; }
+.payroll-edit-section h3 { margin: 0; font-size: .92rem; }
+.payroll-edit-section > div { display: grid; justify-self: stretch; gap: 6px; }
+.payroll-edit-row { display: grid; grid-template-columns: minmax(0,1.2fr) minmax(0,1fr) auto; gap: 6px; align-items: end; }
+.payroll-edit-row input { min-width: 0; width: 100%; }
+.payroll-edit-row .icon-btn { min-height: 44px; }
+.payroll-edit-section .btn { min-height: 40px; }
+:is(.payroll-advances,.ops-notices-list) { display: grid; gap: 7px; margin: 9px 0 0; padding: 0; list-style: none; }
+:is(.payroll-advances,.ops-notices-list) li { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 7px; padding: 8px 0; border-top: 1px solid #e6e9f3; }
+:is(.payroll-advances,.ops-notices-list) small { display: block; color: var(--muted); }
+.ops-notice-section h3 { margin: 0 0 5px; }
+.ops-guide { margin: 3px 0; padding-left: 21px; }
+.ops-guide p { margin: 3px 0 10px; color: var(--muted); }
+.workspace-print-heading { margin: 0 0 16px; }
+.workspace-print-heading h1 { margin-bottom: 4px; }
+.ticket-operation-note { margin: 6px 0; padding: 8px 10px; border-radius: 8px; background: #f2eef9; color: #504471; font-size: .82rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ops-modal textarea[name=ticketNote] { width: 100%; }
+@media (max-width: 480px) {
+  .analytics-table th, .analytics-table td { padding-inline: 5px; }
+  .payroll-view input, .payroll-edit-row input { font-size: 16px; }
+}
+@media print {
+  @page np-pos-a4 { size: A4; margin: 12mm; }
+  .np-print-a4 { page: np-pos-a4; color: #111; }
+  .np-print-a4 .lr-view { display: grid; gap: 9px; }
+  .np-print-a4 .lr-panel { background: #fff; color: #111; border: 1px solid #ddd; box-shadow: none; }
+  .np-print-a4 .analytics-table { overflow: visible; }
+  .np-print-a4 tr { break-inside: avoid; }
+  .np-print-a4 .analytics-chart li i { print-color-adjust: exact; }
+  .np-print-a4 .payroll-print-total { font-size: 1.35rem; }
+}

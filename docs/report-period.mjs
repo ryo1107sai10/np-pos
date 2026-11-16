@@ -1,8 +1,10 @@
 import { getCashMovements, getDailyRecoveryRows, totalCashMovements } from './cash-ledger.mjs';
 import { quote, summary } from './engine.mjs';
+import { getDailyPayByDate } from './payroll.mjs';
 
 const tenderMethods = ['cash', 'card', 'qr'];
 const recoveryMethods = ['cash', 'card', 'bank'];
+const dailyPayMethods = ['cash', 'bank'];
 const settledStatuses = new Set(['paid', 'departed']);
 const additiveFields = ['sales', 'guests', 'tickets', 'receivableSales', 'depositsApplied', 'cashIn', 'cashOut', 'expenses'];
 
@@ -53,7 +55,7 @@ function hasCompleteTickets(closed, tickets, dayState) {
   return tickets.reduce((total, ticket) => total + quote(dayState, ticket.id).total, 0) === closed.sales;
 }
 
-function reportDay(state, date, closed) {
+function reportDay(state, date, closed, dayPayByDate) {
   const isLatest = state.day.date === date;
   if (!closed && !isLatest) return null;
   const tickets = closed?.ticketSnapshots ?? (isLatest ? state.tickets : []);
@@ -67,7 +69,8 @@ function reportDay(state, date, closed) {
     recoveryRowsForDay:undefined,
   } : state;
   const ticketDataComplete = !closed || hasCompleteTickets(closed, settledTickets, dayState);
-  if (!closed) return {date, current:summary(dayState), tickets, settledTickets, state:dayState, closed, legacy:false, ticketDataComplete};
+  const dailyPayTotals = methodTotals(dailyPayMethods,dayPayByDate?.[date]);
+  if (!closed) return {date, current:{...summary(dayState),dailyPayTotals}, tickets, settledTickets, state:dayState, closed, legacy:false, ticketDataComplete};
 
   const fieldsFromTickets = ['sales', 'guests', 'tickets', 'payments', 'tenderPayments', 'depositsReceived',
     'depositsApplied', 'receivableSales'];
@@ -91,6 +94,7 @@ function reportDay(state, date, closed) {
     cashIn:amount(closed.cashIn ?? cash.cashIn),
     cashOut:amount(closed.cashOut ?? cash.cashOut),
     expenses:amount(closed.expenses ?? cash.expenses),
+    dailyPayTotals,
     cashMovements,
   };
   return {date, current, tickets, settledTickets, state:dayState, closed, legacy:!ticketDataComplete, ticketDataComplete};
@@ -98,7 +102,7 @@ function reportDay(state, date, closed) {
 
 export function getReportDay(state, date = state.day.date) {
   if (!isReportDate(date)) return null;
-  return reportDay(state, date, state.closedDays.find((day) => day.date === date));
+  return reportDay(state, date, state.closedDays.find((day) => day.date === date), getDailyPayByDate(state));
 }
 
 function aggregateDays(days) {
@@ -106,11 +110,12 @@ function aggregateDays(days) {
     ...Object.fromEntries(additiveFields.map((field) => [field, 0])),
     payments:methodTotals(tenderMethods), tenderPayments:methodTotals(tenderMethods),
     depositsReceived:methodTotals(tenderMethods), recoveries:methodTotals(recoveryMethods),
+    dailyPayTotals:methodTotals(dailyPayMethods),
     hasCombinedOnlyPayments:false,
   };
   for (const {current} of days) {
     for (const field of additiveFields) totals[field] += amount(current[field]);
-    for (const field of ['payments', 'tenderPayments', 'depositsReceived', 'recoveries']) {
+    for (const field of ['payments', 'tenderPayments', 'depositsReceived', 'recoveries', 'dailyPayTotals']) {
       for (const method of Object.keys(totals[field])) totals[field][method] += amount(current[field]?.[method]);
     }
     if (!current.tenderPayments || !current.depositsReceived) totals.hasCombinedOnlyPayments = true;
@@ -124,8 +129,9 @@ export function getReportPeriod(state, filters = {}) {
   const {error, start = '', end = ''} = bounds;
   if (error) return {mode, start, end, days:[], totals:aggregateDays([]), valid:false, error};
   const closedByDate = new Map(state.closedDays.map((day) => [day.date, day]));
+  const dayPayByDate = getDailyPayByDate(state);
   const days = getReportDates(state).filter((date) => date >= start && date <= end)
-    .map((date) => reportDay(state, date, closedByDate.get(date)));
+    .map((date) => reportDay(state, date, closedByDate.get(date), dayPayByDate));
   return {mode, start, end, days, totals:aggregateDays(days), valid:true, error:''};
 }
 
