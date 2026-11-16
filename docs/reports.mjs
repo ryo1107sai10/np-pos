@@ -1,6 +1,7 @@
 import { cashMovementCategories, cashMovementKinds, getDailyRecoveryRows } from './cash-ledger.mjs';
 import { receivableCollectionMethods } from './receivables.mjs';
 import { getTicketCommissionDetails, getTicketTableLabels } from './engine.mjs';
+import { getReportPeriod } from './report-period.mjs';
 
 const formatDay = new Intl.DateTimeFormat('ja-JP', {
   month: 'short', day: 'numeric', weekday: 'short', timeZone: 'Asia/Tokyo',
@@ -245,25 +246,24 @@ function registerBreakdown(state, period, current, api) {
   ], api));
 }
 
-function recoveryPanel(current, api) {
-  return panel('売掛と回収', moneyRows([['当日の売掛売上', current.receivableSales ?? 0],
+function recoveryPanel(current, api, multiple = false) {
+  return panel('売掛と回収', moneyRows([[multiple ? '期間内の売掛売上' : '当日の売掛売上', current.receivableSales ?? 0],
     ...Object.entries(receivableCollectionMethods).map(([method,label]) => [`回収（${label}）`, current.recoveries?.[method] ?? 0])], api),
   '<span class="lr-muted">現金回収はレジ残高に反映</span>');
 }
 
-function tenderBreakdown(period, current, api) {
+function tenderBreakdown(current, api, multiple = false) {
   const {yen} = api;
-  const legacy = current.tenderPayments == null && period.closed;
-  const totals = legacy && period.state.tickets.length ? api.summary(period.state) : current;
-  const combinedOnly = !totals.tenderPayments && !totals.depositsReceived;
+  const combinedOnly = current.hasCombinedOnlyPayments || !current.tenderPayments || !current.depositsReceived;
   const rows = cashMethods.map(([method,label]) => `<tr><th scope="row">${label}</th>
-    <td>${yen(asNumber((totals.tenderPayments ?? totals.payments)?.[method]))}</td>
-    ${combinedOnly ? '' : `<td>${yen(asNumber(totals.depositsReceived?.[method]))}</td>`}</tr>`);
+    <td>${yen(asNumber((combinedOnly ? current.payments : current.tenderPayments)?.[method]))}</td>
+    ${combinedOnly ? '' : `<td>${yen(asNumber(current.depositsReceived?.[method]))}</td>`}</tr>`);
   const columns = combinedOnly ? ['方法','受取合計'] : ['方法','会計時の受取','前受金の受取'];
   const breakdown = table(api,columns,rows,'lr-tender-table');
-  const applied = combinedOnly ? '' : moneyRows([['会計に充当した前受金', totals.depositsApplied ?? 0]], api);
-  const note = combinedOnly ? 'この営業日は、前受金を含む受取額が保存されています。'
-    : '売上には、会計時の受取・会計に充当した前受金・当日の売掛が含まれます。';
+  const applied = combinedOnly ? '' : moneyRows([['会計に充当した前受金', current.depositsApplied ?? 0]], api);
+  const note = combinedOnly
+    ? `${multiple ? 'この期間には' : 'この営業日には'}、会計と前受金を合算した受取額が含まれます。`
+    : `売上には、会計時の受取・会計に充当した前受金・${multiple ? '期間内' : '当日'}の売掛が含まれます。`;
   return panel('支払方法別の入金', `${breakdown}${applied}<p class="lr-report-note">${note}</p>`);
 }
 
@@ -321,9 +321,9 @@ function renderCash(state, api, period, current) {
     ${cashLedgerHistory(state, period, current, api)}</div>`;
 }
 
-function renderDaily(state, api, period, current) {
+function renderDaily(state, api, period, current, controls) {
   const {yen, icon, escape} = api;
-  const settled = period.state.tickets.filter(({status}) => status === 'paid' || status === 'departed');
+  const settled = period.settledTickets;
   const cancelled = (state.cancelledSettlements ?? []).filter((entry) => entry.date === period.date);
   const history = [...state.closedDays].reverse().map((entry) =>
     `<details class="lr-day"><summary><span class="lr-day-icon" aria-hidden="true">${icon('calendar', 18)}</span>
@@ -344,14 +344,14 @@ function renderDaily(state, api, period, current) {
     <td>${escape(entry.reason)}</td></tr>`);
   const guests = asNumber(current.guests);
   return `<div class="lr-view">
-    ${dayPicker(state, period.date, api)}
+    ${controls}
     <div class="lr-stats lr-stats-daily">
     ${stat(api, 'chart', '確定売上', yen(asNumber(current.sales)), 'accent')}
     ${stat(api, 'ticket', '会計済みの組数', `${asNumber(current.tickets)}<small> 組</small>`)}
     ${stat(api, 'users', '会計済みの客数', `${guests}<small> 名</small>`)}
     ${stat(api, 'wallet', '客単価', guests ? yen(Math.round(asNumber(current.sales) / guests)) : '—')}</div>
     ${describeClosing(period, current, api)}
-    <div class="lr-split">${tenderBreakdown(period, current, api)}${recoveryPanel(current, api)}</div>
+    <div class="lr-split">${tenderBreakdown(current, api)}${recoveryPanel(current, api)}</div>
     <div class="lr-split">${registerBreakdown(state, period, current, api)}${cashTotals(current, api)}</div>
     ${panel('会計履歴', receiptRows.length ? table(api, ['伝票', '卓', '会計時刻', '税込金額'], receiptRows, 'lr-payment-table')
       : empty(api, 'ticket', period.legacy ? '集計の保存がある営業日です' : '会計履歴はまだありません',
@@ -360,11 +360,114 @@ function renderDaily(state, api, period, current) {
     ${panel('締め履歴', history || empty(api, 'history', '締め履歴はまだありません', '閉店を確定すると、その営業日の実残高と売上を確認できます。'), panelCount(state.closedDays.length, '件'))}</div>`;
 }
 
+const reportModes = [
+  ['day', '日別'],
+  ['month', '月別'],
+  ['range', '任意期間'],
+];
+
+function reportDateFields(state, interval, period, api) {
+  const {escape} = api;
+  if (period.mode === 'day') return dayPicker(state, period.start ?? state.day.date, api);
+  if (period.mode === 'month') {
+    const month = interval.month ?? state.day.date.slice(0,7);
+    return `<label class="lr-period-field"><span>対象月</span>
+      <input type="month" data-report-month value="${escape(month)}" placeholder="YYYY-MM"></label>`;
+  }
+  const start = interval.start ?? `${state.day.date.slice(0,7)}-01`;
+  const end = interval.end ?? state.day.date;
+  return `<div class="lr-period-dates">
+    <label class="lr-period-field"><span>開始日</span><input type="date" data-report-start value="${escape(start)}"></label>
+    <label class="lr-period-field"><span>終了日</span><input type="date" data-report-end value="${escape(end)}"></label>
+  </div>`;
+}
+
+function renderReportControls(state, interval, period, api) {
+  const {escape, icon} = api;
+  const salesDays = period.days.filter(({current}) => asNumber(current.sales) > 0);
+  const needsDetails = salesDays.some(({ticketDataComplete}) => !ticketDataComplete);
+  const canExportSales = period.valid && salesDays.length > 0 && !needsDetails;
+  const canExportReport = period.valid && period.days.length > 0;
+  const exportButton = (id, label, enabled) => `<button type="button" class="btn btn-secondary" data-action="report-export"
+    data-id="${id}"${enabled ? '' : ' disabled'}>${icon('download',16)}${label}</button>`;
+  return `<section class="lr-period-tools" aria-label="日報の期間とCSV出力">
+    <div class="lr-period-controls">
+      <div class="lr-period-modes" role="group" aria-label="集計単位">
+        ${reportModes.map(([id,label]) => `<button type="button" data-action="report-mode" data-report-mode="${id}"
+          data-id="${id}" aria-pressed="${period.mode === id}">${label}</button>`).join('')}
+      </div>
+      ${reportDateFields(state, interval, period, api)}
+    </div>
+    <div class="lr-period-exports">
+      ${exportButton('report','日報CSV',canExportReport)}
+      <div class="lr-period-freee" role="group" aria-label="freee向けCSV">
+        <span>freee向け</span>
+        ${exportButton('daily','日次集計CSV',canExportSales)}
+        ${exportButton('tickets','伝票別CSV',canExportSales)}
+      </div>
+    </div>
+    ${api.reportExportError ? `<p class="lr-period-note lr-period-error" data-report-export-error role="alert"
+      tabindex="-1">${escape(api.reportExportError)}</p>` : ''}
+    ${!period.valid ? `<p class="lr-period-note lr-period-error" role="status">${escape(period.error || '集計期間を確認してください。')}</p>`
+      : needsDetails ? '<p class="lr-period-note lr-period-error">会計明細が保存されていない営業日が含まれるため、freee向けCSVを出力できません。</p>'
+      : canExportSales ? `<p class="lr-period-note">同じ期間の売上をfreeeに取り込む際は、日次集計と伝票別のどちらか一方を使います。
+        <a href="https://support.freee.co.jp/hc/ja/articles/204847430" target="_blank" rel="noopener noreferrer">freeeの取込手順</a></p>`
+      : canExportReport ? '<p class="lr-period-note">freee向けCSVは、会計確定済みの売上がある期間に出力できます。</p>' : ''}
+  </section>`;
+}
+
+function totalMethods(amounts) {
+  return Object.values(amounts ?? {}).reduce((value, amount) => value + asNumber(amount), 0);
+}
+
+function renderPeriodDays(period, api) {
+  const {yen, escape, icon} = api;
+  const headings = ['営業日', '確定売上', '決済入金', '売掛回収', '経費'];
+  const rows = period.days.slice().reverse().map(({date, current}) => {
+    const amounts = [current.sales,totalMethods(current.payments),totalMethods(current.recoveries),current.expenses];
+    return `<tr>
+      <td><button type="button" class="lr-link" data-action="report-day" data-id="${escape(date)}"
+        aria-label="${escape(date)}の日報を表示"><time datetime="${escape(date)}">${escape(date)}</time>${icon('chevron-right',14)}</button></td>
+      ${amounts.map((amount,index) => `<td class="lr-numeric"><span class="lr-mobile-label" aria-hidden="true">${headings[index+1]}</span>
+        <strong>${yen(asNumber(amount))}</strong></td>`).join('')}
+    </tr>`;
+  });
+  return panel('営業日別の明細',table(api,headings,rows,'lr-period-table'),panelCount(rows.length,'営業日'));
+}
+
+function renderMultipleDays(period, api, controls) {
+  const {yen, escape} = api;
+  const {totals} = period;
+  if (!period.valid || !period.days.length) {
+    return `<div class="lr-view">${controls}${period.valid ? panel('期間の集計', empty(api,'calendar',
+      'この期間の営業データはありません','別の月または期間を選ぶと、該当する営業日を確認できます。')) : ''}</div>`;
+  }
+  return `<div class="lr-view">${controls}
+    <p class="lr-period-caption"><time datetime="${escape(period.start)}">${escape(period.start)}</time>
+      〜 <time datetime="${escape(period.end)}">${escape(period.end)}</time></p>
+    <div class="lr-stats lr-stats-daily">
+      ${stat(api, 'chart', '確定売上', yen(asNumber(totals.sales)), 'accent')}
+      ${stat(api, 'wallet', '決済入金', yen(totalMethods(totals.payments)))}
+      ${stat(api, 'cash', '売掛回収', yen(totalMethods(totals.recoveries)))}
+      ${stat(api, 'ticket', '経費', yen(asNumber(totals.expenses)))}
+    </div>
+    <div class="lr-split">${tenderBreakdown(totals, api, true)}${recoveryPanel(totals, api, true)}</div>
+    ${cashTotals(totals,api)}
+    ${renderPeriodDays(period,api)}
+  </div>`;
+}
+
 export function renderReport(page, state, api) {
   if (page === 'stock') return renderStock(state, api);
-  const period = reportPeriod(state, api);
-  const result = period.closed ?? api.summary(state);
-  if (page === 'commission') return renderCommission(state, api, period, result);
-  if (page === 'cash') return renderCash(state, api, period, result);
-  return renderDaily(state, api, period, result);
+  if (page === 'commission' || page === 'cash') {
+    const period = reportPeriod(state, api);
+    const result = period.closed ?? api.summary(state);
+    return page === 'commission' ? renderCommission(state, api, period, result) : renderCash(state, api, period, result);
+  }
+  const currentMonth = state.day.date.slice(0,7);
+  const interval = {mode:'day',month:currentMonth,start:`${currentMonth}-01`,end:state.day.date,...api.reportInterval};
+  const period = getReportPeriod(state,{...interval,date:api.reportDate});
+  const controls = renderReportControls(state,interval,period,api);
+  const day = period.mode === 'day' ? period.days[0] : null;
+  return day ? renderDaily(state, api, day, day.current, controls) : renderMultipleDays(period, api, controls);
 }

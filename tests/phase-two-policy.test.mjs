@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { apply, createDemo, quote, summary } from '../docs/engine.mjs';
+import { createPeriodReportDemo } from '../docs/phase-two-demo.mjs';
+import { getReportPeriod } from '../docs/report-period.mjs';
 import { getCustomerDetail } from '../docs/customers.mjs';
 import { projectState, validateSnapshot, verifyCommand } from '../server/policy.mjs';
 
@@ -120,4 +122,15 @@ test('cloud migration retains customer, visit and collection relationships and r
   delete legacy.customers;
   delete legacy.receivables;
   assert.doesNotThrow(() => validateSnapshot(legacy));
+});
+
+test('staff receive the same monthly floor sales as the store report without archived sales details', () => {
+  const state = createPeriodReportDemo(at);
+  const month = getReportPeriod(state,{mode:'month',month:'2026-11'});
+  const projected = projectState(state,'staff',staff.id);
+  assert.equal(projected.floorMonthSales,46_200);
+  assert.equal(projected.floorMonthSales,month.totals.sales);
+  assert.deepEqual(projected.closedDays,[]);
+  assert.equal(projected.receivables,undefined);
+  assert.equal(validateSnapshot({...state,floorMonthSales:999_999}).floorMonthSales,undefined);
 });

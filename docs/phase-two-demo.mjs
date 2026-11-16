@@ -1,4 +1,4 @@
-import { apply, createDemo, quote } from './engine.mjs';
+import { apply, createDemo, quote, summary } from './engine.mjs';
 
 const demoAdmin = { id: 'demo-admin', label: 'デモの店舗管理者', role: 'admin' };
 const demoCustomer = {name:'山本 花子', kana:'やまもと はなこ',
@@ -46,5 +46,37 @@ export function createCashDemo(now = Date.now()) {
     reason:'レジロールを購入',destination:'文具店'},14);
   step({type:'recoverReceivable',receivableId:state.receivables[0].id,amount:4_000,
     method:'cash',date:state.day.date},9);
+  return state;
+}
+
+export function createPeriodReportDemo(now = Date.now()) {
+  const minute = 60_000;
+  const day = 86_400_000;
+  let state = createDemo('closed',now);
+  const latest = state.day.date;
+  const previousDates = [2,1].map((offset) => new Date(Date.parse(latest) - day * offset).toISOString().slice(0,10));
+  const step = (command,at) => { state = apply(state,command,at,demoAdmin); };
+  step({type:'saveCustomer',customer:demoCustomer},now - 3 * day);
+  const customerId = state.customers[0].id;
+
+  for (const [index,date] of [...previousDates,latest].entries()) {
+    const opening = index === 2 ? now - 56 * minute : Date.parse(`${date}T18:00:00+09:00`);
+    const at = (minutes) => opening + minute * minutes;
+    step({type:'open',date,openingCash:20_000},opening);
+    step({type:'seat',tableIds:['a1'],guests:index === 1 ? 3 : 2,setId:'set60',...(index === 0 ? {customerId} : {})},at(5));
+    const ticket = state.tickets.at(-1);
+    if (index === 2) step({type:'deposit',ticketId:ticket.id,amount:2_000,method:'cash'},at(10));
+    const amount = quote(state,ticket.id).remaining;
+    const payments = index === 0 ? [{method:'card',amount:amount - 10_000},{method:'receivable',amount:10_000}]
+      : [{method:index === 1 ? 'qr' : 'cash',amount}];
+    step({type:'settle',ticketId:ticket.id,payments,...(index === 0 ? {creditDueDate:latest} : {})},at(38));
+    step({type:'depart',ticketId:ticket.id},at(39));
+    if (index === 1) {
+      step({type:'recoverReceivable',receivableId:state.receivables[0].id,amount:4_000,method:'bank',date},at(42));
+      step({type:'recordCashMovement',kind:'expense',category:'supplies',amount:900,
+        reason:'レジロールを購入',destination:'文具店'},at(44));
+    }
+    if (index < 2) step({type:'close',actualCash:summary(state).expectedCash},at(55));
+  }
   return state;
 }

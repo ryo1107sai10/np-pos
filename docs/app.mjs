@@ -1,6 +1,9 @@
 import { apply, businessDate, createDemo, discountReasonCodes, exportStoreConfiguration, getItemCommission, getLayoutAreas, getLayoutTables, getManagerDiscountLimit, getTableLabel, getTicketForTable, getTicketTableLabels, parseStoreConfiguration, quote, summary, tableStatus, yen } from './engine.mjs';
 import { icon } from './icons.mjs';
 import { renderReport } from './reports.mjs';
+import { getMonthlyReportSales, getReportDates, getReportPeriod } from './report-period.mjs';
+import { buildDailyReportCsv } from './report-export.mjs';
+import { buildFreeeCsv } from './freee-export.mjs';
 import { bindLayoutEditor, commitLayoutFields, floorLayoutStage, handleLayoutEditorAction, layoutAreaTabs, newLayoutDraft, renderLayoutEditor } from './floor-layout.mjs';
 import { renderLayoutTransfer } from './layout-transfer.mjs';
 import { catalogDeletionBlocker, getStoreSettings, stockDeletionBlocker } from './store-settings.mjs';
@@ -13,7 +16,7 @@ import { getCustomerReceivableBalance } from './receivables.mjs';
 import { cashMovementCategories, cashMovementKinds } from './cash-ledger.mjs';
 import { findPrintableTicket, getPrintDocuments, getPrintSettings, getPrintTenderReceived } from './print-domain.mjs';
 import { printDocumentTitles, renderPrintOptions, renderPrintPreview, renderPrintSettings } from './print-ui.mjs';
-import { createCashDemo, createPhaseTwoDemo } from './phase-two-demo.mjs';
+import { createCashDemo, createPhaseTwoDemo, createPeriodReportDemo } from './phase-two-demo.mjs';
 import * as customerUI from './customer-ui.mjs';
 import { operationReason, renderAuditLog, renderDiscountForm } from './operations-ui.mjs';
 
@@ -46,7 +49,7 @@ const number = new Intl.NumberFormat('ja-JP', { maximumFractionDigits: 6 });
 const ownerActions = new Set(['store-settings', 'stock-settings', 'edit-layout', 'layout-transfer', 'layout-export',
   'discount-review', 'discount-reject', 'cancel-settlement', 'reopen-ticket', 'audit-log', 'audit-more', 'ops-settings', 'print-settings', 'customer-merge', 'customer-link', 'customer-import']);
 const managerActions = new Set(['open', 'close', 'stock-adjust', 'discount', 'cancel-line', 'cancel-deposit', 'customer-detail', 'customer-new', 'customer-edit', 'customer-visit',
-  'receivable-detail', 'receivable-recover', 'record-cash']);
+  'receivable-detail', 'receivable-recover', 'record-cash', 'report-mode', 'report-day', 'report-export']);
 const cloudLabels = { admin: '店舗管理者', manager: 'マネージャー', staff: 'スタッフ', cast: 'キャスト', trainee: '体入' };
 
 let cloudState;
@@ -59,6 +62,8 @@ let { view: floorView, area: planArea } = loadFloorView();
 let filter = 'all';
 let showHiddenStock = false;
 let reportDate = '';
+let reportInterval = {mode:'day'};
+let reportExportError = '';
 let commissionCast = '';
 let customersQuery = '';
 let receivableQuery = '';
@@ -181,7 +186,7 @@ function permittedAction(action) {
   const store = cloudState.store;
   if (store && (!cloudState.state || !store.hasState)) return action === 'dismiss' || action.startsWith('cloud-');
   const role = currentRole();
-  if (store && ['demo', 'demo-start', 'demo-live', 'demo-cash', 'demo-role'].includes(action)) return false;
+  if (store && ['demo', 'demo-start', 'demo-live', 'demo-cash', 'demo-reports', 'demo-role'].includes(action)) return false;
   if (ownerActions.has(action) || action.startsWith('store-editor-') || action.startsWith('layout-editor-')) return role === 'admin';
   if (managerActions.has(action)) return role === 'admin' || role === 'manager';
   return true;
@@ -236,7 +241,8 @@ function renderSide() {
 
 function renderTop() {
   const isOpen = state.day.status === 'open';
-  const activeReport = ['cash','reports'].includes(page) && (!reportDate || reportDate === state.day.date);
+  const dailyView = page === 'cash' || (page === 'reports' && reportInterval.mode === 'day');
+  const activeReport = dailyView && (!reportDate || reportDate === state.day.date);
   const date = prettyDate.format(new Date(`${state.day.date}T12:00:00+09:00`));
   return `<div class="workspace-top"><div class="open-meta"><span class="workspace-store">${icon('store',15)}<span class="store-label">${escape(cloudState.store?.name ?? '銀座店')}</span><span class="mobile-wordmark"><img src="np-pos.svg" width="20" height="20" alt="">NP POS</span></span><span class="meta-sep"></span>${icon('calendar',16)}<span>${date} 営業日</span></div><div class="workspace-time"><span class="live ${isOpen ? '' : 'closed'}"><span class="dot"></span>${isOpen ? '営業中' : '営業時間外'}</span><span class="meta-sep"></span><time id="workspace-time">${dateTime.format(Date.now())}</time><span>JST</span></div></div>
     <header class="page-head"><div><h1>${pages[page].title}</h1><p>${pages[page].help}</p></div><div class="actions">
@@ -247,10 +253,13 @@ function renderTop() {
 
 function renderMetrics() {
   const totals = summary(state);
+  const month = state.day.date.slice(0,7);
+  const monthlySales = state.floorMonthSales ?? getMonthlyReportSales(state,month,totals);
+  const [year,monthNumber] = month.split('-').map(Number);
   const soon = state.tables.filter((table) => ['soon','overtime'].includes(tableStatus(state,table.id))).length;
   const active = new Set(state.tickets.filter((ticket) => ticket.status === 'open').map((ticket) => ticket.id)).size;
   const figures = [
-    ['table', '稼働卓', `${totals.occupied} <small>/ ${totals.totalTables}卓</small>`, `${totals.totalTables - totals.occupied}卓が空席`, ''],
+    ['calendar', '月間売上', yen(monthlySales), `${year}年${monthNumber}月 · 確定売上`, 'blue'],
     ['trend','営業売上',yen(totals.sales), `会計済み ${totals.tickets}組`, 'green'],
     ['clock','終了間近・超過', `${soon} <small>卓</small>`, '残り10分以下を表示', 'amber'],
     ['ticket','未会計の伝票', `${active} <small>件</small>`, `退店待ち ${totals.paidTickets ?? 0}組`, 'blue'],
@@ -432,7 +441,7 @@ function render({ preserveFocus = false } = {}) {
     if (page === 'floor') view = renderFloor();
     else if (page === 'customers') view = customerUI.renderCustomers(customerWorkspaceState(),{...customerUIApi(),query:customersQuery});
     else if (page === 'receivables') view = customerUI.renderReceivables(customerWorkspaceState(),{...customerUIApi(),query:receivableQuery,filter:receivableFilter});
-    else view = renderReport(page,state,{yen,summary,quote,escape,icon,showHiddenStock,reportDate,commissionCast});
+    else view = renderReport(page,state,{yen,summary,quote,escape,icon,showHiddenStock,reportDate,commissionCast,reportInterval:currentReportInterval(),reportExportError});
     content = renderTop() + banner + tools + renderOperationsNav() + view;
   }
   app.innerHTML = `<div class="shell">${renderSide()}<main class="workspace" id="workspace" tabindex="-1">${content}</main></div>`;
@@ -480,6 +489,7 @@ function cloudUpdated(next) {
     if (dialog.open && modal?.type !== 'cloud') dialog.close();
     pendingStorage = false;
     selected = null; mobileDetails = false; area = null; filter = 'all'; reportDate = ''; commissionCast = '';
+    reportInterval = {mode:'day'}; reportExportError = '';
     const view = next.store ? {view: 'list', area: null} : loadFloorView();
     floorView = view.view; planArea = view.area;
     if (before.store && !next.store) rememberStore(null);
@@ -732,17 +742,51 @@ function checkCatalogDeletion(kind, id, menu) {
   return catalogDeletionBlocker(state, kind, id, menu);
 }
 
-function exportStoreFile() {
-  const text = `${JSON.stringify(exportStoreConfiguration(state), null, 2)}\n`;
-  const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+function downloadFile(filename, text, type) {
+  const url = URL.createObjectURL(new Blob([text], {type}));
   const link = document.createElement('a');
   link.href = url;
-  link.download = `np-pos-settings-${businessDate()}.json`;
+  link.download = filename;
   document.body.append(link);
   link.click();
   link.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  setTimeout(() => URL.revokeObjectURL(url),30_000);
+}
+
+function exportStoreFile() {
+  const text = `${JSON.stringify(exportStoreConfiguration(state),null,2)}\n`;
+  downloadFile(`np-pos-settings-${businessDate()}.json`,text,'application/json');
   toast('店舗設定と卓レイアウトを書き出しました。');
+}
+
+function currentReportInterval() {
+  const month = state.day.date.slice(0,7);
+  return {date:reportDate,month,start:`${month}-01`,end:state.day.date,...reportInterval};
+}
+
+function exportReport(kind) {
+  if (page !== 'reports' || !['report','daily','tickets'].includes(kind)) return;
+  const period = getReportPeriod(state,currentReportInterval());
+  if (!period.valid || !period.days.length) return;
+  const storeName = cloudState.store?.name ?? '銀座店';
+  const suffix = period.start === period.end ? period.start : `${period.start}_${period.end}`;
+  let csv;
+  try {
+    csv = kind === 'report' ? buildDailyReportCsv(period,storeName)
+      : buildFreeeCsv(period,{mode:kind,storeName,storeId:cloudState.store?.id}).csv;
+  } catch (error) {
+    reportExportError = error.message;
+    render({preserveFocus:true});
+    app.querySelector('[data-report-export-error]')?.focus({preventScroll:true});
+    return;
+  }
+  if (reportExportError) {
+    reportExportError = '';
+    render({preserveFocus:true});
+  }
+  const prefix = kind === 'report' ? 'daily-report' : `freee-${kind}`;
+  downloadFile(`np-pos-${prefix}-${suffix}.csv`,csv,'text/csv;charset=utf-8');
+  toast('CSVを書き出しました。');
 }
 
 async function readStoreFile(input) {
@@ -911,7 +955,7 @@ function paintDialog(layoutFileInput) {
         ${label('マネージャーの値引き上限（%）',`<input name="managerDiscountLimit" type="number" min="0" max="100" step="0.01" inputmode="decimal" value="${getManagerDiscountLimit(state) / 100}" required>`)}`,'運用設定を保存',{style:'ops-modal'});
       return;
     case 'demo':
-      present('サンプル操作',`<p class="form-copy">開店から試すと、現在の卓配置と店舗設定で営業をやり直せます。ほかのサンプルを選ぶと、店舗設定・卓配置・操作履歴がサンプルの初期状態に戻ります。</p><div class="demo-options">${button('開店から試す','demo-start',{glyph:'power',tone:'primary'})}${button('営業中のサンプルを読み込む','demo-live',{glyph:'refresh'})}${button('入出金と日報を試す','demo-cash',{glyph:'cash'})}</div>
+      present('サンプル操作',`<p class="form-copy">開店から試すと、現在の卓配置と店舗設定で営業をやり直せます。ほかのサンプルを選ぶと、店舗設定・卓配置・操作履歴がサンプルの初期状態に戻ります。</p><div class="demo-options">${button('開店から試す','demo-start',{glyph:'power',tone:'primary'})}${button('営業中のサンプルを読み込む','demo-live',{glyph:'refresh'})}${button('入出金と日報を試す','demo-cash',{glyph:'cash'})}${button('期間集計とCSVを試す','demo-reports',{glyph:'download'})}</div>
         <section aria-labelledby="demo-role-label"><h3 id="demo-role-label">デモの権限</h3><p class="form-copy">現在の権限は${cloudLabels[demoRole]}です。同じ伝票のまま役割を切り替えて確認できます。</p><div class="ops-actions">${['admin','manager','staff'].map((role) =>
           button(`${cloudLabels[role]}で試す`,'demo-role',{id:role,tone:role===demoRole?'primary':'secondary'})).join('')}</div></section>`,null,{style:'ops-modal'});
       return;
@@ -1309,6 +1353,20 @@ function clickAction(target) {
     return;
   }
   if (action === 'navigate') { if (dialog.open) dialog.close(); mobileDetails = false; go(id); return; }
+  if (action === 'report-mode' && page === 'reports' && ['day','month','range'].includes(id)) {
+    reportInterval.mode = id;
+    reportExportError = '';
+    render({preserveFocus:true});
+    return;
+  }
+  if (action === 'report-day' && page === 'reports' && getReportDates(state).includes(id)) {
+    reportDate = id === state.day.date ? '' : id;
+    reportInterval.mode = 'day';
+    reportExportError = '';
+    go('reports');
+    return;
+  }
+  if (action === 'report-export') { exportReport(id); return; }
   if (action === 'customer-visit') {
     const date = target.dataset.date;
     const ticket = date === state.day.date ? state.tickets.find((entry) => entry.id === id)
@@ -1397,11 +1455,13 @@ function clickAction(target) {
     return;
   }
   if (['demo','open','seat','close','record-cash'].includes(action)) {openDialog(action); return;}
-  if (['demo-start','demo-live','demo-cash'].includes(action)) {
+  if (['demo-start','demo-live','demo-cash','demo-reports'].includes(action)) {
     const fromOpening = action === 'demo-start';
     const cashSample = action === 'demo-cash';
-    let sample = cashSample ? createCashDemo() : createPhaseTwoDemo(fromOpening ? 'closed' : 'live');
-    if (cashSample) demoRole = 'admin';
+    const reportSample = action === 'demo-reports';
+    let sample = reportSample ? createPeriodReportDemo()
+      : cashSample ? createCashDemo() : createPhaseTwoDemo(fromOpening ? 'closed' : 'live');
+    if (cashSample || reportSample) demoRole = 'admin';
     if (fromOpening) {
       sample.tables = structuredClone(state.tables);
       sample.layoutAreas = getLayoutAreas(state);
@@ -1412,13 +1472,19 @@ function clickAction(target) {
       sample = apply(sample, { type: 'saveStoreSettings', settings: getStoreSettings(state) });
     }
     saveState(sample);
-    selected = fromOpening || cashSample ? null : 'a1';
+    selected = fromOpening || cashSample || reportSample ? null : 'a1';
     area=null; filter='all'; showHiddenStock=false; mobileDetails=false;
     reportDate = ''; commissionCast = ''; customersQuery = ''; receivableQuery = ''; receivableFilter = 'all';
-    if (!fromOpening) setFloorView('list', getLayoutAreas(state)[0]);
-    go(cashSample ? 'cash' : 'floor');
+    reportInterval = reportSample ? {mode:'range',start:getReportDates(sample)[0],end:sample.day.date} : {mode:'day'};
+    reportExportError = '';
+    if (!fromOpening) setFloorView('list',getLayoutAreas(state)[0]);
+    go(reportSample ? 'reports' : cashSample ? 'cash' : 'floor');
     if (fromOpening) openDialog('open');
-    else { dialog.close(); toast(cashSample ? '入出金と日報のサンプルを読み込みました。' : '営業中のサンプルを読み込みました。'); }
+    else {
+      dialog.close();
+      toast(reportSample ? '期間集計のサンプルを読み込みました。'
+        : cashSample ? '入出金と日報のサンプルを読み込みました。' : '営業中のサンプルを読み込みました。');
+    }
     return;
   }
   if (action==='category') {
@@ -1594,6 +1660,7 @@ function submitDialog(form) {
     case 'cancel-settlement':
       commit({type:'cancelSettlement',ticketId:id,reason:value('reason')},'会計を取り消しました。',()=>{
         selected = null; mobileDetails = false; reportDate = ''; page = 'reports';
+        reportInterval.mode = 'day'; reportExportError = '';
         history.replaceState(null,'','#reports'); window.scrollTo(0,0);
       });
       break;
@@ -1616,6 +1683,7 @@ function submitDialog(form) {
     case 'close':
       commit({type:'close',actualCash:numeric('actualCash'),reason:value('reason')},'閉店しました。締め結果を日報に保存しました。',()=>{
         selected = null; mobileDetails = false; reportDate = ''; commissionCast = '';
+        reportInterval.mode = 'day'; reportExportError = '';
         page = 'reports'; history.replaceState(null, '', '#reports');
       });
       window.scrollTo(0,0);
@@ -1646,6 +1714,16 @@ function updateCustomerPageSearch(event) {
 app.addEventListener('input',updateCustomerPageSearch);
 app.addEventListener('compositionend',updateCustomerPageSearch);
 app.addEventListener('change',(event)=> {
+  const intervalFields = [['month','[data-report-month]'],['start','[data-report-start]'],['end','[data-report-end]']];
+  const interval = intervalFields.find(([,selector]) => event.target.matches(selector));
+  if (interval && page === 'reports') {
+    const [key,selector] = interval;
+    reportInterval[key] = event.target.value;
+    reportExportError = '';
+    render();
+    app.querySelector(selector)?.focus({preventScroll:true});
+    return;
+  }
   if (event.target.name === 'receivableFilter') {
     receivableFilter = event.target.value;
     render();
@@ -1654,6 +1732,7 @@ app.addEventListener('change',(event)=> {
   if (event.target.id==='area-filter') { area=event.target.value || null;render();app.querySelector('#area-filter')?.focus(); }
   if (event.target.matches('[data-report-date]')) {
     reportDate = event.target.value;
+    reportExportError = '';
     commissionCast = '';
     render();
     app.querySelector('[data-report-date]')?.focus({ preventScroll: true });

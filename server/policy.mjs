@@ -1,4 +1,5 @@
 import { exportStoreConfiguration, parseStoreConfiguration, quote, summary } from '../docs/engine.mjs';
+import { getMonthlyReportSales } from '../docs/report-period.mjs';
 import { isAssignedCustomer } from '../docs/customers.mjs';
 import { getRecoveryRows, isValidCashMovement } from '../docs/cash-ledger.mjs';
 import { isValidPrintDocument, normalizePrintSettings } from '../docs/print-domain.mjs';
@@ -124,6 +125,7 @@ export function projectState(state, role, actorUid) {
     }
     return next;
   }
+  next.floorMonthSales = getMonthlyReportSales(state);
   next.closedDays = [];
   next.day.openingCash = 0;
   next.day.closingCash = null;
@@ -337,6 +339,7 @@ export function validateSnapshot(state) {
   }
   const migrated = structuredClone(state);
   delete migrated.auditLog;
+  delete migrated.floorMonthSales;
   delete migrated.recoveryTotalsForDay;
   delete migrated.recoveryRowsForDay;
   delete migrated.cashRecoveryRows;

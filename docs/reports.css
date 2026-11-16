@@ -469,3 +469,136 @@
   .lr-report-toolbar .btn { justify-self: start; }
   .lr-tender-table th, .lr-tender-table td { white-space: normal; }
 }
+
+.lr-period-tools {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: 14px 16px;
+  border: 1px solid var(--lr-border);
+  border-radius: 16px;
+  background: linear-gradient(127deg, #fbfaff, var(--lr-surface) 64%);
+  box-shadow: 0 5px 17px #29345b08;
+}
+.lr-period-controls {
+  display: grid;
+  grid-template-columns: minmax(0, max-content) minmax(0, 1fr);
+  align-items: center;
+  gap: 12px 16px;
+  min-width: 0;
+}
+.lr-period-controls .lr-day-picker { border: 0; background: transparent; padding: 0; }
+.lr-period-modes {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid #e0def1;
+  border-radius: 12px;
+  background: #f1eff8;
+}
+.lr-period-modes button {
+  min-height: 42px;
+  padding: 4px 11px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: none;
+  color: var(--lr-muted);
+  font: inherit;
+  font-size: .82rem;
+  font-weight: 670;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.lr-period-modes button[aria-pressed="true"] {
+  border-color: #ded5f4;
+  background: #fff;
+  color: #453298;
+  box-shadow: 0 2px 6px #291f6012;
+}
+.lr-period-modes button:not([aria-pressed="true"]):hover { color: var(--lr-iris); background: #fdfcff; }
+.lr-period-modes button:focus-visible { outline: 2px solid var(--lr-iris); outline-offset: -2px; }
+.lr-period-field { display: grid; gap: 4px; min-width: 0; font-size: .8rem; font-weight: 650; }
+.lr-period-field input {
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  box-sizing: border-box;
+  padding: 5px 8px;
+  border: 1px solid var(--lr-border);
+  border-radius: 8px;
+  background: #f8f9fe;
+  color: #282b49;
+  font: inherit;
+  font-size: 16px;
+}
+.lr-period-field:only-child { max-width: 15rem; }
+.lr-period-dates { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; max-width: 35rem; }
+.lr-period-exports {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 14px;
+  padding-top: 11px;
+  border-top: 1px solid var(--lr-divider);
+}
+.lr-period-freee {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+}
+.lr-period-freee > span { margin-right: 2px; color: var(--lr-muted); font-size: .8rem; font-weight: 680; }
+.lr-period-exports .btn { min-height: 44px; white-space: nowrap; }
+.lr-period-note {
+  margin: 0;
+  color: var(--lr-muted);
+  font-size: .79rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.lr-period-note a { color: var(--lr-iris); text-underline-offset: 2px; }
+.lr-period-error { color: #8b4519; }
+.lr-period-caption {
+  margin: 0;
+  color: var(--lr-muted);
+  font-size: .85rem;
+  font-weight: 620;
+  font-variant-numeric: tabular-nums;
+}
+.lr-period-table :is(th,td):not(:first-child) { text-align: right; }
+
+@media (max-width: 680px) {
+  .lr-period-tools { padding: 11px; border-radius: 14px; }
+  .lr-period-controls { grid-template-columns: minmax(0, 1fr); }
+  .lr-period-modes button { min-height: 44px; }
+}
+
+@media (max-width: 560px) {
+  .lr-period-table, .lr-period-table tbody { display: block; }
+  .lr-period-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .lr-period-table tr {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 7px 10px;
+    padding: 10px 12px;
+    border-top: 1px solid var(--lr-divider);
+  }
+  .lr-period-table td, .lr-period-table td:first-child, .lr-period-table td:last-child {
+    padding: 0;
+    border: 0;
+    overflow-wrap: anywhere;
+    white-space: normal;
+  }
+  .lr-period-table td:first-child { grid-column: 1 / -1; }
+  .lr-period-table td:not(:first-child) { text-align: left; }
+}
+
+@media (max-width: 440px) {
+  .lr-period-exports { display: grid; grid-template-columns: minmax(0, 1fr); }
+  .lr-period-exports > .btn { justify-self: start; }
+  .lr-period-freee { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .lr-period-freee > span { grid-column: 1 / -1; }
+  .lr-period-freee .btn { justify-content: center; padding-inline: 6px; }
+}
