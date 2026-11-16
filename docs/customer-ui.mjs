@@ -187,12 +187,12 @@ export function renderReceivables(state, api) {
   const searchIds = new Set(searchCustomers(state, query).filter((entry) => canViewCustomer(entry, api)).map((entry) => entry.id));
   const rows = records.filter((entry) => (filter === 'all' || getReceivableStatus(entry, date) === filter)
     && (!query.trim() || searchIds.has(entry.customerId) || String(entry.ticketNumber ?? '').includes(query.trim())));
-  const filters = Object.entries({ all: 'すべての状態', ...statusLabels });
+  const filters = Object.entries({ all: 'すべて', ...statusLabels });
   return `<div class="np-directory">
     <div class="np-directory-stats">${stat('売掛残高', yen(sum(live, getReceivableBalance)))}${stat('今週の回収予定', yen(sum(scheduled, getReceivableBalance)), `${scheduled.length}件`)}
     ${stat('延滞金額', yen(sum(overdue, getReceivableBalance)), `${overdue.length}件`, overdue.length ? 'overdue' : '')}${stat('当月の回収済み', yen(recovered))}</div>
     ${panel('売掛台帳', `<div class="np-directory-toolbar np-directory-toolbar-filter">
-    ${field('台帳を検索', `<input name="receivableSearch" type="search" value="${escape(query)}" placeholder="顧客名・ふりがな・伝票番号" autocomplete="off" maxlength="100">`)}
+    ${field('台帳を検索', `<input name="receivableSearch" type="search" value="${escape(query)}" placeholder="顧客名・伝票番号" autocomplete="off" maxlength="100">`)}
     ${field('状態', `<select name="receivableFilter">${filters.map(([key, label]) => `<option value="${key}"${filter === key ? ' selected' : ''}>${label}</option>`).join('')}</select>`)}</div>
     ${rows.length ? `<ul class="np-directory-list">${rows.map((entry) => receivableRow(state, entry, date, api)).join('')}</ul>` : empty(api, 'wallet', query || filter !== 'all' ? '条件に一致する売掛はありません' : '売掛はまだありません', query || filter !== 'all' ? '' : '顧客を紐づけた伝票の会計で、支払方法に売掛を選ぶと台帳に追加されます。')}`, `${rows.length}件`)}</div>`;
 }
@@ -235,11 +235,12 @@ export function renderSeatCustomerResults(state, query, selected, api) {
   const {escape} = api;
   const staff = !canView(api);
   const selectedCustomer = selected ? findCustomer(state, selected) : null;
-  const searchable = (state.customers ?? []).map((customer) => staff || customer.restricted ? { id:customer.id, name:customer.name } : customer);
+  const searchable = (state.customers ?? []).map((customer) => staff ? { id:customer.id, name:customer.name }
+    : customer.restricted ? { id:customer.id, name:customer.name, kana:customer.kana } : customer);
   const matches = searchCustomers({customers:searchable}, query);
   const candidates = (selectedCustomer ? [selectedCustomer, ...matches.filter((customer) => customer.id !== selected)] : matches).slice(0, 8);
   const option = (customer) => `<label class="np-seat-customer-choice"><input type="radio" name="customerId" value="${escape(customer?.id || '')}"${(customer ? customer.id === selected : !selected) ? ' checked' : ''}>
-    <span><strong>${escape(customer?.name || '指定なし')}</strong>${!staff && !customer?.restricted && customer?.kana ? `<small>${escape(customer.kana)}</small>` : ''}</span></label>`;
+    <span><strong>${escape(customer?.name || '指定なし')}</strong>${!staff && customer?.kana ? `<small>${escape(customer.kana)}</small>` : ''}</span></label>`;
   return `${option(null)}${candidates.map(option).join('')}${!matches.length && query.trim() ? '<p role="status" class="field-help">検索に一致する顧客が見つかりません。</p>' : ''}`;
 }
 

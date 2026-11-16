@@ -75,7 +75,8 @@ export function projectState(state, role, actorUid) {
   const assigned = new Set(role === 'manager' ? (state.customers ?? [])
     .filter((customer) => isAssignedCustomer(state, customer, actorUid)).map(({id}) => id) : []);
   next.customers = (next.customers ?? []).map((customer) => {
-    if (!assigned.has(customer.id)) return { id: customer.id, name: customer.name, kana: customer.kana ?? '', restricted: true };
+    if (!assigned.has(customer.id)) return { id: customer.id, name: customer.name,
+      ...(role === 'manager' ? {kana: customer.kana ?? ''} : {}), restricted: true };
     delete customer.createdByUid;
     return customer;
   });

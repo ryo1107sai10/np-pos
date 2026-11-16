@@ -61,7 +61,7 @@ test('cloud projections restrict customer detail, ticket links, receivables, and
   assert.ok(unassigned.customers.every(({ restricted }) => restricted));
   assert.deepEqual(unassigned.receivables, []);
   const limited = projectState(state, 'staff', staff.id);
-  assert.deepEqual(limited.customers, state.customers.map(({ id, name, kana }) => ({ id, name, kana, restricted: true })));
+  assert.deepEqual(limited.customers, state.customers.map(({ id, name }) => ({ id, name, restricted: true })));
   assert.ok(limited.tickets.every(({ customer, customerId }) => !customer && !customerId));
   assert.equal(limited.receivables, undefined);
   assert.equal(limited.auditLog, undefined);
