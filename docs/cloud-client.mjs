@@ -487,7 +487,7 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
     leaveStore,
     submit,
     migrate,
-    async listAudit({ before, limit } = {}) {
+    async listAudit({ before, limit, ticketId } = {}) {
       const scope = activeScope;
       assertScope(scope);
       const roleSerial = scope.roleSerial;
@@ -500,6 +500,7 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
       const query = new URLSearchParams();
       if (before != null) query.set('before', before);
       if (limit != null) query.set('limit', limit);
+      if (ticketId != null) query.set('ticketId',ticketId);
       const suffix = query.size ? `?${query}` : '';
       const result = await request(`${storePath(scope)}/audit${suffix}`);
       assertScope(scope);

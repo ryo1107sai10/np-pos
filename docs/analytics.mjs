@@ -6,10 +6,20 @@ const methods = [['cash','現金'],['card','カード'],['qr','QR決済']];
 const asYen = (amount) => Number.isFinite(amount) ? amount : 0;
 const average = (total, count) => count ? Math.round(total / count) : 0;
 const daysBetween = (start,end) => Math.round((Date.parse(end) - Date.parse(start)) / 86_400_000);
+const weekdayNames = ['日','月','火','水','木','金','土'];
+const comparisons = {previous:'直前の同じ日数',day:'前日',week:'前週',month:'前月',year:'前年'};
 
 function relativeDate(date, days) {
   const offset = new Date(Date.parse(date) + days * 86_400_000).toISOString().slice(0,10);
   return isReportDate(offset) ? offset : null;
+}
+
+function previousCalendarDate(date, months) {
+  const [year,month,day] = date.split('-').map(Number);
+  const target = new Date(Date.UTC(year,month - 1 - months,1));
+  const last = new Date(Date.UTC(target.getUTCFullYear(),target.getUTCMonth() + 1,0)).getUTCDate();
+  target.setUTCDate(Math.min(day,last));
+  return target.toISOString().slice(0,10);
 }
 
 function statusLabel(complete) {
@@ -25,13 +35,18 @@ export function getAnalytics(state, range = {}) {
   let service = 0;
   let withNomination = 0;
   let complete = true;
+  let cost = 0;
 
   const days = period.days.map((day) => {
     const { date, current, settledTickets, ticketDataComplete } = day;
     if (!ticketDataComplete) complete = false;
+    let discounts = 0;
     for (const ticket of settledTickets) {
       const lines = ticket.lines.filter(({cancelledAt}) => cancelledAt == null);
-      service += asYen(quote(day.state,ticket.id).service);
+      const totals = quote(day.state,ticket.id);
+      service += asYen(totals.service);
+      discounts += asYen(totals.discount);
+      cost += lines.flatMap(({stockUses}) => stockUses ?? []).reduce((sum,use) => sum + use.quantity * use.unitCost,0);
       if (lines.some(({category}) => category === '指名')) withNomination++;
       for (const {menuId,name,category,quantity,total} of lines) {
         const key = JSON.stringify([menuId,name,category]);
@@ -51,16 +66,36 @@ export function getAnalytics(state, range = {}) {
         casts.set(row.castId,current);
       }
     }
-    return {date,sales:current.sales,tickets:current.tickets,guests:current.guests,
+    return {date,sales:current.sales,tickets:current.tickets,guests:current.guests,discounts,
       averageSpend:average(current.sales,current.guests)};
   });
 
   const { totals } = period;
-  const previousEnd = period.valid ? relativeDate(period.start,-1) : null;
-  const previousStart = previousEnd ? relativeDate(previousEnd,-daysBetween(period.start,period.end)) : null;
+  const comparison = Object.hasOwn(comparisons,range.comparison) ? range.comparison : 'previous';
+  let previousStart;
+  let previousEnd;
+  if (period.valid) {
+    const shift = comparison === 'week' ? 7 : 1;
+    if (comparison === 'day' || comparison === 'week') {
+      previousStart = relativeDate(period.start,-shift);
+      previousEnd = relativeDate(period.end,-shift);
+    } else if (comparison === 'month' || comparison === 'year') {
+      const months = comparison === 'month' ? 1 : 12;
+      previousStart = previousCalendarDate(period.start,months);
+      previousEnd = previousCalendarDate(period.end,months);
+    } else {
+      previousEnd = relativeDate(period.start,-1);
+      previousStart = relativeDate(previousEnd,-daysBetween(period.start,period.end));
+    }
+  }
   const previous = previousStart ? getReportPeriod(state,{mode:'range',start:previousStart,end:previousEnd}) : null;
   const previousSales = previous?.days.length ? previous.totals.sales : null;
-  return {start,end,period,days,service,withNomination,previousSales,previousStart,previousEnd,complete,
+  const weekdays = weekdayNames.map((label,index) => {
+    const samples = days.filter(({date}) => new Date(date).getUTCDay() === index);
+    return {label,days:samples.length,sales:samples.length ? average(samples.reduce((sum,day)=>sum + day.sales,0),samples.length) : null};
+  });
+  return {start,end,period,days,service,withNomination,previousSales,previousStart,previousEnd,comparison,complete,weekdays,
+    orderCost:Math.round(cost),perGroup:average(totals.sales,totals.tickets),
     averageSpend:average(totals.sales,totals.guests),
     products:[...products.values()].map(({tickets,...item}) => ({...item,tickets:tickets.size}))
       .sort((a,b) => b.sales - a.sales || a.name.localeCompare(b.name,'ja')),
@@ -108,6 +143,8 @@ export function renderAnalytics(page, state, api) {
     : `<section class="lr-period-tools" aria-label="集計期間と出力"><div class="lr-period-controls"><div class="lr-period-dates">
       <label class="lr-period-field"><span>開始日</span><input type="date" data-analytics-start value="${escape(start)}"></label>
       <label class="lr-period-field"><span>終了日</span><input type="date" data-analytics-end value="${escape(end)}"></label>
+      ${product ? '' : `<label class="lr-period-field"><span>比較</span><select data-analytics-comparison>${Object.entries(comparisons).map(([key,label]) =>
+        `<option value="${key}"${key === data.comparison ? ' selected' : ''}>${label}</option>`).join('')}</select></label>`}
       </div></div><div class="lr-period-exports">
       <button type="button" class="btn btn-secondary" data-action="analytics-csv"${download ? '' : ' disabled'}>${icon('download',16)}CSV出力</button>
       <button type="button" class="btn" data-action="analytics-print"${download ? '' : ' disabled'}>${icon('printer',16)}印刷</button></div></section>`;
@@ -122,16 +159,22 @@ export function renderAnalytics(page, state, api) {
       ${panel('商品別の内訳',products.length ? productRows : '<p class="field-help">この期間に会計済みの商品はありません。</p>')}</div>`;
   }
   const comparison = previousSales == null ? '比較期間の営業データなし'
-    : `直前の同じ日数の期間 ${yen(previousSales)}`;
+    : `${comparisons[data.comparison]} ${yen(previousSales)}`;
   const tender = totals.hasCombinedOnlyPayments ? totals.payments : totals.tenderPayments;
-  const tenderRows = methods.map(([key,label]) => [label,yen(tender[key])]);
-  if (!totals.hasCombinedOnlyPayments) tenderRows.push(['前受金の充当',yen(totals.depositsApplied)]);
+  const tenderTotal = methods.reduce((total,[key])=>total + asYen(tender[key]),0) + (totals.hasCombinedOnlyPayments ? 0 : totals.depositsApplied);
+  const tenderRows = methods.map(([key,label]) => [label,yen(tender[key]),percent(tender[key],tenderTotal)]);
+  if (!totals.hasCombinedOnlyPayments) tenderRows.push(['前受金の充当',yen(totals.depositsApplied),percent(totals.depositsApplied,tenderTotal)]);
   return `<div class="lr-view analytics-view">${controls}${caveat}
     ${metrics([['確定売上',yen(totals.sales),comparison],['客単価',yen(averageSpend),`${totals.guests}名`],
       ['指名のある会計',complete ? percent(data.withNomination,totals.tickets) : '—'],
-      ['サービス料比率',complete ? percent(data.service,totals.sales) : '—']])}
+      ['サービス料比率',complete ? percent(data.service,totals.sales) : '—'],
+      ['組単価',totals.tickets ? yen(data.perGroup) : '—',`${totals.tickets}組`],
+      ['売上 − 注文原価',complete ? yen(totals.sales - data.orderCost) : '—',`注文原価 ${yen(data.orderCost)}`]])}
     <div class="lr-split">${barChart('売上の推移',days,'sales',api)}${barChart('客単価の推移',days,'averageSpend',api)}</div>
-    <div class="lr-split">${panel(totals.hasCombinedOnlyPayments ? '決済別入金（前受金を含む）' : '決済別内訳',rows(['区分','金額'],tenderRows,escape))}
+    <div class="lr-split">${panel('曜日別の平均売上',rows(['曜日','営業日数','平均売上'],
+      data.weekdays.map(({label,days,sales})=>[label,days,sales == null ? '—' : yen(sales)]),escape))}
+      ${barChart('値引き額の推移',days,'discounts',api)}</div>
+    <div class="lr-split">${panel(totals.hasCombinedOnlyPayments ? '決済別入金（前受金を含む）' : '決済別内訳',rows(['区分','金額','構成比'],tenderRows,escape))}
       ${panel('商品別売上 上位5件',products.length ? rows(['商品','数量','商品小計'],products.slice(0,5).map(({name,quantity,sales}) => [name,quantity,yen(sales)]),escape)
         : '<p class="field-help">この期間に会計済みの商品はありません。</p>')}</div>
     ${panel('営業日ごとの実績',rows(['営業日','確定売上','組数','客数','客単価'],days.map(({date,sales,tickets,guests,averageSpend:spend}) =>

@@ -39,7 +39,7 @@ function visibleItems(editor) {
   if (editor.tab === 'stock') return stock;
   return menu.filter((entry) => editor.tab === 'plans'
     ? ['セット', '延長'].includes(entry.category)
-    : orderCategories.includes(entry.category));
+    : !['セット', '延長'].includes(entry.category));
 }
 
 function selectedItem(editor, items = visibleItems(editor)) {
@@ -101,8 +101,8 @@ function itemList(editor, items, selected, api) {
   </section>`;
 }
 
-function textInput(label, value, limit, escape, name = 'name') {
-  return `<label class="field"><span>${label}</span><input name="store-${name}" type="text" value="${escape(value)}" required maxlength="${limit}" autocomplete="off"></label>`;
+function textInput(label, value, limit, escape, name = 'name', required = true) {
+  return `<label class="field"><span>${label}</span><input name="store-${name}" type="text" value="${escape(value)}"${required ? ' required' : ''} maxlength="${limit}" autocomplete="off"></label>`;
 }
 
 function numberInput(label, name, value, { min = 0, max, step = 1, required = false, placeholder } = {}) {
@@ -125,8 +125,13 @@ function stockInputs(item, stock, { escape, icon }) {
   return `<details class="store-editor-advanced"><summary>${icon('box', 16)}<span>在庫連動</span>
     <small>${recipe.size}品目</small>${icon('chevron-down', 14)}</summary>
     <div class="store-editor-advanced-body"><p class="field-help">1点注文するごとに引き落とす数量を入力します。</p>
-    <div class="store-editor-stock-grid">${choices.map((entry) => `<label class="field"><span>${escape(entry.name)}（${escape(entry.unit)}）${entry.hidden === true ? '［非表示］' : ''}</span>
-      <input type="number" name="store-stock-quantity" data-stock-id="${escape(entry.id)}" value="${escape(recipe.get(entry.id) ?? '')}" min="0" max="1000000" step="0.000001" inputmode="decimal" placeholder="0"></label>`).join('')}</div></div>
+    <div class="store-editor-stock-grid">${choices.map((entry) => `<div data-recipe-stock><label class="field"><span>${escape(entry.name)}（${escape(entry.unit)}）${entry.hidden === true ? '［非表示］' : ''}</span>
+      <input type="number" name="store-stock-quantity" data-stock-id="${escape(entry.id)}" value="${escape(recipe.get(entry.id) ?? '')}" min="0" max="1000000" step="0.000001" inputmode="decimal" placeholder="0"></label>
+      <details class="store-recipe-calculator"><summary>使用割合を計算</summary>
+      <label class="field"><span>容器の容量（ml）</span><input data-recipe-volume type="text" inputmode="decimal" placeholder="750"></label>
+      <label class="field"><span>1杯の使用量（ml）</span><input data-recipe-usage type="text" inputmode="decimal" placeholder="30"></label>
+      <button type="button" class="btn btn-quiet" data-action="store-editor-stock-ratio">反映する</button>
+      <small data-recipe-result role="status"></small></details></div>`).join('')}</div></div>
   </details>`;
 }
 
@@ -179,7 +184,10 @@ function stockInspector(item, api) {
     <div class="store-editor-basic-grid">
       ${textInput('単位', item.unit, stockUnitLimit, escape, 'unit')}
       ${numberInput('在庫の下限', 'minimum', item.minimum, { max: stockMinimumMax, step: stockPrecision, required: true })}
+      ${numberInput('補充後の目標在庫', 'maximum', item.maximum, { min:item.minimum, max:stockMinimumMax, step:stockPrecision })}
       ${numberInput('仕入原価（円 / 単位）', 'unit-cost', item.defaultUnitCost, { max: priceMax, step: stockPrecision, required: true })}
+      <label class="field"><span>品目コード</span><input name="store-item-code" maxlength="64" value="${escape(item.itemCode ?? '')}" autocomplete="off"></label>
+      <label class="field"><span>バーコード</span><input name="store-barcode" maxlength="64" value="${escape(item.barcode ?? '')}" autocomplete="off"></label>
     </div>
     <p class="field-help">補充時は、設定した1単位あたりの原価を使います。単位の変更後も在庫数量やメニューの使用量は同じ数値を引き継ぎます。</p>
     <div class="store-editor-toggles">${toggle('在庫一覧に表示する', 'stock-visible', item.hidden !== true)}</div>`;
@@ -201,17 +209,22 @@ function menuInspector(item, editor, api) {
   const ordinary = editor.tab === 'menu';
   const surcharge = item.id === surchargeId;
   const heading = ordinary ? '商品の設定' : surcharge ? '延長時の指名料' : `${item.category}の設定`;
-  const category = ordinary ? `<label class="field"><span>カテゴリ</span><select name="store-category">${orderCategories.map((name) =>
-    `<option${name === item.category ? ' selected' : ''}>${name}</option>`).join('')}</select></label>` : '';
+  const categories = [...orderCategories,...(editor.settings.customMenuCategories ?? [])];
+  const category = ordinary ? `<label class="field"><span>カテゴリ</span>
+    <input name="store-category" maxlength="24" list="store-category-list" value="${api.escape(item.category)}" required>
+    <datalist id="store-category-list">${categories.map((name) => `<option value="${api.escape(name)}"></option>`).join('')}</datalist>
+    <small>新しい名前を入力すると店舗のカテゴリに追加します。</small></label>` : '';
   const taxMode = { exclusive: '・税抜', inclusive: '・税込' }[api.priceMode] ?? '';
   const priceLabel = ordinary ? `価格（円${taxMode}）` : `料金（円 / ${surcharge ? '指名' : '人'}${taxMode}）`;
   const visibility = ordinary ? '注文メニューに表示する' : surcharge ? '延長時に指名料を追加する' : '料金の選択肢に表示する';
   return `<h3 id="store-inspector-heading">${heading}</h3>
     ${textInput(ordinary ? '商品名' : '表示名', item.name, nameLimits.menu, api.escape)}
+    ${textInput('帳票に印字する名前（任意）',item.printName ?? '',nameLimits.menu,api.escape,'print-name',false)}
     <div class="store-editor-basic-grid">${category}${numberInput(priceLabel, 'price', item.price, { max: priceMax, required: true })}
     ${ordinary || surcharge ? '' : numberInput('時間（分）', 'duration', item.duration, { min: 1, max: 1440, required: true })}</div>
     <div class="store-editor-toggles">${toggle(visibility, 'enabled', item.enabled !== false)}
-    ${ordinary ? toggle('「よく使う」に表示する', 'popular', item.popular) : ''}</div>
+    ${ordinary ? toggle('「よく使う」に表示する', 'popular', item.popular)
+      + toggle('0円明細をお客様用伝票・レシートから外す','hide-receipt',item.hideReceiptLine) : ''}</div>
     ${item.category === 'セット' ? '<p class="field-help">来店登録に使う初回セットを1件以上残してください。</p>' : ''}
     ${menuCalculationInputs(item, api.icon)}
     ${ordinary || surcharge ? `<details class="store-editor-advanced"><summary>${api.icon('users', 16)}<span>商品の標準歩合</span>${api.icon('chevron-down', 14)}</summary>
@@ -259,13 +272,25 @@ function parseCommission(dialog) {
   return policy;
 }
 
-function commitMenuFields(dialog, entry, read) {
+function commitMenuFields(dialog, entry, read, editor) {
   entry.price = read('price').valueAsNumber;
   const category = read('category');
   const duration = read('duration');
   const taxRate = Math.round(read('tax-rate').valueAsNumber * 100);
   const serviceEligible = read('service-eligible').checked;
-  if (category) entry.category = category.value;
+  const printName = read('print-name').value.trim().normalize('NFC');
+  if (printName) entry.printName = printName;
+  else delete entry.printName;
+  if (category) {
+    const name = category.value.trim().normalize('NFC');
+    entry.category = name;
+    if (name && !orderCategories.includes(name)) {
+      const custom = (editor.settings.customMenuCategories ??= []);
+      if (!custom.includes(name)) custom.push(name);
+    }
+    if (read('hide-receipt').checked && entry.price === 0) entry.hideReceiptLine = true;
+    else delete entry.hideReceiptLine;
+  }
   if (duration) entry.duration = duration.valueAsNumber;
   if (taxRate !== (entry.taxRate ?? defaultItemTaxRateBps)) entry.taxRate = taxRate;
   if (serviceEligible !== (entry.serviceEligible !== false)) entry.serviceEligible = serviceEligible;
@@ -318,6 +343,12 @@ export function commitStoreSettingsEditor(dialog, editor) {
     entry.name = name;
     entry.unit = unit;
     entry.minimum = read('minimum').valueAsNumber;
+    const maximum = read('maximum').valueAsNumber;
+    if (entry.maximum !== undefined || Number.isFinite(maximum)) entry.maximum = Number.isFinite(maximum) ? maximum : null;
+    for (const [key,field] of [['itemCode','item-code'],['barcode','barcode']]) {
+      const value = read(field).value.trim();
+      if (entry[key] !== undefined || value) entry[key] = value;
+    }
     entry.defaultUnitCost = read('unit-cost').valueAsNumber;
     if (read('stock-visible').checked) delete entry.hidden;
     else entry.hidden = true;
@@ -330,7 +361,7 @@ export function commitStoreSettingsEditor(dialog, editor) {
     if (Object.keys(commissionOverride).length) entry.commissionOverride = commissionOverride;
     else delete entry.commissionOverride;
     if (name !== entry.name || !entry.initials) entry.initials = [...name][0];
-  } else commitMenuFields(dialog, entry, read);
+  } else commitMenuFields(dialog, entry, read, editor);
   entry.name = name;
   return true;
 }
@@ -429,6 +460,20 @@ function changeRemoval(dialog, editor, action, id, api) {
 
 export function handleStoreSettingsEditorAction(dialog, editor, target, api = {}) {
   const { action, id } = target.dataset;
+  if (action === 'store-editor-stock-ratio') {
+    const row = target.closest('[data-recipe-stock]');
+    const volume = Number(row.querySelector('[data-recipe-volume]').value);
+    const usage = Number(row.querySelector('[data-recipe-usage]').value);
+    const result = row.querySelector('[data-recipe-result]');
+    const quantity = Math.round(usage / volume * 1_000_000) / 1_000_000;
+    if (!(volume > 0) || !(quantity > 0) || quantity > 1_000_000) {
+      result.textContent = '容器と1杯の容量を正の数値で入力してください。';
+      return false;
+    }
+    row.querySelector('[name=store-stock-quantity]').value = quantity;
+    result.textContent = `使用割合 ${quantity} を反映しました。`;
+    return false;
+  }
   if (action !== 'store-editor-discard-new' && !commitStoreSettingsEditor(dialog, editor)) return false;
   const listTop = dialog.querySelector('.store-editor-list')?.scrollTop ?? 0;
   switch (action) {

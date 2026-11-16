@@ -114,11 +114,15 @@ export function getNextAutoExtensionAt(state) {
 export function saveAutoExtensionSettings(state, action, now, actor) {
   if (actor.role !== 'admin') throw new Error('自動延長の変更には店舗管理者の権限が必要です。');
   if (typeof action.enabled !== 'boolean' || !isPlanId(action.menuId)) throw new Error('自動延長の設定を確認してください。');
+  if (action.bulkExtensionEnabled !== undefined && typeof action.bulkExtensionEnabled !== 'boolean') {
+    throw new Error('一括延長の設定を確認してください。');
+  }
   if (action.enabled && !availablePlan(state, action.menuId)) throw new Error('自動延長に使う有効な延長プランを選択してください。');
   const previous = getAutoExtensionSettings(state);
   const unchanged = previous.enabled && previous.menuId === action.menuId;
   const effectiveAt = action.enabled ? (unchanged ? previous.effectiveAt : now) : null;
   state.autoExtensionSettings = {enabled: action.enabled, menuId: action.menuId, effectiveAt};
+  if (action.bulkExtensionEnabled !== undefined) state.bulkExtensionEnabled = action.bulkExtensionEnabled;
 }
 
 export function setTableAutoExtension(state, {tableId, enabled}, now, actor) {

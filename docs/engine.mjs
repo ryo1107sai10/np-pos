@@ -1,18 +1,23 @@
-import { addCardFeeTax, getCardFee, getCardFeeSettings, normalizeCardFeeSettings } from './card-fee.mjs';
+import { addCardFeeTax, canWaivePaymentFee, getPaymentFeeGroups, normalizeCardFeeSettings } from './card-fee.mjs';
 import { calculationTaxGroup, defaultItemTaxRateBps, getCalculationSettings, getTicketCalculationSettings,
   normalizeCalculationSettings, roundCalculationRate } from './calculation-settings.mjs';
 import { getStoreSettings, normalizeStoreSettings, replaceStoreSettings } from './store-settings.mjs';
 import { buildOperationAudit } from './operational-audit.mjs';
 import { applyPayrollCommand, isPayrollCommand } from './payroll.mjs';
-import { applyCustomerCommand, customerForSeat, findCustomer, findSettledCustomerTicket, isAssignedCustomer, setTicketCustomer } from './customers.mjs';
+import { applyCustomerCommand, customerForSeat, findCustomer, findSettledCustomerTicket, isAssignedCustomer, setTicketCompanion, setTicketCustomer } from './customers.mjs';
 import { correctSettledTicketReceivable, getCustomerReceivableBalance, getReceivableBalance, getReceivableRecoveryTotals,
   receivableCollectionMethods } from './receivables.mjs';
-import { createCashMovement, getCashMovements, getDailyRecoveryRows, totalCashMovements } from './cash-ledger.mjs';
+import { createCashMovement, editableCashMovement, getCashMovements, getDailyRecoveryRows, totalCashMovements } from './cash-ledger.mjs';
 import { calculateCashTender, getCashCountTotal } from './register-cash.mjs';
 import { applyPrintCommand } from './print-domain.mjs';
+import { applyAccountingCsv } from './accounting-csv.mjs';
+import { normalizeRolePolicy, roleAllowsCommand } from './role-policy.mjs';
+import { saveCashAccounts } from './cash-accounts.mjs';
+import { replayPurchaseCancellation } from './inventory-operations.mjs';
+import { normalizeRegisterSettings, openingCashSuggestion, registerCutoff } from './register-config.mjs';
 import { applyShiftCommand } from './shifts.mjs';
 import { applySetSchedule, isValidInitialSetSchedule } from './set-schedule.mjs';
-import { applyCastSelfCommand, bindCastAccount, isCastAttendanceReview, isCastSelfCommand } from './cast-self.mjs';
+import { applyCastSelfCommand, bindCastAccount, isCastAttendanceReview, isCastSelfCommand, isManagedAttendanceCommand } from './cast-self.mjs';
 import { getLinkedTablesAutoExtensionEnabled, pauseVisitAutoExtension, resumeVisitAutoExtension, saveAutoExtensionSettings,
   setTableAutoExtension, syncAutomaticExtensions } from './auto-extension.mjs';
 
@@ -111,6 +116,7 @@ export function exportStoreConfiguration(state) {
     format: storeFileFormat, version: storeFileVersion,
     layout: exportLayout(state), settings: getStoreSettings(state),
     ...(state.initialSetSchedule && {initialSetSchedule:state.initialSetSchedule.map(({start,end,setId})=>({start,end,setId}))}),
+    ...(state.bulkExtensionEnabled !== undefined && {bulkExtensionEnabled:state.bulkExtensionEnabled}),
     ...(state.calculationSettings && {calculationSettings:getCalculationSettings(state)}),
   };
 }
@@ -125,7 +131,9 @@ export function parseStoreConfiguration(text) {
   const settings = validatedStoreSettings(input, null, !legacy);
   const rules = file.initialSetSchedule;
   assert(isValidInitialSetSchedule(rules), '時間帯別セットの設定を確認してください。');
+  assert(file.bulkExtensionEnabled === undefined || typeof file.bulkExtensionEnabled === 'boolean', '一括延長の設定を確認してください。');
   return { layout: normalizeLayoutFile(file.layout), settings,
+    ...(file.bulkExtensionEnabled !== undefined && {bulkExtensionEnabled:file.bulkExtensionEnabled}),
     ...(file.calculationSettings !== undefined && {calculationSettings:normalizeCalculationSettings(file.calculationSettings)}),
     ...(rules && {initialSetSchedule:rules.map(({start,end,setId})=>({start,end,setId}))}) };
 }
@@ -134,8 +142,8 @@ export function yen(amount) {
   return `¥${moneyFormatter.format(amount)}`;
 }
 
-export function businessDate(now = Date.now()) {
-  const parts = Object.fromEntries(japanDate.formatToParts(new Date(now - 6 * 60 * minute))
+export function businessDate(now = Date.now(), cutoffMinutes = 360) {
+  const parts = Object.fromEntries(japanDate.formatToParts(new Date(now - cutoffMinutes * minute))
     .map(({ type, value }) => [type, value]));
   return `${parts.year}-${parts.month}-${parts.day}`;
 }
@@ -250,6 +258,16 @@ function allocate(total, weights) {
   return portions.map((entry) => entry.amount);
 }
 
+export function getSettlementPaymentFees(state, payments) {
+  const {metadata,groups} = getPaymentFeeGroups(state,payments);
+  const fees = new Array(payments.length).fill(0);
+  for (const {indexes,fee} of groups) {
+    const shares = allocate(fee,indexes.map((index)=>payments[index].amount));
+    indexes.forEach((index,offset)=>{fees[index] = shares[offset];});
+  }
+  return {metadata,fees,total:fees.reduce((sum,fee)=>sum+fee,0)};
+}
+
 function exactRate(total, rate) {
   return roundCalculationRate(total, rate);
 }
@@ -333,9 +351,9 @@ function calculateQuote(ticket) {
 
   const itemTax = itemTaxBreakdown.reduce((total, group) => total + group.tax, 0);
   const baseTotal = subtotal - discount + service + (inclusive ? 0 : itemTax);
-  const feePayment = ticket.payments.find(({method, cardFee}) => method === 'card' && cardFee > 0);
-  const cardFee = ticket.payments.filter(({method}) => method === 'card')
-    .reduce((total, payment) => total + (payment.cardFee ?? 0), 0);
+  const feePayment = ticket.payments.find(({cardFee}) => cardFee > 0);
+  const brandedFee = ticket.payments.some(({cardFee,brandId}) => cardFee > 0 && brandId);
+  const cardFee = ticket.payments.reduce((total, payment) => total + (payment.cardFee ?? 0), 0);
   const {breakdown:taxBreakdown, feeTax:cardFeeTax} = cardFee > 0
     ? addCardFeeTax(itemTaxBreakdown,cardFee,settings.taxRounding) : {breakdown:itemTaxBreakdown,feeTax:0};
   const tax = itemTax + cardFeeTax;
@@ -345,7 +363,7 @@ function calculateQuote(ticket) {
   const paid = totalOf(ticket.payments) - receivable;
   return { subtotal, discount, service, tax, total, deposit, paid, ...(receivable > 0 ? { receivable } : {}),
     ...(inclusive ? {priceMode:'inclusive'} : {}),
-    ...(cardFee > 0 ? {cardFee,cardFeeTax,baseTotal,cardFeeRateBps:feePayment.cardFeeRateBps} : {}),
+    ...(cardFee > 0 ? {cardFee,cardFeeTax,baseTotal,cardFeeRateBps:feePayment.cardFeeRateBps,...(brandedFee && {brandedFee:true})} : {}),
     remaining: Math.max(0, total - deposit - paid - receivable),
     commission: outputCommission(commission), commissionDetails, taxBreakdown };
 }
@@ -382,7 +400,8 @@ function newStockMovement(state, stock, amount, kind, reason, now, ticketId = nu
     stock.unitCost = quantity > 0 ? Math.round(stock.value / stock.quantity * movementScale) / movementScale : stock.unitCost;
   }
   const movement = { id: createId(state, 'stock'), stockId: stock.id, stockName: stock.name, quantity: amount,
-    unit: stock.unit, unitCost, cost: Math.abs(oldValue - stock.value), reason, kind, at: now, ticketId, sourceLineId };
+    unit: stock.unit, unitCost, cost: Math.abs(oldValue - stock.value), valueChange: stock.value - oldValue,
+    reason, kind, at: now, date: state.day.date, ticketId, sourceLineId };
   state.movements.unshift(movement);
   return movement;
 }
@@ -398,10 +417,13 @@ function addLine(state, ticket, menu, quantity, castIds, now, { includeHistorica
   assert(!menu.requiresCast || castIds.length > 0, `${menu.name}の担当キャストを選択してください。`);
   const line = {
     id: createId(state, 'line'), menuId: menu.id, name: menu.name, category: menu.category, quantity, price: menu.price,
+    ...(menu.printName && {printName:menu.printName}),
+    ...(menu.hideReceiptLine === true && menu.price === 0 && {hideReceiptLine:true}),
     total: menu.price * quantity, castIds: castIds.slice(), createdAt: now, stockUses: [], cancelledAt: null,
     providedAt: null, taxRate: menu.taxRate ?? defaultItemTaxRateBps, serviceEligible: menu.serviceEligible !== false,
     commission: getItemCommission(menu), castNames: castIds.map((id) => castById.get(id).name),
     castCommissions: castIds.map((id) => getItemCommission(menu, castById.get(id))),
+    ...(menu.requiresCast && { requiresCast: true }),
   };
   for (const use of menu.recipe ?? []) {
     const stock = state.stock.find((entry) => entry.id === use.stockId);
@@ -414,19 +436,132 @@ function addLine(state, ticket, menu, quantity, castIds, now, { includeHistorica
   return line;
 }
 
-function extendTicket(state, ticket, menu, now, automatic = false) {
+export function editTicketLineSnapshot(state, line, { quantity, castIds = line.castIds, price = line.price }) {
+  positiveInteger(quantity, '数量');
+  money(price, '単価');
+  const currentMenu = state.menu.find(({ id }) => id === line.menuId);
+  const requiresCast = line.requiresCast ?? currentMenu?.requiresCast ?? line.category === '指名';
+  assert(Array.isArray(castIds) && new Set(castIds).size === castIds.length, '歩合対象者を確認してください。');
+  assert(!requiresCast || castIds.length > 0, '担当キャストを選択してください。');
+  const existing = new Map(line.castIds.map((id,index) => [id,index]));
+  const people = new Map(state.cast.filter((person) => person.enabled !== false).map((person) => [person.id,person]));
+  assert(castIds.every((id) => existing.has(id) || people.has(id)), '歩合対象者を確認してください。');
+  return { ...line, ...(price > 0 && line.hideReceiptLine === true && {hideReceiptLine:false}), quantity, price, total:quantity * price, castIds:[...castIds],
+    castNames:castIds.map((id) => line.castNames?.[existing.get(id)] ?? people.get(id)?.name
+      ?? state.archivedCast?.find((person) => person.id === id)?.name ?? id),
+    castCommissions:castIds.map((id) => existing.has(id) ? line.castCommissions?.[existing.get(id)] ?? getItemCommission(line)
+      : getItemCommission(line,people.get(id))) };
+}
+
+function reconcileEditedLineStock(state, ticket, original, updated, now) {
+  const recipe = original.stockRecipe ?? original.stockUses.map((use) => ({
+    stockId:use.stockId, unitsPerOrder:decimalUnits(use.quantity) / original.quantity,
+  }));
+  updated.stockRecipe = recipe;
+  updated.stockUses = recipe.map(({ stockId, unitsPerOrder }) => {
+    const use = original.stockUses.find((entry) => entry.stockId === stockId);
+    const current = use ? decimalUnits(use.quantity) : 0;
+    const billed = Math.round(unitsPerOrder * updated.quantity);
+    const target = original.providedAt == null ? billed : Math.max(billed,current);
+    if (current === target) return use;
+    const stock = correctionStock(state,{stockId},false);
+    const unitCost = target > current ? stock.unitCost : use.unitCost;
+    newStockMovement(state,stock,(current - target) / movementScale,target > current ? 'order' : 'return',
+      `${original.name}の数量訂正`,now,ticket.id,original.id,unitCost);
+    const average = current && target > current ? (current * use.unitCost + (target - current) * unitCost) / target : unitCost;
+    return {stockId,quantity:target / movementScale,unitCost:Math.round(average * movementScale) / movementScale};
+  }).filter((use) => use?.quantity > 0);
+}
+
+function assertReducedTicketAmounts(state, ticket, actor, label) {
+  const amounts = calculateQuote(ticket);
+  assert(amounts.subtotal >= ticket.discount, `${label}前に値引き額を調整してください。`);
+  assert(amounts.total >= totalOf(ticket.deposits), `${label}後の請求額が前受金を下回ります。`);
+  if (actor.role === 'manager' && ticket.discountDetails?.managerLimitBps !== undefined) {
+    assert(ticket.discount <= exactRate(amounts.subtotal,getManagerDiscountLimit(state)),
+      `${label}後の値引きが承認上限を超えます。先に値引きを調整してください。`);
+  }
+}
+
+function editLiveTicketLine(state, ticket, action, now, actor) {
+  assert(['admin','manager'].includes(actor.role), '注文の訂正にはマネージャー以上の権限が必要です。');
+  operationalReason(action.reason, '注文の訂正理由');
+  const index = ticket.lines.findIndex((line) => line.id === action.lineId && line.cancelledAt === null);
+  assert(index >= 0, '注文明細が見つかりません。');
+  const line = ticket.lines[index];
+  assert(line.category !== '延長', '延長の変更は一度取り消してから正しいプランを登録してください。');
+  assert(line.category !== 'セット' || !action.castIds?.length, '初回セットには歩合対象者を指定できません。');
+  const updated = editTicketLineSnapshot(state,line,action);
+  if (line.quantity !== updated.quantity) reconcileEditedLineStock(state,ticket,line,updated,now);
+  ticket.lines[index] = updated;
+  if (updated.total < line.total) assertReducedTicketAmounts(state,ticket,actor,'訂正');
+}
+
+function extendTicket(state, ticket, menu, now, automatic = false, assignments = [{menu,quantity:ticket.guests}]) {
   const surcharge = state.menu.find((entry) => entry.id === 'nominationExtra' && entry.enabled !== false);
   const relatedCast = [...new Set(ticket.lines.filter((line) => line.category === '指名'
     && (automatic ? line.createdAt <= now && (line.cancelledAt === null || line.cancelledAt > now) : line.cancelledAt === null))
     .flatMap((line) => line.castIds))];
-  const added = [addLine(state, ticket, menu, ticket.guests, [], now)];
+  const added = assignments.map(({menu:plan,quantity}) => addLine(state, ticket, plan, quantity, [], now));
   if (surcharge && relatedCast.length) {
     added.push(addLine(state, ticket, surcharge, relatedCast.length, relatedCast, now, {includeHistoricalCast:true}));
+  }
+  for (const line of added) {
+    if (line.menuId !== 'nominationExtra') line.extensionDuration = menu.duration;
+    line.extensionGroupId = added[0].id;
   }
   if (automatic) {
     for (const line of added) line.autoExtension = true;
   }
   ticket.endsAt += menu.duration * minute;
+}
+
+function isSelectableExtension(plan) {
+  return plan.category === '延長' && plan.enabled !== false && Number.isInteger(plan.duration);
+}
+
+function resolveExtensionAssignments(state, ticket, action) {
+  if (action.plans === undefined) {
+    const menu = state.menu.find((entry) => isSelectableExtension(entry)
+      && (action.menuId === undefined ? entry.duration === Number(action.minutes) : entry.id === action.menuId));
+    assert(menu, '延長時間を選択してください。');
+    return [{menu,quantity:ticket.guests}];
+  }
+  assert(Array.isArray(action.plans) && action.plans.length > 0 && action.plans.length <= 24,
+    '延長プランを選択してください。');
+  const assignments = action.plans.map((plan) => {
+    const menu = state.menu.find((entry) => isSelectableExtension(entry) && entry.id === plan?.menuId);
+    assert(menu, '利用できる延長プランを選択してください。');
+    return {menu,quantity:positiveInteger(plan.quantity,'延長する人数')};
+  });
+  assert(new Set(assignments.map(({menu}) => menu.id)).size === assignments.length, '同じ延長プランが重複しています。');
+  assert(new Set(assignments.map(({menu}) => menu.duration)).size === 1, '組み合わせる延長プランは同じ延長時間にしてください。');
+  assert(assignments.reduce((sum,{quantity}) => sum + quantity,0) === ticket.guests,
+    'プラン別の人数合計を現在の利用人数と一致させてください。');
+  return assignments;
+}
+
+function cancelTicketExtension(state, ticket, action, now, actor) {
+  assert(['admin','manager'].includes(actor.role), '延長取消にはマネージャー以上の権限が必要です。');
+  operationalReason(action.reason, '延長の取消理由');
+  const index = ticket.lines.findIndex((line) => line.id === action.lineId && line.cancelledAt === null
+    && line.category === '延長' && line.menuId !== 'nominationExtra');
+  assert(index >= 0, '延長明細が見つかりません。');
+  const line = ticket.lines[index];
+  const nextLine = ticket.lines[index + 1];
+  const group = line.extensionGroupId ? ticket.lines.filter((item) => item.extensionGroupId === line.extensionGroupId && item.cancelledAt === null)
+    : [line, ...(nextLine?.menuId === 'nominationExtra' && nextLine.createdAt === line.createdAt && nextLine.cancelledAt === null ? [nextLine] : [])];
+  for (const item of group) {
+    for (const use of item.providedAt == null ? item.stockUses : []) {
+      const stock = correctionStock(state,use,false);
+      newStockMovement(state,stock,use.quantity,'return',`${item.name}の延長取消`,now,ticket.id,item.id,use.unitCost);
+    }
+    item.cancelledAt = now;
+  }
+  assertReducedTicketAmounts(state,ticket,actor,'取消');
+  const duration = line.extensionDuration ?? state.menu.find(({ id }) => id === line.menuId)?.duration;
+  if (Number.isInteger(duration) && duration > 0) ticket.endsAt = Math.max(ticket.setStartedAt ?? ticket.createdAt,ticket.endsAt - duration * minute);
+  if (ticket.endsAt <= now) ticket.autoExtensionResumedAt = Math.max(ticket.autoExtensionResumedAt ?? 0,now);
 }
 
 export const maxOverdueExtensionCount = 100;
@@ -496,7 +631,7 @@ function canCancel(ticket) {
 
 function doOpen(state, action, now) {
   assert(state.day.status === 'closed', 'すでに営業中です。');
-  const date = action.date ?? businessDate(now);
+  const date = action.date ?? businessDate(now,registerCutoff(state));
   assert(validBusinessDate(date), '営業日を指定してください。');
   assert(!state.closedDays.some((day) => day.date === date), 'この営業日は締め済みです。次の営業日を入力してください。');
   const previous = state.closedDays.find((day) => day.date === state.day.date);
@@ -504,7 +639,10 @@ function doOpen(state, action, now) {
     previous.ticketSnapshots = snapshotClosedTickets(state);
   }
   state.tickets = [];
-  state.day = { status: 'open', date, openingCash: money(action.openingCash, '釣銭準備金'), openedAt: now,
+  const openingCash = money(action.openingCash,'釣銭準備金');
+  const openingExpected = openingCashSuggestion(state,date);
+  state.day = { status: 'open', date, openingCash, openedAt: now,
+    ...(state.controls?.register && {openingExpected,openingDifference:openingCash - openingExpected}),
     closedAt: null, closingCash: null };
 }
 
@@ -516,11 +654,15 @@ function doSeat(state, action, now, actor) {
   assert(set, '初回セットを選択してください。');
   const customer = customerForSeat(state, action);
   const calculationSettings = getCalculationSettings(state);
+  const arrivedAt = action.arrivedAt ?? now;
+  assert(Number.isSafeInteger(arrivedAt) && arrivedAt <= now && arrivedAt >= now - 24 * 60 * minute,
+    '来店時刻は現在から24時間以内の過去を指定してください。');
   const ticket = {
     id: createId(state, 'ticket'), number: state.nextTicket++, tableIds, guests,
     tableHistory: tableIds.map((tableId) => ({ tableId, attachedAt: now, releasedAt: null })),
-    ...customer, ...(customer.customerId ? { seatedByUid: actor.id } : {}), createdAt: now, status: 'open',
-    endsAt: now + set.duration * minute, lines: [], discount: 0, deposits: [], payments: [], settledAt: null,
+    ...customer, ...(customer.customerId ? { seatedByUid: actor.id } : {}), createdAt: arrivedAt, status: 'open',
+    ...(arrivedAt !== now && { seatRecordedAt: now, autoExtensionResumedAt: now }),
+    endsAt: arrivedAt + set.duration * minute, lines: [], discount: 0, deposits: [], payments: [], settledAt: null,
     departedAt: null, serviceRate: calculationSettings.serviceRateBps, calculationSettings, settlement: null,
   };
   state.tickets.push(ticket);
@@ -546,7 +688,48 @@ function doClose(state, action, now) {
     tenderPayments: totals.tenderPayments, depositsReceived: totals.depositsReceived, depositsApplied: totals.depositsApplied,
     cashIn: totals.cashIn, cashOut: totals.cashOut, expenses: totals.expenses, cashMovements: structuredClone(totals.cashMovements),
     ...(cashDenominations === undefined ? {} : {cashDenominations:structuredClone(cashDenominations)}),
+    ...(state.day.openingExpected !== undefined && {openingExpected:state.day.openingExpected,openingDifference:state.day.openingDifference}),
     ticketSnapshots: snapshotClosedTickets(state) });
+}
+
+function amendCashMovement(state, action, now, actor) {
+  assert(actor.role === 'admin' || actor.role === 'manager', 'マネージャー以上の権限が必要です。');
+  const original = editableCashMovement(state,action.movementId);
+  assert(original, '訂正できる入出金を選択してください。');
+  const archive = state.closedDays.find(({date}) => date === original.date);
+  assert(archive ? actor.role === 'admin' : original.date === state.day.date && state.day.status === 'open',
+    '締め後の訂正には店舗管理者の権限が必要です。');
+  if (archive) assert(archive.cashMovements?.some(({id}) => id === original.id) && Number.isSafeInteger(archive.expectedCash)
+    && Number.isSafeInteger(archive.actualCash), '締め日の入出金内訳が不足しています。');
+  const why = operationalReason(action.correctionReason,'入出金の訂正理由');
+  const replacement = action.type === 'voidCashMovement'
+    ? {...original,voidedAt:now,voidReason:why}
+    : createCashMovement({...state,day:{status:'open',date:original.date}},action,original.at,original.actor,() => original.id);
+  assert(replacement.cashAccountKind !== 'vault','金庫移動は新しい入出金として登録してください。');
+  const replace = (rows) => rows?.map((row) => row.id === original.id ? replacement : row);
+  if (state.cashMovements) state.cashMovements = replace(state.cashMovements);
+  if (archive) {
+    const cashBefore = totalCashMovements([original]);
+    const cashAfter = totalCashMovements([replacement]);
+    archive.cashMovements = replace(archive.cashMovements);
+    for (const key of ['cashIn','cashOut','expenses']) archive[key] = (archive[key] ?? 0) - cashBefore[key] + cashAfter[key];
+    archive.expectedCash += cashAfter.cashIn - cashBefore.cashIn - cashAfter.cashOut + cashBefore.cashOut;
+    archive.discrepancy = archive.actualCash - archive.expectedCash;
+  }
+}
+
+function amendRegisterCount(state, action, actor) {
+  assert(actor.role === 'admin', '閉店時の実残高を訂正できるのは店舗管理者です。');
+  const close = state.closedDays.find(({date}) => date === action.date);
+  assert(close && Number.isSafeInteger(close.expectedCash), '訂正する締め日報が見つかりません。');
+  const reason = operationalReason(action.reason,'レジ実残高の訂正理由');
+  const actualCash = money(action.actualCash,'実残高');
+  const counts = action.cashDenominations;
+  assert(counts === undefined || getCashCountTotal(counts) === actualCash,'金種別の合計と実残高を一致させてください。');
+  Object.assign(close,{actualCash,discrepancy:actualCash - close.expectedCash,reason});
+  if (counts) close.cashDenominations = structuredClone(counts);
+  else delete close.cashDenominations;
+  if (state.day.date === close.date && state.day.status === 'closed') state.day.closingCash = actualCash;
 }
 
 function castNamesById(state) {
@@ -654,6 +837,107 @@ function correctSettledTicketPayments(state, action, now, actor) {
   if (closed) updateClosedPaymentTotals(state, closed, difference);
 }
 
+export function previewSettledContents(state, ticket, action) {
+  const old = ticket.settlement ?? calculateQuote(ticket);
+  const revised = {...ticket,lines:ticket.lines.slice(),discount:action.discount ?? ticket.discount,payments:[]};
+  if (action.lineId) {
+    const index = revised.lines.findIndex((line) => line.id === action.lineId && line.cancelledAt == null);
+    assert(index >= 0, '訂正する注文明細が見つかりません。');
+    const line = revised.lines[index];
+    assert(line.category !== '延長' && (line.category !== 'セット' || !action.castIds?.length),
+      'この明細は訂正できません。延長は会計取消後に訂正してください。');
+    if (action.cancelLine) {
+      assert(line.category !== 'セット', '初回セットは数量または単価で訂正してください。');
+      revised.lines[index] = {...line,cancelledAt:action.at ?? ticket.settledAt};
+    } else revised.lines[index] = editTicketLineSnapshot(state,line,action);
+  }
+  money(revised.discount,'値引き');
+  const totals = calculateQuote(revised);
+  assert(revised.discount <= totals.subtotal,'値引き額を小計以下にしてください。');
+  if (old.cardFee) {
+    const fee = addCardFeeTax(totals.taxBreakdown,old.cardFee,ticket.calculationSettings?.taxRounding ?? 'floor');
+    Object.assign(totals,{taxBreakdown:fee.breakdown,tax:totals.tax + fee.feeTax,baseTotal:totals.total,
+      total:totals.total + old.cardFee,cardFee:old.cardFee,cardFeeTax:fee.feeTax,cardFeeRateBps:old.cardFeeRateBps,
+      ...(old.brandedFee && {brandedFee:true})});
+  }
+  assert(totals.total >= totals.deposit,'訂正後の合計が前受金を下回っています。');
+  return {revised,totals,old,change:totals.total - old.total};
+}
+
+function correctSettledContents(state, action, now, actor) {
+  assert(actor.role === 'admin','会計後の明細訂正は店舗管理者が行えます。');
+  const reason = operationalReason(action.reason,'会計後の訂正理由');
+  const entry = findSettledCustomerTicket(state,action.ticketId);
+  assert(entry,'会計済みの伝票を選んでください。');
+  const {ticket,date} = entry;
+  const {revised,totals,old,change} = previewSettledContents(state,ticket,{...action,at:now});
+  assert(revised.discount !== ticket.discount || JSON.stringify(revised.lines) !== JSON.stringify(ticket.lines),
+    '訂正する内容を入力してください。');
+  assert((old.receivable ?? 0) === 0 && !ticket.payments.some(({method})=>method === 'receivable'),
+    'この伝票は会計後の明細訂正の対象外です。');
+  assert(action.expectedTotal === totals.total,'請求額が更新されました。最新の訂正内容を確認してください。');
+  assert(totalOf(ticket.payments) + totalOf(ticket.deposits) === old.total,'元の会計額と決済内訳を確認してください。');
+  const previousCommission = new Map(old.commission.map((row) => [row.castId,JSON.stringify(row)]));
+  const nextCommission = new Map(totals.commission.map((row) => [row.castId,JSON.stringify(row)]));
+  assert(!(state.payroll?.records ?? []).some(({month,castId,status}) => status === 'final' && month === date.slice(0,7)
+    && previousCommission.get(castId) !== nextCommission.get(castId)), '確定済み給与に影響するため、翌月の給与で調整してください。');
+
+  const closed = state.closedDays.find((day) => day.date === date);
+  const closedTicket = closed?.ticketSnapshots?.find(({id}) => id === ticket.id);
+  assert(!closed || (closedTicket && closed.ticketSnapshots.length === closed.tickets && Number.isSafeInteger(closed.sales)),
+    '締め日報の伝票明細が不足しています。');
+  const original = ticket.lines.find(({id}) => id === action.lineId);
+  const changed = revised.lines.find(({id}) => id === action.lineId);
+  if (original && action.cancelLine && action.returnStock && original.providedAt == null) {
+    for (const use of original.stockUses) {
+      const stock = correctionStock(state,use,false);
+      newStockMovement(state,stock,use.quantity,'return',reason,now,ticket.id,original.id,use.unitCost);
+    }
+  } else if (original && !action.cancelLine && original.quantity !== changed.quantity) {
+    const preserveStock = action.returnStock !== true && changed.quantity < original.quantity;
+    reconcileEditedLineStock(state,ticket,preserveStock ? {...original,providedAt:now} : original,changed,now);
+  }
+  let payments = ticket.payments;
+  if (change) {
+    validateMethod(action.adjustmentMethod);
+    const allocations = tallySettlementPayments(ticket.payments);
+    allocations[action.adjustmentMethod] += change;
+    assert(allocations[action.adjustmentMethod] >= 0, '選んだ決済方法の返金額が元の支払額を超えます。');
+    payments = methods.filter((method) => allocations[method] > 0).map((method) =>
+      ({id:createId(state,'payment'),method,amount:allocations[method],at:ticket.settledAt ?? now}));
+    assert(!old.cardFee || payments.length > 0,'決済加算がある会計では、会計時の入金を残してください。');
+  }
+  const difference = Object.fromEntries([...methods,'receivable'].map((method) => [method,
+    totalOf(payments.filter((row) => row.method === method)) - totalOf(ticket.payments.filter((row) => row.method === method))]));
+  Object.assign(totals,{paid:totalOf(payments),remaining:0});
+  const update = (row) => {
+    row.lines = structuredClone(revised.lines);
+    row.payments = structuredClone(payments);
+    row.discount = revised.discount;
+    if (revised.discount !== ticket.discount) delete row.discountDetails;
+    row.settlement = structuredClone(totals);
+    row.settlementRevision = (row.settlementRevision ?? 0) + 1;
+    if (change && payments.length) row.paymentsCorrectedAt = now;
+    if (change && !payments.length) delete row.paymentsCorrectedAt;
+    if (difference.cash) delete row.cashTender;
+  };
+  if (revised.discount !== ticket.discount) {
+    delete ticket.discountDetails;
+    if (closedTicket) delete closedTicket.discountDetails;
+  }
+  update(ticket);
+  if (closedTicket && closedTicket !== ticket) update(closedTicket);
+  if (closed) {
+    closed.sales += change;
+    updateClosedPaymentTotals(state,closed,difference);
+    const dayCommission = new Map();
+    for (const row of closed.ticketSnapshots.flatMap(({settlement}) => settlement?.commission ?? [])) {
+      addCommission(dayCommission,row.castId,row.sales,row.amount,Math.round(row.points * pointsScale));
+    }
+    closed.commission = outputCommission(dayCommission);
+  }
+}
+
 function correctionStock(state, use, restoreArchived) {
   const stock = state.stock.find(({ id }) => id === use.stockId);
   if (stock) return stock;
@@ -698,11 +982,15 @@ function reverseSettlement(state, ticket, action, now, actor) {
 
 function reopenTicket(state, ticket, action, now, actor) {
   correctionReason(action.reason, actor);
-  assert(ticket.status === 'cancelled', '会計を取り消した伝票を選択してください。');
-  assert(state.cancelledSettlements?.some((entry) => entry.ticketId === ticket.id && entry.date === state.day.date),
+  const wasVoid = ticket.status === 'void';
+  assert(wasVoid || ticket.status === 'cancelled', '会計を取り消した伝票、または未会計で取り消した伝票を選択してください。');
+  assert(wasVoid || state.cancelledSettlements?.some((entry) => entry.ticketId === ticket.id && entry.date === state.day.date),
     '会計の取消履歴を確認してください。');
   const tableIds = tableSet(state, action.tableIds, ticket.guests, ticket.id);
-  for (const line of ticket.lines.filter(({ cancelledAt }) => cancelledAt === null)) {
+  const restocked = wasVoid ? new Set(ticket.voidRestockedLineIds ?? state.movements
+    .filter(({kind,ticketId,reason}) => kind === 'return' && ticketId === ticket.id && reason?.endsWith('の伝票取消'))
+    .map(({sourceLineId}) => sourceLineId)) : null;
+  for (const line of ticket.lines.filter(({ id,cancelledAt }) => cancelledAt === null && (!restocked || restocked.has(id)))) {
     for (const use of line.stockUses ?? []) {
       const stock = correctionStock(state, use, false);
       use.unitCost = stock.unitCost;
@@ -714,6 +1002,7 @@ function reopenTicket(state, ticket, action, now, actor) {
   ticket.status = 'open';
   ticket.departedAt = null;
   ticket.autoExtensionResumedAt = now;
+  delete ticket.voidRestockedLineIds;
 }
 
 function doStockAdjust(state, action, now, actor) {
@@ -722,8 +1011,20 @@ function doStockAdjust(state, action, now, actor) {
   assert(stock, '在庫品目が見つかりません。');
   const adjust = action.type === 'stockAdjust';
   const kind = adjust ? 'adjust' : action.kind;
-  assert(adjust || ['purchase', 'loss', 'usage', 'stocktake'].includes(kind), '在庫の操作区分を確認してください。');
+  assert(adjust || ['purchase', 'purchaseCancellation', 'loss', 'usage', 'stocktake'].includes(kind), '在庫の操作区分を確認してください。');
   const reason = operationalReason(action.reason, '調整理由');
+
+  if (kind === 'purchaseCancellation') {
+    const purchase = state.movements.find(({id,stockId}) => id === action.purchaseId && stockId === stock.id);
+    const {quantity,value,unitCost,valueChange} = replayPurchaseCancellation(state,stock,purchase);
+    const amount = Math.round((quantity - stock.quantity) * movementScale) / movementScale;
+    Object.assign(stock,{quantity,value,unitCost});
+    const movement = {id:createId(state,'stock'),stockId:stock.id,stockName:stock.name,unit:stock.unit,kind,reason,
+      quantity:amount,unitCost,cost:Math.abs(valueChange),valueChange,reversesId:purchase.id,at:now,date:businessDate(now),
+      ticketId:null,sourceLineId:null};
+    state.movements.unshift(movement);
+    return;
+  }
 
   if (kind === 'stocktake') {
     const bookQuantity = stock.quantity;
@@ -744,7 +1045,12 @@ function doStockAdjust(state, action, now, actor) {
     assert(Number.isFinite(price) && price >= 0 && price <= 100_000_000
       && Math.abs(Math.round(price * movementScale) / movementScale - price) < 0.00000001,
     '仕入単価を小数点以下6桁までの0以上の金額で入力してください。');
-    newStockMovement(state, stock, units / movementScale, kind, reason, now, null, null, price);
+    assert(action.adoptUnitCost === undefined || typeof action.adoptUnitCost === 'boolean','参考単価の更新を確認してください。');
+    const movement = newStockMovement(state, stock, units / movementScale, kind, reason, now, null, null, price);
+    if (action.adoptUnitCost) {
+      movement.previousReferenceUnitCost = stock.defaultUnitCost ?? stock.unitCost;
+      stock.defaultUnitCost = price;
+    }
     return;
   }
   const unitCost = units > 0 ? stock.defaultUnitCost ?? stock.unitCost : stock.unitCost;
@@ -909,11 +1215,20 @@ function saveTicketNote(ticket, note, actor) {
 function adjustTicketEnd(ticket, action, now, actor) {
   assert(['admin','manager'].includes(actor.role), '終了時刻の調整にはマネージャー以上の権限が必要です。');
   operationalReason(action.reason, '終了時刻を調整する理由');
-  const {minutes} = action;
-  assert(Number.isInteger(minutes) && minutes !== 0 && Math.abs(minutes) <= 180, '調整は前後180分以内の整数で入力してください。');
-  const endsAt = ticket.endsAt + minutes * minute;
-  assert(Number.isSafeInteger(endsAt) && Number.isSafeInteger(ticket.createdAt) && endsAt >= ticket.createdAt,
+  const {minutes, startsAt} = action;
+  let endsAt = action.endsAt;
+  const currentStart = ticket.setStartedAt ?? ticket.createdAt;
+  const start = startsAt ?? currentStart;
+  if (minutes !== undefined) {
+    assert(Number.isInteger(minutes) && minutes !== 0 && Math.abs(minutes) <= 180, '調整は前後180分以内の整数で入力してください。');
+    assert(startsAt === undefined && endsAt === undefined, '調整方法を選び直してください。');
+    endsAt = ticket.endsAt + minutes * minute;
+  }
+  assert(Number.isSafeInteger(start) && start <= now && start >= ticket.createdAt - 24 * 60 * minute
+    && Number.isSafeInteger(endsAt) && endsAt >= start && endsAt - start <= 48 * 60 * minute,
     '来店時刻以降の終了時刻を指定してください。');
+  if (startsAt !== undefined && startsAt !== currentStart) ticket.setStartedAt = startsAt;
+  if (endsAt === ticket.endsAt) return;
   ticket.endsAt = endsAt;
   // Shortening into overtime starts a new scheduling interval, so it cannot backdate automatic charges.
   if (endsAt <= now) ticket.autoExtensionResumedAt = Math.max(ticket.autoExtensionResumedAt ?? 0, now);
@@ -993,8 +1308,14 @@ function decideDiscount(ticket, action, now, actor) {
 }
 
 export function apply(state, action, now = Date.now(), actor = demoActor) {
+  assert(roleAllowsCommand(state,actor.role,action),'店舗設定でこの役職には操作が許可されていません。');
   const authenticatedActor = { id: actor.id, label: actor.label, role: actor.role };
   const next = reduce(state, action, now, authenticatedActor);
+  const addedMovements = next.movements.length - state.movements.length;
+  for (const movement of next.movements.slice(0,addedMovements)) {
+    movement.actorLabel = authenticatedActor.label;
+    if (!movement.ticketId) movement.date = next.day.status === 'open' ? next.day.date : businessDate(now);
+  }
   const audit = buildOperationAudit(state, next, action, now, authenticatedActor);
   if (audit) next.auditLog = [audit, ...(next.auditLog ?? [])];
   return next;
@@ -1002,11 +1323,20 @@ export function apply(state, action, now = Date.now(), actor = demoActor) {
 
 function reduce(state, action, now, actor) {
   const next = structuredClone(state);
+  if (action.type === 'saveRolePolicy') {
+    assert(actor.role === 'admin','役職・権限の設定には店舗管理者の権限が必要です。');
+    next.rolePolicy = normalizeRolePolicy(action.policy);
+    return next;
+  }
+  if (action.type === 'saveCashAccounts') {
+    saveCashAccounts(next,action,actor);
+    return next;
+  }
   if (action.type === 'bindCastAccount') {
     bindCastAccount(next, action, actor);
     return next;
   }
-  if (isCastSelfCommand(action.type) || isCastAttendanceReview(action.type)) {
+  if (isCastSelfCommand(action.type) || isCastAttendanceReview(action.type) || isManagedAttendanceCommand(action.type)) {
     applyCastSelfCommand(next, action, now, actor, (prefix) => createId(next,prefix));
     return next;
   }
@@ -1047,6 +1377,10 @@ function reduce(state, action, now, actor) {
     applyPrintCommand(next, action, actor, now, () => createId(next, 'print'));
     return next;
   }
+  if (action.type === 'saveAccountingCsv') {
+    applyAccountingCsv(next,action,actor);
+    return next;
+  }
   if (['saveCustomer', 'mergeCustomers', 'linkCustomer', 'correctSettledTicketCustomer', 'importCustomers'].includes(action.type)) {
     applyCustomerCommand(next, action, actor, now, () => createId(next, 'customer'));
     return next;
@@ -1055,12 +1389,16 @@ function reduce(state, action, now, actor) {
     assert(actor.role === 'admin', '値引き上限の変更には管理者権限が必要です。');
     const limit = action.managerDiscountRateBps;
     assert(Number.isInteger(limit) && limit >= 0 && limit <= 10_000, '値引き上限を0から100%の範囲で入力してください。');
-    next.controls = { ...next.controls, managerDiscountRateBps: limit };
+    next.controls = { ...next.controls, managerDiscountRateBps: limit,
+      ...(action.register !== undefined && {register:normalizeRegisterSettings(action.register)}) };
     return next;
   }
   if (action.type === 'saveCardFeeSettings') {
     assert(actor.role === 'admin', 'カード会計の加算設定は店舗管理者が変更できます。');
-    next.cardFeeSettings = normalizeCardFeeSettings(action.settings);
+    const brands = action.settings?.brands;
+    next.cardFeeSettings = normalizeCardFeeSettings({
+      ...action.settings,brands:brands === undefined ? next.cardFeeSettings?.brands : brands,
+    });
     return next;
   }
   if (action.type === 'saveCalculationSettings') {
@@ -1082,13 +1420,15 @@ function reduce(state, action, now, actor) {
     return next;
   }
   if (action.type === 'importStoreConfiguration') {
-    const { layout, settings, initialSetSchedule, calculationSettings } = action.configuration ?? {};
+    const { layout, settings, initialSetSchedule, calculationSettings, bulkExtensionEnabled } = action.configuration ?? {};
     const validated = settings === null ? null : validatedStoreSettings(settings, next);
     const calculation = calculationSettings === undefined ? null : normalizeCalculationSettings(calculationSettings);
     assert(isValidInitialSetSchedule(initialSetSchedule), '時間帯別セットの設定を確認してください。');
+    assert(bulkExtensionEnabled === undefined || typeof bulkExtensionEnabled === 'boolean','一括延長の設定を確認してください。');
     doImportLayout(next, layout);
     if (validated) replaceStoreSettings(next, validated);
     if (calculation) next.calculationSettings = calculation;
+    if (bulkExtensionEnabled !== undefined) next.bulkExtensionEnabled = bulkExtensionEnabled;
     if (initialSetSchedule) next.initialSetSchedule = initialSetSchedule.map(({start,end,setId})=>({start,end,setId}));
     return next;
   }
@@ -1110,7 +1450,18 @@ function reduce(state, action, now, actor) {
   }
   if (action.type === 'recordCashMovement') {
     const movement = createCashMovement(next, action, now, actor, () => createId(next, 'cash'));
+    if (movement.cashAccountKind === 'vault' && movement.kind === 'withdrawal') {
+      assert(summary(next).expectedCash >= movement.amount,'レジの理論残高を超えて金庫に移動できません。');
+    }
     (next.cashMovements ??= []).push(movement);
+    return next;
+  }
+  if (['editCashMovement','voidCashMovement'].includes(action.type)) {
+    amendCashMovement(next,action,now,actor);
+    return next;
+  }
+  if (action.type === 'correctRegisterCount') {
+    amendRegisterCount(next,action,actor);
     return next;
   }
   if (action.type === 'recoverReceivable') {
@@ -1119,6 +1470,10 @@ function reduce(state, action, now, actor) {
   }
   if (action.type === 'correctSettledTicketPayments') {
     correctSettledTicketPayments(next, action, now, actor);
+    return next;
+  }
+  if (action.type === 'correctSettledContents') {
+    correctSettledContents(next,action,now,actor);
     return next;
   }
 
@@ -1150,8 +1505,17 @@ function reduce(state, action, now, actor) {
     case 'adjustTicketGuests':
       adjustTicketGuests(next, ticket, action, actor);
       break;
+    case 'editTicketLine':
+      editLiveTicketLine(next,ticket,action,now,actor);
+      break;
+    case 'cancelTicketExtension':
+      cancelTicketExtension(next,ticket,action,now,actor);
+      break;
     case 'setTicketCustomer':
       setTicketCustomer(next, ticket, action, actor);
+      break;
+    case 'setTicketCompanion':
+      setTicketCompanion(next,ticket,action,actor);
       break;
     case 'pauseVisitAutoExtension':
       pauseVisitAutoExtension(next, ticket, action, now, actor);
@@ -1178,24 +1542,42 @@ function reduce(state, action, now, actor) {
       break;
     case 'extend':
     case 'extendOverdue': {
-      const menu = next.menu.find((entry) => entry.category === '延長' && entry.enabled !== false && Number.isInteger(entry.duration)
-        && (action.menuId === undefined ? entry.duration === Number(action.minutes) : entry.id === action.menuId));
-      assert(menu, '延長時間を選択してください。');
+      const assignments = resolveExtensionAssignments(next,ticket,action);
+      const [{menu}] = assignments;
       const count = action.type === 'extendOverdue' ? getOverdueExtensionCount(ticket, menu, now) : 1;
       if (action.type === 'extendOverdue') {
         assert(['admin','manager','staff'].includes(actor.role), '一括延長を行う権限がありません。');
+        assert(next.bulkExtensionEnabled !== false, '店舗設定で一括延長がオフになっています。');
         assert(count > 0, 'セット終了時刻を過ぎた伝票が対象です。');
         assert(count <= maxOverdueExtensionCount, '一度に登録できる延長は100回までです。延長内容を確認してください。');
         assert(action.expectedCount === count, '超過時間が変わりました。一括延長を開き直して金額を確認してください。');
       }
-      for (let interval = 0; interval < count; interval++) extendTicket(next, ticket, menu, now);
+      for (let interval = 0; interval < count; interval++) extendTicket(next, ticket, menu, now,false,assignments);
+      if (action.expectedTotal !== undefined) {
+        assert(action.expectedTotal === quote(next,ticket.id).total,'延長料金が変わりました。延長を開き直して金額を確認してください。');
+      }
       break;
     }
     case 'deposit': {
       validateMethod(action.method);
       const amount = money(action.amount, '前受金', false);
       assert(quote(next, ticket.id).remaining >= amount, '前受金は現在の未収額以下を入力してください。');
-      ticket.deposits.push({ id: createId(next, 'deposit'), method: action.method, amount, at: now });
+      const memo = String(action.memo ?? '').trim();
+      assert(memo.length <= 120, '前受金メモは120文字以内です。');
+      ticket.deposits.push({ id: createId(next, 'deposit'), method: action.method, amount, at: now, ...(memo && {memo}) });
+      break;
+    }
+    case 'editDeposit': {
+      assert(['admin','manager'].includes(actor.role),'前受金の訂正にはマネージャー以上の権限が必要です。');
+      operationalReason(action.reason,'前受金の訂正理由');
+      const entry = ticket.deposits.find(({id}) => id === action.depositId);
+      assert(entry,'前受金が見つかりません。');
+      validateMethod(action.method);
+      const amount = money(action.amount,'前受金',false);
+      assert(amount <= quote(next,ticket.id).remaining + entry.amount,'前受金は会計額の範囲で入力してください。');
+      const memo = String(action.memo ?? '').trim();
+      assert(memo.length <= 120,'前受金メモは120文字以内です。');
+      Object.assign(entry,{method:action.method,amount,memo});
       break;
     }
     case 'cancelDeposit': {
@@ -1223,18 +1605,20 @@ function reduce(state, action, now, actor) {
       }
       assert(totalOf(action.payments) === due, '支払額の合計を未収額と一致させてください。');
       const cashTender = calculateCashTender(action.payments,action.cashReceived);
-      const cardFee = getCardFee(next,action.payments);
+      assert(canWaivePaymentFee(actor.role) || !action.payments.some(({waiveFee}) => waiveFee),
+        '決済加算を免除するにはマネージャー以上の権限が必要です。');
+      const {metadata,fees,total:cardFee} = getSettlementPaymentFees(next,action.payments);
       if (cardFee > 0 || action.expectedCardFee !== undefined) {
-        assert(action.expectedCardFee === cardFee, 'カード加算額が更新されています。会計画面を開き直して金額を確認してください。');
+        const label = metadata.some(({brandId})=>brandId) ? '決済加算額' : 'カード加算額';
+        assert(action.expectedCardFee === cardFee, `${label}が更新されています。会計画面を開き直して金額を確認してください。`);
       }
       const creditAmount = totalOf(action.payments.filter(({ method }) => method === 'receivable'));
       if (creditAmount > 0) issueReceivable(next, ticket, action, creditAmount, now, actor);
-      const feeAllocations = allocate(cardFee,action.payments.map(({method, amount}) => method === 'card' ? amount : 0));
-      const {rateBps:cardFeeRateBps} = getCardFeeSettings(next);
       ticket.payments = action.payments.map(({method, amount},index) => {
-        const fee = feeAllocations[index];
+        const fee = fees[index];
+        const {rate,...snapshot} = metadata[index];
         return {id:createId(next,'payment'),method,amount:amount + fee,at:now,
-          ...(fee ? {baseAmount:amount,cardFee:fee,cardFeeRateBps} : {})};
+          ...snapshot,...(fee ? {baseAmount:amount,cardFee:fee,cardFeeRateBps:rate} : {})};
       });
       if (cashTender) ticket.cashTender = cashTender;
       else delete ticket.cashTender;
@@ -1266,19 +1650,15 @@ function reduce(state, action, now, actor) {
           newStockMovement(next, stock, use.quantity, 'return', `${line.name}の取消`, now, ticket.id, line.id, use.unitCost);
         }
       }
-      const remaining = quote(next, ticket.id);
-      assert(remaining.subtotal >= ticket.discount, '取り消す前に値引き額を調整してください。');
-      assert(remaining.total >= totalOf(ticket.deposits), '取消後の請求額が前受金を下回ります。');
-      if (actor.role === 'manager' && ticket.discountDetails?.managerLimitBps !== undefined) {
-        assert(ticket.discount <= exactRate(remaining.subtotal, getManagerDiscountLimit(next)),
-          '注文取消後の値引きが承認上限を超えます。先に値引きを調整してください。');
-      }
+      assertReducedTicketAmounts(next,ticket,actor,'取消');
       break;
     }
     case 'void':
       canCancel(ticket);
+      ticket.voidRestockedLineIds = [];
       if (action.returnStock) {
         for (const line of ticket.lines.filter((entry) => entry.cancelledAt === null && entry.providedAt === null)) {
+          if (line.stockUses.length) ticket.voidRestockedLineIds.push(line.id);
           for (const use of line.stockUses) {
             const stock = next.stock.find((entry) => entry.id === use.stockId);
             newStockMovement(next, stock, use.quantity, 'return', `${line.name}の伝票取消`, now, ticket.id, line.id, use.unitCost);

@@ -12,21 +12,29 @@ const auditLabels = {
   discount: '値引き', discountRequest: '値引き申請', approveDiscount: '値引き承認', rejectDiscount: '値引き却下',
   cancelLine: '注文取消', void: '伝票取消', settle: '会計確定', cancelSettlement: '会計取消', reopenTicket: '伝票の再オープン',
   correctSettledTicketPayments: '会計済み伝票の支払方法訂正',
-  deposit: '前受金の登録', cancelDeposit: '前受金の取消', stockAdjust: '在庫調整', recordStockOperation: '在庫の入出庫・棚卸',
+  correctSettledContents:'会計済み伝票の注文・値引き訂正',
+  deposit: '前受金の登録', editDeposit: '前受金の訂正', cancelDeposit: '前受金の取消', stockAdjust: '在庫調整', recordStockOperation: '在庫の入出庫・棚卸',
   saveStoreSettings: '店舗設定の変更', saveLayout: '卓レイアウトの変更', importStoreConfiguration: '店舗設定の読み込み',
+  saveRolePolicy:'役職・権限の設定変更',
+  saveCashAccounts:'金庫・出金先の設定変更',
   saveCustomer: '顧客情報の登録・変更', setTicketCustomer: '伝票の顧客設定', correctSettledTicketCustomer: '会計済み伝票の顧客訂正',
+  setTicketCompanion: '伝票の同席者を変更',
   mergeCustomers: '顧客の統合', linkCustomer: '来店と顧客の関連づけ',
   importCustomers: '顧客の一括登録',
-  recordCashMovement: '入出金の記録', close: '閉店・レジ締め',
+  recordCashMovement: '入出金の記録', editCashMovement:'入出金の訂正', voidCashMovement:'入出金の取消',
+  correctRegisterCount:'閉店時の実残高の訂正', saveAccountingCsv:'会計CSV設定の変更', close: '閉店・レジ締め',
   savePrintSettings: '印刷設定の変更', issuePrintDocument: '伝票・領収書の発行',
   saveAutoExtensionSettings: '自動延長設定の変更', setTableAutoExtension: '卓別の自動延長設定', syncAutoExtensions: '自動延長',
   pauseVisitAutoExtension: '来店単位の自動延長停止', resumeVisitAutoExtension: '来店単位の自動延長再開', saveCardFeeSettings: 'カード会計加算設定の変更',
   importLayout: '卓レイアウトの読み込み', saveControls: '運用設定の変更', migrate: '営業データの移行',
   savePayrollDraft: '給与の下書き保存', finalizePayroll: '給与の確定', savePayrollRate: '時給の変更', savePayrollSettings: '給与設定の変更',
   savePayrollTemplate: '給与テンプレートの保存', assignPayrollTemplate: '給与テンプレートの割り当て', removePayrollTemplate: '給与テンプレートの削除',
+  savePayrollVariables:'給与の個人別変数の更新',
+  saveEmployeeProfile:'従業員台帳の変更', saveAttendanceItems:'勤怠項目の変更', saveManagedAttendance:'勤怠の代理登録・訂正',
   requestDailyPay: '日払いの申請', reviewDailyPay: '日払いの審査', payDailyPay: '日払いの支給',
   saveTicketNote: '伝票メモの変更', adjustTicketEnd: '終了時刻の調整', adjustTicketGuests: '利用人数の変更',
-  extendOverdue:'一括延長',
+  extendOverdue:'一括延長', seat:'来店登録', order:'注文登録', move:'卓移動・連結', extend:'延長登録',
+  depart:'退店', serve:'提供済み', editTicketLine:'注文訂正', cancelTicketExtension:'延長の取消',
   bindCastAccount:'キャストアカウントの設定', castClockIn:'出勤打刻', castClockOut:'退勤打刻', reviewCastAttendance:'勤怠の確認',
   castRequestShift:'勤務希望の申請', castRequestDailyPay:'本人の日払い申請',
   saveCalculationSettings:'税とサービス料の計算設定',
@@ -60,6 +68,7 @@ const valueLabels = {
   draft: '下書き', final: '確定', requested: '申請中', castName: 'キャスト名', month: '給与対象月',
   reviewReason: '審査理由', paidDate: '支給営業日', cashMovementId: '入出金記録ID', floor: '切り捨て', nearest: '四捨五入',
   note: '伝票メモ', endsAt: '終了時刻', extensionCount:'延長回数', extensionPlan:'延長プラン',
+  startsAt:'開始時刻', arrivedAt:'来店時刻', providedAt:'提供時刻', cancelledAt:'取消時刻', lines:'注文明細', castNames:'歩合対象者',
   guests:'滞在人数', admittedGuests:'来店人数の合計', guestChangeMode:'変更方法', correct:'人数の訂正', join:'途中合流', leave:'一部退店',
 };
 
@@ -92,7 +101,7 @@ function visibleAuditFields(value) {
 
 function readableValue(value, key) {
   if (value == null) return value;
-  if (key === 'endsAt' && Number.isFinite(new Date(value).getTime())) return timestamp.format(value);
+  if (['startsAt','endsAt','arrivedAt','providedAt','cancelledAt'].includes(key) && Number.isFinite(new Date(value).getTime())) return timestamp.format(value);
   if (['managerDiscountRateBps','rateBps','dailyPayLimitBps','serviceRateBps'].includes(key)) return `${value / 100}%`;
   if (typeof value === 'number' && moneyFields.has(key)) return `¥${japaneseNumber.format(value)}`;
   if (typeof value === 'string') return valueLabels[value] ?? value;

@@ -10,7 +10,7 @@ let remembered;
 
 function defaults(state, {workspaceId,role}) {
   if (remembered && remembered.workspaceId === workspaceId && remembered.role === role && remembered.date === state.day.date) return remembered.filters;
-  return { start:`${state.day.date.slice(0,7)}-01`,end:state.day.date,payment:'',status:'',query:'' };
+  return { start:`${state.day.date.slice(0,7)}-01`,end:state.day.date,payment:[],status:'',query:'' };
 }
 
 function normalize(value) {
@@ -53,12 +53,15 @@ export function getTicketHistory(state, filters, { role,workspaceId } = {}) {
     }
   }
   const query = normalize(filters.query ?? '');
+  const payments = Array.isArray(filters.payment) ? filters.payment : filters.payment ? [filters.payment] : [];
   const filtered = rows.filter((row) => (!filters.status || row.status === filters.status)
-    && (!filters.payment || row.methods.includes(filters.payment))
+    && (!payments.length || row.methods.some((method) => payments.includes(method)))
     && (!query || [row.customer,row.room,`No.${row.number}`].some((value) => normalize(value).includes(query))));
   filtered.sort((a,b) => b.date.localeCompare(a.date) || (b.at ?? 0) - (a.at ?? 0) || b.number - a.number);
   const settled = filtered.filter(({status}) => status === 'paid' || status === 'departed');
-  return { rows:filtered,total:settled.reduce((sum,{total}) => sum + total,0),count:settled.length,error:'' };
+  const total = settled.reduce((sum,row) => sum + row.total,0);
+  const guests = settled.reduce((sum,row) => sum + (row.guests ?? 0),0);
+  return {rows:filtered,total,guests,averageSpend:guests ? Math.round(total/guests) : null,count:settled.length,error:''};
 }
 
 function options(dictionary, selected, allLabel) {
@@ -71,7 +74,10 @@ function renderRows(result, api) {
   if (result.error) return `<p class="np-history-message" role="alert">${escape(result.error)}</p>`;
   const rows = result.rows.map((row) => {
     const {status,id,number,date,time:clock,room,customer,guests,methods:kinds,total} = row;
-    const detail = status === 'void' ? `<strong>No. ${escape(number)}</strong>`
+    const restore = status === 'void' && api.role === 'admin' && date === api.currentOpenDate;
+    const detail = status === 'void' ? restore
+      ? `<button type="button" class="np-history-link" data-action="reopen-ticket" data-id="${escape(id)}">No. ${escape(number)} を復元</button>`
+      : `<strong>No. ${escape(number)}</strong>`
       : `<button class="np-history-link" type="button" data-action="${status === 'cancelled' ? 'cancelled-receipt' : 'history-receipt'}"
           data-id="${escape(id)}" data-date="${escape(date)}" aria-label="${status === 'cancelled' ? '会計取消' : '会計内容'} No. ${escape(number)} ${escape(date)}">
           No. ${escape(number)} ${icon('chevron-right',15)}</button>`;
@@ -83,20 +89,25 @@ function renderRows(result, api) {
       <td data-label="税込金額" class="np-history-amount">${total == null ? '—' : yen(total)}</td>
     </tr>`;
   });
-  return `<div class="np-history-summary"><p role="status"><strong>${result.rows.length}件</strong>表示 <span>確定売上 ${yen(result.total)}（${result.count}件）</span></p>
+  return `<div class="np-history-summary"><p role="status"><strong>${result.rows.length}件</strong>表示
+    <span>確定売上 ${yen(result.total)}（${result.count}組・${result.guests}名）</span>
+    <span>客単価 ${result.averageSpend == null ? '—' : yen(result.averageSpend)}</span></p>
       <button type="button" class="btn btn-secondary" data-history-export${rows.length ? '' : ' disabled'}>CSVを出力</button></div>
     ${rows.length ? `<table class="np-history-table"><thead><tr>${['営業日','伝票','卓・人数','顧客','支払方法','状態','税込金額'].map((label) => `<th scope="col">${label}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table>`
       : '<p class="np-history-message">条件に一致する伝票がありません。</p>'}`;
 }
 
 export function renderTicketHistory(state, api) {
+  api = {...api,currentOpenDate:state.day.status === 'open' ? state.day.date : null};
   const filters = defaults(state,api);
   const { escape } = api;
   return `<section class="np-history" aria-label="伝票履歴">
     <form class="np-history-form" aria-label="伝票履歴を絞り込む">
       <label class="field"><span>開始日</span><input type="date" name="start" value="${escape(filters.start)}" required></label>
       <label class="field"><span>終了日</span><input type="date" name="end" value="${escape(filters.end)}" required></label>
-      <label class="field"><span>支払方法</span><select name="payment">${options(methods,filters.payment,'すべて')}</select></label>
+      <fieldset class="choices"><legend>支払方法（複数可）</legend><div class="payment-filter">
+        ${Object.entries(methods).map(([method,label])=>`<label class="inline-check"><input type="checkbox" name="payment"
+          value="${method}"${filters.payment.includes(method) ? ' checked' : ''}>${label}</label>`).join('')}</div></fieldset>
       <label class="field"><span>状態</span><select name="status">${options(statuses,filters.status,'すべて')}</select></label>
       <label class="field np-history-query"><span>顧客名・卓・伝票番号</span><input type="search" name="query" maxlength="100" value="${escape(filters.query)}" placeholder="例　A-03"></label>
       <button type="submit" class="btn btn-primary">検索</button>
@@ -112,6 +123,7 @@ export function buildTicketHistoryCsv(result) {
 }
 
 export function bindTicketHistory(root, state, api) {
+  api = {...api,currentOpenDate:state.day.status === 'open' ? state.day.date : null};
   const history = root.querySelector('.np-history');
   if (!history) return;
   const form = history.querySelector('form');
@@ -119,7 +131,8 @@ export function bindTicketHistory(root, state, api) {
   let result;
   form.addEventListener('submit',(event) => {
     event.preventDefault();
-    filters = Object.fromEntries(new FormData(form));
+    const data = new FormData(form);
+    filters = {...Object.fromEntries(data),payment:data.getAll('payment')};
     remembered = { workspaceId:api.workspaceId,role:api.role,date:state.day.date,filters };
     result = getTicketHistory(state,filters,api);
     history.querySelector('.np-history-results').innerHTML = renderRows(result,api);

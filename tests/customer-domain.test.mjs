@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { apply, createDemo, quote, summary } from '../docs/engine.mjs';
-import { renderSeatCustomer, renderSeatCustomerResults, renderSeatCustomerSelection } from '../docs/customer-ui.mjs';
+import { renderCompanionEditor, renderCompanionResults, renderSeatCustomer, renderSeatCustomerResults, renderSeatCustomerSelection } from '../docs/customer-ui.mjs';
+import { projectState,validateSnapshot,verifyCommand } from '../server/policy.mjs';
 import { findCustomer, findSettledCustomerTicket, getCustomerDetail, isAssignedCustomer, listUnlinkedVisits, parseCustomersCsv,
   searchCustomers } from '../docs/customers.mjs';
 
@@ -28,6 +29,36 @@ function departPaid(state, ticketId, at = now) {
     payments: [{ method: 'cash', amount: quote(state, ticketId).remaining }] }, admin, at);
   return run(paid, { type: 'depart', ticketId }, admin, at);
 }
+
+test('same-ticket companions have scoped visit history and primary-only sales attribution', () => {
+  let state = register(register(register(opened(),{name:'代表客'}),{name:'同席客',phone:'070-1234-5678'}),{name:'別の顧客'});
+  const [primary,companion,other] = state.customers;
+  state = seat(state,{customerId:primary.id,guests:2},staff);
+  const ticketId = state.tickets[0].id;
+  const command = {type:'setTicketCompanion',ticketId,customerId:companion.id,mode:'add'};
+  verifyCommand('staff',command);
+  assert.throws(()=>verifyCommand('cast',command),{code:'forbidden'});
+  const api = {escape:String,icon:()=>''};
+  assert.doesNotMatch(renderCompanionEditor(state,state.tickets[0],primary,api),/同席客/);
+  assert.match(renderCompanionResults(state,state.tickets[0],primary,'同席',api),/同席客/);
+  state = run(state,command,staff);
+  assert.throws(()=>run(state,{...command,customerId:other.id}),/来店人数/);
+  assert.throws(()=>run(state,{type:'setTicketCustomer',ticketId,customerId:null}),/同席者/);
+  assert.equal(getCustomerDetail(state,companion.id).visits[0].companion,true);
+  assert.equal(state.auditLog[0].action,'setTicketCompanion');
+  assert.deepEqual(validateSnapshot(state).tickets[0].companionCustomerIds,[companion.id]);
+  const scope = projectState(state,'staff',staff.id);
+  assert.deepEqual(scope.tickets[0].activeCompanionLinks,[{id:companion.id,name:'同席客'}]);
+  assert.equal(scope.customers.find(({id})=>id===companion.id).phone,undefined);
+  assert.equal(scope.tickets[0].companionCustomerIds,undefined);
+  const removed = run(state,{...command,mode:'remove'},manager);
+  assert.equal(getCustomerDetail(removed,companion.id).visits.length,0);
+  const total = quote(state,ticketId).total;
+  state = departPaid(state,ticketId);
+  assert.equal(getCustomerDetail(state,primary.id).totalSales,total);
+  assert.equal(getCustomerDetail(state,companion.id).totalSales,0);
+  assert.equal(projectState(state,'manager',manager.id).tickets[0].companionCustomerIds.length,0);
+});
 
 test('customer registration supports Japanese search, scopes profile edits, and omits contact details from audit snapshots', () => {
   const customer = { name: '佐藤 かな', kana: 'サトウ　カナ', phone: '０９０－１２３４－５６７８',
@@ -58,7 +89,7 @@ test('selecting a customer from the floor stores the visit and appointment acros
   assert.equal(seatedByUid, staff.id);
   assert.equal(snapshotName, customer.name);
   assert.equal(findCustomer(state, customer.id).firstVisitDate, '2026-11-16');
-  assert.equal(state.auditLog[0].actor.id, admin.id);
+  assert.equal(state.auditLog.find(({action}) => action === 'saveCustomer').actor.id, admin.id);
   state = run(state, { type: 'order', ticketId: first, items: [
     { menuId: 'nomination', quantity: 1, castIds: ['cast3'] },
   ] });

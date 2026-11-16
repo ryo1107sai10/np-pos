@@ -78,6 +78,30 @@ test('store membership isolates accounts and only a verified matching invite get
   assert.equal((await listStores(db, outsider)).stores.length, 0);
 });
 
+test('a role-policy revision closes both command and read access on another device', async () => {
+  const db = database();
+  const tenant = await store(db);
+  await inviteMember(db,owner,tenant,helper.email,'manager');
+  await listStores(db,helper);
+  const initial = createDemo('closed');
+  await migrateState(db,owner,tenant,{operationId:'role-policy-fixture-import',snapshot:initial});
+  const date = initial.day.date;
+  await command(db,helper,tenant,1,'role-policy-open-register',{type:'open',date,openingCash:20000});
+  const settings = {type:'saveRolePolicy',policy:{manager:{label:'限定担当',disabled:['orders','reports','customers']}}};
+  await assert.rejects(command(db,helper,tenant,2,'role-policy-nonadmin',settings),{code:'forbidden'});
+  await command(db,owner,tenant,2,'role-policy-owner-save',settings);
+  const visible = await readState(db,helper,tenant,2);
+  assert.equal(visible.revision,3);
+  assert.equal(visible.state.rolePolicy.manager.label,'限定担当');
+  assert.equal(visible.state.day.openingCash,0);
+  assert.equal(visible.state.cashMovements,undefined);
+  const {state} = await command(db,helper,tenant,3,'role-policy-seat-permitted',{type:'seat',tableIds:['a1'],setId:'set60',guests:1});
+  await assert.rejects(command(db,helper,tenant,4,'role-policy-order-denied',{type:'order',ticketId:state.tickets[0].id,
+    items:[{menuId:'highball',quantity:1}]}),{code:'forbidden'});
+  assert.equal((await readState(db,owner,tenant,null)).state.day.openingCash,20000);
+  assert.equal((await listAudit(db,owner,tenant)).events.find(({action})=>action==='saveRolePolicy').actor.id,owner.uid);
+});
+
 test('cast identity is linked by the store administrator and projected only for its authenticated owner', async (t) => {
   const db = database();
   const tenant = await store(db);

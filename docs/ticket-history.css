@@ -74,3 +74,4 @@
   .np-history-table td, .np-history-table td:last-child { display: grid; align-content: start; justify-items: start; gap: 3px; padding: 4px; border: 0; text-align: left; }
   .np-history-table td::before { content: attr(data-label); color: var(--muted); font-size: .72rem; font-weight: 650; }
 }
+.payment-filter { display: flex; gap: .65rem; flex-wrap: wrap; }

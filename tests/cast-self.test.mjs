@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { applyCastSelfCommand, bindCastAccount, getCastWorkspace, listCastAttendance, validateCastAttendanceSnapshot } from '../docs/cast-self.mjs';
-import { apply, createDemo } from '../docs/engine.mjs';
+import { apply, createDemo, quote } from '../docs/engine.mjs';
 import { getPayrollDraft, previewPayroll } from '../docs/payroll.mjs';
+import { projectState, validateSnapshot, verifyCommand } from '../server/policy.mjs';
 
 const day = '2026-11-30';
 const month = day.slice(0,7);
@@ -24,6 +25,47 @@ function fixture() {
   const command = (action,at = now,actor = first) => applyCastSelfCommand(state,action,at,actor,(prefix) => `${prefix}-${++id}`);
   return {state,command};
 }
+
+test('manager punches, corrected breaks and named attendance amounts are reflected in frozen payroll', () => {
+  let state = createDemo('closed',now);
+  const run = (action, at = now, actor = manager) => { state = apply(state,action,at,actor); };
+  const date = '2026-11-30';
+  const clock = (hhmm) => Date.parse(`${date}T${hhmm}:00+09:00`);
+  const row = {type:'saveManagedAttendance',castId:'cast1',date,classification:'late',
+    clockInAt:clock('20:00'),clockOutAt:clock('23:00'),reason:'出勤記録の確認'};
+  run({type:'savePayrollRate',castId:'cast1',effectiveDate:date,hourlyRate:3000},now,admin);
+  run({type:'savePayrollSettings',settings:{pointRate:50}},now,admin);
+  run({type:'saveEmployeeProfile',castId:'cast1',profile:{number:'E01',legalName:'内部名',phone:'090-0000-0000'}},now,admin);
+  assert.equal(state.payroll.employeeProfiles[0].number,'E01');
+  assert.equal(projectState(state,'manager',manager.id).payroll,undefined);
+  assert.doesNotMatch(JSON.stringify(state.auditLog),/内部名|090-0000-0000/);
+  run({type:'saveAttendanceItems',items:[
+    {label:'送迎',kind:'deduction',amount:600},{label:'手当',kind:'allowance',amount:700},{label:'勤務',kind:'points',amount:2}
+  ]},now,admin);
+  assert.equal(projectState(state,'staff',staff.id).attendanceItems,undefined);
+  const itemIds = state.attendanceItems.map(({id})=>id);
+  const breaks = [{startAt:clock('20:15'),endAt:clock('20:30')},{startAt:clock('21:45'),endAt:clock('22:15')}];
+  assert.throws(()=>verifyCommand('staff',row),{code:'forbidden'});
+  assert.throws(()=>run({...row,breaks:[breaks[0],{startAt:clock('20:25'),endAt:clock('20:32')}] }),/重複/);
+  run({...row,breaks,itemIds});
+  assert.equal(state.attendances[0].minutes,135);
+  const {id:attendanceId} = state.castAttendance[0];
+  assert.throws(()=>run(row),/重複/);
+  run({...row,attendanceId,clockOutAt:clock('23:15'),breaks,itemIds,reason:'正しい退勤を確認'});
+  assert.equal(state.attendances[0].minutes,150);
+  assert.equal(state.auditLog[0].reason,'正しい退勤を確認');
+  run({type:'saveManagedAttendance',castId:'cast2',date,classification:'no-show',reason:'欠勤確認'});
+  assert.equal(state.castAttendance.find(({castId})=>castId==='cast2').status,'absent');
+  const pay = previewPayroll(state,{month,castId:'cast1'});
+  assert.equal(pay.hourlyPay,7500);
+  assert.equal(pay.pointPay,100);
+  assert.equal(pay.net,7700);
+  run({type:'savePayrollDraft',month,castId:'cast1'},now,admin);
+  run({type:'finalizePayroll',month,castId:'cast1'},now,admin);
+  assert.throws(()=>run({...row,attendanceId}),/確定/);
+  run({type:'saveAttendanceItems',items:[]},now,admin);
+  assert.equal(validateSnapshot(state).payroll.records[0].snapshot.net,7700);
+});
 
 test('cast clock hands off an overnight shift to approved payroll exactly once', () => {
   const {state,command} = fixture();
@@ -116,4 +158,29 @@ test('pending attendance blocks payroll finalization until the manager records a
   assert.doesNotThrow(() => validateCastAttendanceSnapshot(payroll));
   delete payroll.castAttendance[1].breakMinutes;
   assert.doesNotThrow(() => validateCastAttendanceSnapshot(payroll));
+});
+test('cast sales performance includes only own confirmed and open order figures without receipt data', () => {
+  const now = Date.parse('2026-11-17T20:30:00+09:00');
+  let state = createDemo('closed',now);
+  const run = (action) => { state = apply(state,action,now); };
+  run({type:'open',date:'2026-11-17',openingCash:1000});
+  run({type:'bindCastAccount',memberUid:'performance-actor',castId:'cast1'});
+  run({type:'seat',tableIds:['a1'],setId:'set60',guests:1});
+  const settledId = state.tickets.at(-1).id;
+  run({type:'order',ticketId:settledId,items:[{menuId:'nomination',quantity:1,castIds:['cast1']},
+    {menuId:'castDrink',quantity:2,castIds:['cast1','cast2']}]});
+  run({type:'settle',ticketId:settledId,payments:[{method:'cash',amount:quote(state,settledId).remaining}]});
+  run({type:'seat',tableIds:['a2'],setId:'set60',guests:1});
+  const pendingId = state.tickets.at(-1).id;
+  run({type:'order',ticketId:pendingId,items:[{menuId:'castDrink',quantity:3,castIds:['cast1']},
+    {menuId:'castDrink',quantity:7,castIds:['cast2']}]});
+  const projected = getCastWorkspace(state,'performance-actor',now);
+  assert.equal(projected.performance.month,'2026-11');
+  assert.equal(projected.performance.confirmed.nominations,1);
+  assert.equal(projected.performance.confirmed.drinkQuantity,1);
+  assert.equal(projected.performance.forecast.drinkQuantity,3);
+  assert.equal(projected.performance.confirmed.commission,quote(state,settledId).commission.find(({castId})=>castId==='cast1').amount);
+  assert.equal(projected.performance.forecast.sales,quote(state,pendingId).commission.find(({castId})=>castId==='cast1').sales);
+  assert.ok(!JSON.stringify(projected.performance).includes(settledId));
+  assert.ok(!JSON.stringify(projected.performance).includes('cast2'));
 });

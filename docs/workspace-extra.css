@@ -64,3 +64,7 @@
   .np-print-a4 .analytics-chart li i { print-color-adjust: exact; }
   .np-print-a4 .payroll-print-total { font-size: 1.35rem; }
 }
+.payroll-rule-layout { display: grid; grid-template-columns: repeat(var(--payroll-columns, 1), minmax(0, 1fr)); gap: .45rem; }
+.payroll-rule-layout .lr-money-list > div { display: grid; }
+@media screen and (max-width: 600px) { .payroll-rule-layout { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media print { .payroll-print-page + .payroll-print-page { break-before: page; } }

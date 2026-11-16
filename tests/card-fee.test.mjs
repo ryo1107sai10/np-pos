@@ -5,6 +5,7 @@ import { addCardFeeTax, getCardFee, getCardFeeSettings } from '../docs/card-fee.
 import { buildFreeeCsv } from '../docs/freee-export.mjs';
 import { getReportPeriod } from '../docs/report-period.mjs';
 import { getPrintTenderReceived } from '../docs/print-domain.mjs';
+import { validateSnapshot, verifyCommand } from '../server/policy.mjs';
 
 const date = '2026-11-16';
 const time = Date.parse(`${date}T20:00:00+09:00`);
@@ -112,4 +113,68 @@ test('settings changes and reversal preserve the old fee while a reopened checko
   state = run(state,{type:'settle',ticketId,payments:[{method:'card',amount:base}],expectedCardFee:0});
   assert.equal(quote(state,ticketId).cardFee,undefined);
   assert.equal(summary(state).sales,base);
+});
+
+test('brand rates override the default, QR and card fees round independently, and frozen brand names survive renaming', () => {
+  let state = openWithTicket();
+  const ticketId = state.tickets[0].id;
+  const settings = {enabled:true,rateBps:500,brands:[
+    {id:'silver',name:'シルバーカード',method:'card',rateBps:125},
+    {id:'phone',name:'スマホ決済',method:'qr',rateBps:300},
+  ]};
+  state = run(state,{type:'saveCardFeeSettings',settings});
+  const paid = [
+    {method:'card',amount:30,brandId:'silver'},
+    {method:'card',amount:20,brandId:'silver'},
+    {method:'card',amount:120},
+    {method:'qr',amount:200,brandId:'phone'},
+    {method:'cash',amount:quote(state,ticketId).total - 370},
+  ];
+  assert.equal(getCardFee(state,paid),13);
+  assert.throws(() => run(state,{type:'settle',ticketId,payments:paid,expectedCardFee:12}),/決済加算額/);
+  const mismatchedBrand = [{...paid[0],brandId:'phone'},...paid.slice(1)];
+  assert.throws(() => run(state,{type:'settle',ticketId,payments:mismatchedBrand,expectedCardFee:13}),/決済ブランド/);
+  state = run(state,{type:'settle',ticketId,payments:paid,expectedCardFee:13});
+  assert.equal(quote(state,ticketId).brandedFee,true);
+  assert.equal(quote(state,ticketId).total,13_213);
+  assert.deepEqual(state.tickets[0].payments.map(({amount})=>amount),[31,20,126,206,12_830]);
+  assert.equal(summary(state).payments.qr,206);
+  assert.equal(summary(state).payments.card,177);
+  assert.equal(summary(state).expectedCash,32_830);
+  assert.equal(buildFreeeCsv(getReportPeriod(state,{mode:'day'}),{mode:'tickets'}).salesTotal,13_213);
+  const audit = state.auditLog.find(({action})=>action === 'settle').after.payments;
+  assert.equal(audit[0].brandName,'シルバーカード');
+  const names = validateSnapshot(state).tickets[0].payments.map(({brandName})=>brandName);
+  assert.deepEqual(names,['シルバーカード','シルバーカード',undefined,'スマホ決済',undefined]);
+
+  state = run(state,{type:'saveCardFeeSettings',settings:{...settings,brands:[]}});
+  assert.equal(quote(state,ticketId).total,13_213);
+  assert.equal(quote(state,ticketId).brandedFee,true);
+  assert.deepEqual(state.tickets[0].payments.map(({brandName})=>brandName),names);
+});
+
+test('fee waivers are restricted and audited, and an explicit zero-rate brand overrides the fallback', () => {
+  let state = openWithTicket();
+  const ticketId = state.tickets[0].id;
+  const settings = {enabled:true,rateBps:500,brands:[
+    {id:'free',name:'加算なしカード',method:'card',rateBps:0},
+    {id:'mobile',name:'QRサービス',method:'qr',rateBps:100},
+  ]};
+  state = run(state,{type:'saveCardFeeSettings',settings});
+  state = run(state,{type:'saveCardFeeSettings',settings:{enabled:true,rateBps:300}});
+  assert.equal(getCardFeeSettings(state).brands.length,2);
+  const payments = [{method:'card',amount:10_000,brandId:'free'},
+    {method:'qr',amount:3_200,brandId:'mobile',waiveFee:true}];
+  const command = {type:'settle',ticketId,payments,expectedCardFee:0};
+  const staff = {...manager,role:'staff'};
+  assert.throws(() => verifyCommand('staff',command),{code:'forbidden'});
+  assert.throws(() => run(state,command,staff),/権限/);
+  assert.throws(() => run(state,{...command,payments:[payments[0],{method:'cash',amount:3_200,waiveFee:true}]},manager),/加算がある/);
+  const paid = run(state,command,manager);
+  assert.equal(quote(paid,ticketId).total,13_200);
+  assert.equal(quote(paid,ticketId).cardFee,undefined);
+  assert.equal(paid.tickets[0].payments[1].feeWaived,true);
+  assert.equal(paid.tickets[0].payments[1].waivedFeeRate,100);
+  assert.equal(validateSnapshot(paid).tickets[0].payments[1].feeWaived,true);
+  assert.throws(() => run(state,{type:'saveCardFeeSettings',settings:{...settings,brands:[settings.brands[0],settings.brands[0]]}}),/重複/);
 });

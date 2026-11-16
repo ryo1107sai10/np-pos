@@ -7,6 +7,10 @@ export const printDocumentKinds = Object.freeze({
 const defaults = Object.freeze({
   width: 58, storeName: '', address: '', phone: '', registrationNumber: '', showItems: true, autoReceipt: false,
 });
+export const printGroupingOptions = Object.freeze({ line:'注文行ごと', product:'同じ商品をまとめる', cast:'担当者ごとにまとめる' });
+export const printItemsOptions = Object.freeze({ default:'共通設定に従う', show:'印字する', hide:'印字しない' });
+export const printAutoOptions = Object.freeze({ none:'開かない', receipt:'レシート', invoice:'領収書' });
+export const printInvoiceDateOptions = Object.freeze({ issued:'発行日', business:'営業日' });
 const operatorRoles = new Set(['admin', 'manager', 'staff']);
 const receivedMethods = new Set(['cash', 'card', 'qr']);
 const settledStatuses = new Set(['paid', 'departed']);
@@ -56,11 +60,42 @@ export function normalizePrintSettings(settings) {
   assertPrint(typeof showItems === 'boolean' && typeof autoReceipt === 'boolean', '明細表示と自動印刷の設定を確認してください。');
   const fields = Object.keys(settingsTextLengths).map((key) =>
     [key, cleanText(settings[key] ?? '', settingsTextLabels[key], settingsTextLengths[key])]);
-  return { width, ...Object.fromEntries(fields), showItems, autoReceipt };
+  const output = { width, ...Object.fromEntries(fields), showItems, autoReceipt };
+  if (settings.documents !== undefined) {
+    const {documents} = settings;
+    assertPrint(documents && typeof documents === 'object' && !Array.isArray(documents)
+      && Object.keys(documents).every((kind)=>Object.hasOwn(printDocumentKinds,kind)), '帳票の印字設定を確認してください。');
+    output.documents = {};
+    for (const [kind,rules] of Object.entries(documents)) {
+      assertPrint(rules && Object.hasOwn(printGroupingOptions,rules.grouping) && Object.hasOwn(printItemsOptions,rules.items)
+        && typeof rules.showTender === 'boolean' && typeof rules.storeCopy === 'boolean', '帳票の印字設定を確認してください。');
+      output.documents[kind] = {grouping:rules.grouping,items:rules.items,showTender:rules.showTender,storeCopy:rules.storeCopy};
+    }
+  }
+  if (settings.autoPrintKind !== undefined) {
+    assertPrint(Object.hasOwn(printAutoOptions,settings.autoPrintKind),'会計後に開く帳票を選択してください。');
+    output.autoPrintKind = settings.autoPrintKind;
+  }
+  if (settings.invoiceDate !== undefined) {
+    assertPrint(Object.hasOwn(printInvoiceDateOptions,settings.invoiceDate),'領収書の日付の基準を選択してください。');
+    output.invoiceDate = settings.invoiceDate;
+  }
+  if (settings.invoicePurpose !== undefined) output.invoicePurpose = cleanText(settings.invoicePurpose,'領収書の但し書き',120);
+  return output;
 }
 
 export function getPrintSettings(state) {
   return state.printSettings ? { ...defaults, ...state.printSettings } : { ...defaults };
+}
+
+export function getPrintDocumentRules(settings, kind) {
+  return {
+    grouping:'line',items:'default',showTender:kind === 'receipt',storeCopy:false,...settings.documents?.[kind],
+  };
+}
+
+export function getPrintAutoKind(settings) {
+  return settings.autoPrintKind ?? (settings.autoReceipt ? 'receipt' : 'none');
 }
 
 export function findPrintableTicket(state, ticketId, date) {
@@ -102,7 +137,9 @@ export function isValidPrintDocument(record) {
 export function applyPrintCommand(state, action, actor, at, allocateId) {
   if (action.type === 'savePrintSettings') {
     assertPrint(actor.role === 'admin', '印刷設定を変更するには店舗管理者の権限が必要です。');
-    state.printSettings = normalizePrintSettings(action.settings);
+    assertPrint(action.settings && typeof action.settings === 'object' && !Array.isArray(action.settings),'印刷設定を確認してください。');
+    const {documents,invoiceDate,invoicePurpose} = getPrintSettings(state);
+    state.printSettings = normalizePrintSettings({documents,invoiceDate,invoicePurpose,...action.settings});
     return;
   }
   assertPrint(operatorRoles.has(actor.role), '印刷を発行する権限がありません。');

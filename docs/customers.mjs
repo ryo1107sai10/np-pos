@@ -3,6 +3,14 @@ import { reassignSettledTicketReceivable } from './receivables.mjs';
 const settled = new Set(['paid', 'departed']);
 const editors = new Set(['admin', 'manager']);
 const datePattern = /^\d{4}-\d{2}-\d{2}$/;
+export const customerWeekdays = ['月', '火', '水', '木', '金', '土', '日'];
+export const customerPhotoMax = 12_000;
+
+export function isCustomerPhoto(value) {
+  return value === undefined || value === '' || (typeof value === 'string' && value.length <= customerPhotoMax
+    && /^data:image\/(?:jpeg|webp|png);base64,(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)
+    && value.length >= 40);
+}
 
 function check(condition, message) {
   if (!condition) throw new Error(message);
@@ -34,8 +42,10 @@ function bottleRecords(value) {
   return bottles.map((entry) => {
     check(record(entry) && Number.isFinite(entry.quantity) && entry.quantity >= 0 && entry.quantity <= 1_000_000,
       'ボトルの残量を確認してください。');
+    check(isCustomerPhoto(entry.photo), 'ボトルの画像を確認してください。');
     return { name: profileText(entry.name, 60, 'ボトル名', true), quantity: entry.quantity,
-      unit: profileText(entry.unit, 12, '残量の単位'), expiresAt: calendarDate(entry.expiresAt, '期限') };
+      unit: profileText(entry.unit, 12, '残量の単位'), expiresAt: calendarDate(entry.expiresAt, '期限'),
+      ...(entry.photo ? {photo:entry.photo} : {}) };
   });
 }
 
@@ -56,11 +66,55 @@ function comparable(value) {
 export function searchCustomers(state, query = '') {
   const terms = comparable(query).trim().split(/\s+/).filter(Boolean);
   return (state.customers ?? []).filter((customer) => {
-    const names = [customer.name, customer.kana].map((name) => comparable(name).replace(/\s+/g, ''));
+    const names = [customer.name, customer.kana, ...(customer.tags ?? []).map((tag) => `#${tag}`)]
+      .map((name) => comparable(name).replace(/\s+/g, ''));
     const phone = comparable(customer.phone).replace(/\D/g, '');
     return terms.every((term) => names.some((name) => name.includes(term)) || (/^[+()\d-]+$/.test(term) && term.replace(/\D/g, '').length > 0
       && phone.includes(term.replace(/\D/g, ''))));
   });
+}
+
+export function getCustomerDirectory(state, query, filters, today) {
+  const customers = searchCustomers(state, query).filter(({restricted}) => !restricted);
+  const rows = new Map(customers.map((customer) => [customer.id, {customer, visits:0, totalSales:0,
+    lastVisit:'', casts:new Set(), bottleExpiry:'', lapsed:false}]));
+  for (const {ticket,date} of ticketSnapshots(state)) {
+    if (!date || !['open','paid','departed'].includes(ticket.status)) continue;
+    for (const id of ticket.companionCustomerIds ?? []) {
+      const companion = rows.get(id);
+      if (!companion) continue;
+      companion.visits++;
+      if (date > companion.lastVisit) companion.lastVisit = date;
+    }
+    const row = rows.get(ticket.customerId);
+    if (!row) continue;
+    row.visits++;
+    if (date > row.lastVisit) row.lastVisit = date;
+    if (settled.has(ticket.status)) row.totalSales += ticket.settlement?.total ?? 0;
+    for (const line of ticket.lines ?? []) {
+      if (line.category !== '指名' || line.cancelledAt != null) continue;
+      for (const id of line.castIds ?? []) row.casts.add(id);
+    }
+  }
+  const day = today ? Date.parse(today) : NaN;
+  const inSevenDays = Number.isFinite(day) ? new Date(day + 7 * 86400000).toISOString().slice(0,10) : '';
+  for (const row of rows.values()) {
+    row.lapsed = row.visits >= 2 && day - Date.parse(row.lastVisit) >= 30 * 86400000;
+    row.bottleExpiry = (row.customer.bottleKeeps ?? []).filter(({quantity,expiresAt}) =>
+      quantity > 0 && expiresAt && expiresAt <= inSevenDays).map(({expiresAt}) => expiresAt).sort()[0] ?? '';
+  }
+  const result = [...rows.values()].filter(({customer,lastVisit,casts,bottleExpiry,lapsed}) => (
+    (!filters.birthdayMonth || customer.birthday?.slice(5,7) === filters.birthdayMonth)
+    && (!filters.visitFrom || lastVisit >= filters.visitFrom)
+    && (!filters.visitTo || (lastVisit && lastVisit <= filters.visitTo))
+    && (!filters.nomination || casts.has(filters.nomination))
+    && (!filters.dayOff || customer.daysOff?.includes(filters.dayOff))
+    && (filters.status !== 'bottle' || bottleExpiry)
+    && (filters.status !== 'inactive' || lapsed)
+  ));
+  if (filters.sort === 'sales') result.sort((a,b) => b.totalSales - a.totalSales);
+  if (filters.sort === 'visits') result.sort((a,b) => b.visits - a.visits);
+  return result;
 }
 
 function ticketSnapshots(state) {
@@ -112,10 +166,14 @@ export function listUnlinkedVisits(state) {
 export function getCustomerDetail(state, id) {
   const customer = findCustomer(state, id);
   if (!customer || customer.restricted) return null;
-  const entries = ticketSnapshots(state).filter(({ ticket }) => ticket.customerId === id && ticket.status !== 'void');
-  const visits = entries.map((entry) => visitRecord(state, entry));
+  const entries = ticketSnapshots(state).filter(({ ticket }) => ticket.status !== 'void'
+    && (ticket.customerId === id || ticket.companionCustomerIds?.includes(id)));
+  const visits = entries.map((entry) => {
+    const visit = visitRecord(state,entry);
+    return entry.ticket.customerId === id ? visit : {...visit,companion:true,total:0,customer:''};
+  });
   const castById = new Map([...(state.archivedCast ?? []), ...(state.cast ?? [])].map(({id, name}) => [id, name]));
-  const nominations = entries.flatMap(({ ticket, date }) => (ticket.lines ?? [])
+  const nominations = entries.filter(({ticket})=>ticket.customerId === id).flatMap(({ ticket, date }) => (ticket.lines ?? [])
     .filter((line) => line.category === '指名' && line.cancelledAt == null)
     .flatMap((line) => (line.castIds ?? []).map((castId, index) => ({ id: `${line.id}:${castId}`, ticketId: ticket.id,
       number: ticket.number, date, at: line.createdAt, name: line.name, castId,
@@ -139,10 +197,21 @@ function customerInput(state, incoming, previous) {
   check(Number.isSafeInteger(creditLimit) && creditLimit >= 0 && creditLimit <= 100_000_000, '売掛上限を円単位で入力してください。');
   check((fields.flagged === undefined || typeof fields.flagged === 'boolean')
     && (fields.creditEnabled === undefined || typeof fields.creditEnabled === 'boolean'), '顧客区分を確認してください。');
+  const email = profileText(fields.email, 254, 'メールアドレス');
+  check(!email || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email), 'メールアドレスを確認してください。');
+  const receiptRecipient = profileText(fields.receiptRecipient, 80, '領収書の宛名');
+  const daysOff = fields.daysOff ?? [];
+  check(Array.isArray(daysOff) && daysOff.every((day) => customerWeekdays.includes(day))
+    && daysOff.length === new Set(daysOff).size, 'お休みの曜日を確認してください。');
+  const tags = fields.tags ?? [];
+  check(Array.isArray(tags) && tags.length <= 15, 'タグは15件以内で登録できます。');
+  const cleanedTags = [...new Set(tags.map((tag) => profileText(tag, 27, 'タグ', true).replace(/^#+/, '')))].filter(Boolean);
+  check(isCustomerPhoto(fields.photo), '顧客写真を確認してください。');
   return { name: profileText(fields.name, 60, '顧客名', true), kana: profileText(fields.kana, 60, 'ふりがな'), phone,
     birthday: calendarDate(fields.birthday, '誕生日'), castId, memo: profileText(fields.memo, 400, 'メモ'),
     flagged: fields.flagged === true, creditEnabled: fields.creditEnabled === true, creditLimit,
-    bottleKeeps: bottleRecords(fields.bottleKeeps) };
+    bottleKeeps: bottleRecords(fields.bottleKeeps), ...(email && {email}), ...(receiptRecipient && {receiptRecipient}),
+    ...(daysOff.length && {daysOff}), ...(cleanedTags.length && {tags:cleanedTags}), ...(fields.photo && {photo:fields.photo}) };
 }
 
 function writeCustomer(state, customer, previous, actor, now, allocateId) {
@@ -177,15 +246,45 @@ function ticketCustomerTarget(state, customerId) {
 function updateTicketCustomer(state, tickets, customer, date) {
   const previous = findCustomer(state, tickets[0].customerId);
   for (const ticket of tickets) {
+    check(customer || !ticket.companionCustomerIds?.length, '代表のお客様を解除する前に同席者を解除してください。');
     ticket.customer = customer?.name ?? '';
-    if (customer) ticket.customerId = customer.id;
+    if (customer) {
+      ticket.customerId = customer.id;
+      if (ticket.companionCustomerIds) ticket.companionCustomerIds = ticket.companionCustomerIds.filter((id)=>id !== customer.id);
+    }
     else delete ticket.customerId;
   }
   if (customer) firstVisit(customer, date);
   if (previous?.firstVisitDate === date) {
     previous.firstVisitDate = '';
     for (const { ticket: visit, date } of ticketSnapshots(state)) {
-      if (visit.customerId === previous.id && visit.status !== 'void') firstVisit(previous, date);
+      if ((visit.customerId === previous.id || visit.companionCustomerIds?.includes(previous.id))
+        && visit.status !== 'void') firstVisit(previous, date);
+    }
+  }
+}
+
+export function setTicketCompanion(state,ticket,{customerId,mode},actor) {
+  check(['admin','manager','staff'].includes(actor.role),'同席者を変更する権限がありません。');
+  check(ticket.customerId,'先に会計の代表となるお客様を選択してください。');
+  const customer = ticketCustomerTarget(state,customerId);
+  check(customer && customer.id !== ticket.customerId,'代表のお客様と異なる同席者を選択してください。');
+  const ids = ticket.companionCustomerIds ?? [];
+  if (mode === 'add') {
+    check(!ids.includes(customer.id),'このお客様は同席者に登録済みです。');
+    check(ids.length < Math.min(20,ticket.guests - 1),'参加人数に合わせて来店人数を変更してください。');
+    ticket.companionCustomerIds = [...ids,customer.id];
+    firstVisit(customer,state.day.date);
+  } else {
+    check(mode === 'remove' && ids.includes(customer.id),'登録済みの同席者を選択してください。');
+    ticket.companionCustomerIds = ids.filter((id)=>id !== customer.id);
+    if (customer.firstVisitDate === state.day.date) {
+      customer.firstVisitDate = '';
+      for (const {ticket:visit,date} of ticketSnapshots(state)) {
+        if (visit.status !== 'void' && (visit.customerId === customer.id || visit.companionCustomerIds?.includes(customer.id))) {
+          firstVisit(customer,date);
+        }
+      }
     }
   }
 }
@@ -212,7 +311,11 @@ function correctSettledTicketCustomer(state, action) {
 }
 
 function rewriteTicketLinks(state, from, to) {
-  const update = (ticket) => { if (ticket?.customerId === from) ticket.customerId = to; };
+  const update = (ticket) => {
+    if (ticket?.customerId === from) ticket.customerId = to;
+    if (ticket?.companionCustomerIds) ticket.companionCustomerIds = [...new Set(ticket.companionCustomerIds
+      .map((id)=>id === from ? to:id))].filter((id)=>id !== ticket.customerId);
+  };
   (state.tickets ?? []).forEach(update);
   for (const day of state.closedDays ?? []) (day.ticketSnapshots ?? []).forEach(update);
   for (const cancellation of state.cancelledSettlements ?? []) update(cancellation.receipt);
@@ -272,6 +375,12 @@ export function applyCustomerCommand(state, action, actor, now, allocateId) {
   firstVisit(target, source.firstVisitDate);
   target.bottleKeeps = [...(target.bottleKeeps ?? []), ...(source.bottleKeeps ?? [])];
   check(target.bottleKeeps.length <= 30, '統合後のボトルキープが30件を超えます。');
+  for (const key of ['email','receiptRecipient','photo']) if (!target[key] && source[key]) target[key] = source[key];
+  const tags = [...new Set([...(target.tags ?? []), ...(source.tags ?? [])])];
+  check(tags.length <= 15, '統合後のタグが15件を超えます。');
+  if (tags.length) target.tags = tags;
+  const daysOff = [...new Set([...(target.daysOff ?? []), ...(source.daysOff ?? [])])];
+  if (daysOff.length) target.daysOff = daysOff;
   target.updatedAt = now;
   rewriteTicketLinks(state, source.id, target.id);
   state.customers = state.customers.filter(({id}) => id !== source.id);
@@ -312,6 +421,7 @@ const csvColumns = {
   '表示名':'name', '顧客名':'name', '名前':'name', '氏名':'name', name:'name',
   'ふりがな':'kana', 'カナ':'kana', 'フリガナ':'kana', kana:'kana', '電話':'phone', '電話番号':'phone', phone:'phone',
   '誕生日':'birthday', birthday:'birthday', '担当':'castName', '担当キャスト':'castName', castId:'castId', 'メモ':'memo', memo:'memo',
+  'メールアドレス':'email', email:'email', '領収書宛名':'receiptRecipient', receiptRecipient:'receiptRecipient',
 };
 
 export function parseCustomersCsv(text, people = []) {

@@ -1,35 +1,42 @@
 import { exportStoreConfiguration, maxOverdueExtensionCount, parseStoreConfiguration, quote, summary } from '../docs/engine.mjs';
 import { isAutoExtensionPauseSource, isValidAutoExtensionSettings, isValidVisitAutoExtensionPause } from '../docs/auto-extension.mjs';
-import { normalizeCardFeeSettings } from '../docs/card-fee.mjs';
+import { canWaivePaymentFee, normalizeCardFeeSettings } from '../docs/card-fee.mjs';
 import { getMonthlyReportSales } from '../docs/report-period.mjs';
-import { isAssignedCustomer } from '../docs/customers.mjs';
+import { customerWeekdays, isAssignedCustomer, isCustomerPhoto } from '../docs/customers.mjs';
 import { getRecoveryRows, isValidCashMovement } from '../docs/cash-ledger.mjs';
 import { getCashCountTotal, getCashPaymentAmount, isRegisterCashAmount } from '../docs/register-cash.mjs';
 import { isValidPrintDocument, normalizePrintSettings } from '../docs/print-domain.mjs';
+import { normalizeAccountingCsv } from '../docs/accounting-csv.mjs';
+import { normalizeRegisterSettings } from '../docs/register-config.mjs';
 import { validateShiftsSnapshot } from '../docs/shifts.mjs';
 import { isValidInitialSetSchedule } from '../docs/set-schedule.mjs';
 import { getDailyPayByDate, isDailyPayCommand, isPayrollCommand, isPayrollMonth, normalizeAttendanceSnapshot, normalizePayrollSnapshot } from '../docs/payroll.mjs';
 import { getCastWorkspace, isCastSelfCommand, listCastAttendance, validateCastAttendanceSnapshot } from '../docs/cast-self.mjs';
 import { isValidCalculationSettings, normalizeCalculationSettings } from '../docs/calculation-settings.mjs';
+import { normalizeAttendanceItems } from '../docs/payroll-records.mjs';
+import { normalizeRolePolicy, roleAllowsCommand, roleGroupAllowed } from '../docs/role-policy.mjs';
+import { normalizeCashAccounts, validCashAccountHistory } from '../docs/cash-accounts.mjs';
 
 export const roles = new Set(['admin', 'manager', 'staff', 'cast', 'trainee']);
 const staffCommands = ['seat', 'move', 'order', 'extend', 'extendOverdue', 'deposit', 'settle', 'depart', 'serve', 'issuePrintDocument', 'saveTicketNote',
-  'syncAutoExtensions', 'setTableAutoExtension', 'pauseVisitAutoExtension', 'resumeVisitAutoExtension', 'setTicketCustomer'];
+  'syncAutoExtensions', 'setTableAutoExtension', 'pauseVisitAutoExtension', 'resumeVisitAutoExtension', 'setTicketCustomer','setTicketCompanion'];
 const managerCommands = [...staffCommands, 'open', 'close', 'discount', 'stockAdjust', 'recordStockOperation', 'cancelDeposit', 'cancelLine', 'void', 'adjustTicketEnd',
-  'saveCustomer', 'recoverReceivable', 'recordCashMovement', 'saveShift', 'removeShift', 'reviewCastAttendance', 'adjustTicketGuests'];
+  'saveCustomer', 'recoverReceivable', 'recordCashMovement', 'saveShift', 'removeShift', 'reviewCastAttendance', 'saveManagedAttendance', 'adjustTicketGuests',
+  'editTicketLine', 'cancelTicketExtension', 'editCashMovement','voidCashMovement','editDeposit'];
 const roleCommands = {
   cast: new Set(['castClockIn','castClockOut','castRequestShift','castRequestDailyPay']),
   staff: new Set(staffCommands),
   manager: new Set(managerCommands),
   admin: new Set([...managerCommands, 'saveLayout', 'importLayout', 'saveStoreSettings', 'importStoreConfiguration',
-    'approveDiscount', 'rejectDiscount', 'saveControls', 'cancelSettlement', 'reopenTicket', 'correctSettledTicketPayments',
-    'mergeCustomers', 'linkCustomer', 'correctSettledTicketCustomer', 'importCustomers', 'savePrintSettings',
+    'approveDiscount', 'rejectDiscount', 'saveControls', 'cancelSettlement', 'reopenTicket', 'correctSettledTicketPayments','correctSettledContents',
+    'mergeCustomers', 'linkCustomer', 'correctSettledTicketCustomer', 'importCustomers', 'savePrintSettings', 'saveAccountingCsv','correctRegisterCount',
     'saveAutoExtensionSettings', 'saveCardFeeSettings', 'savePayrollDraft', 'finalizePayroll', 'savePayrollRate', 'savePayrollSettings',
-    'savePayrollTemplate', 'assignPayrollTemplate', 'removePayrollTemplate',
-    'requestDailyPay', 'reviewDailyPay', 'payDailyPay', 'saveInitialSetSchedule', 'bindCastAccount', 'saveCalculationSettings']),
+    'savePayrollTemplate', 'assignPayrollTemplate', 'removePayrollTemplate', 'saveEmployeeProfile', 'saveAttendanceItems','savePayrollVariables',
+    'requestDailyPay', 'reviewDailyPay', 'payDailyPay', 'saveInitialSetSchedule', 'bindCastAccount', 'saveCalculationSettings','saveRolePolicy','saveCashAccounts']),
 };
 const reasonCommands = new Set(['discount', 'cancelSettlement', 'reopenTicket', 'cancelLine', 'recordCashMovement', 'recordStockOperation',
-  'correctSettledTicketCustomer', 'correctSettledTicketPayments', 'adjustTicketEnd', 'adjustTicketGuests']);
+  'correctSettledTicketCustomer', 'correctSettledTicketPayments', 'adjustTicketEnd', 'adjustTicketGuests', 'editTicketLine', 'cancelTicketExtension',
+  'editDeposit','correctRegisterCount','correctSettledContents']);
 const paymentMethods = new Set(['cash', 'card', 'qr']);
 const ticketStatuses = new Set(['open', 'paid', 'departed', 'void', 'cancelled']);
 const emptyCommission = { fixed: 0, rate: 0, points: 0 };
@@ -54,9 +61,18 @@ export function canOperate(role) {
   return Object.hasOwn(roleCommands, role);
 }
 
-export function verifyCommand(role, command) {
+export function verifyCommand(role, command, state) {
   requireCondition(isRecord(command) && typeof command.type === 'string', 400, 'invalid-command', '操作を確認してください。');
   requireCondition(canOperate(role) && roleCommands[role].has(command.type), 403, 'forbidden', 'この操作には権限が必要です。');
+  requireCondition(roleAllowsCommand(state,role,command),403,'forbidden','店舗設定でこの役職には操作が許可されていません。');
+  if (command.type === 'saveRolePolicy') {
+    try { normalizeRolePolicy(command.policy); }
+    catch (error) { throw new ApiError(400,'invalid-command',error.message); }
+  }
+  if (command.type === 'saveCashAccounts') {
+    try { normalizeCashAccounts(command.accounts); }
+    catch (error) { throw new ApiError(400,'invalid-command',error.message); }
+  }
   if (reasonCommands.has(command.type)) {
     requireCondition(typeof command.reason === 'string' && command.reason.trim().length > 0,
       400, 'reason-required', '操作の理由を入力してください。');
@@ -77,10 +93,21 @@ export function verifyCommand(role, command) {
     requireCondition(typeof command.attendanceId === 'string' && command.attendanceId.length > 0 && command.attendanceId.length <= 128
       && ['approve','reject'].includes(command.decision),400,'invalid-command','勤怠と確認結果を選択してください。');
   }
+  if (command.type === 'saveManagedAttendance') {
+    const {attendanceId,castId,date,classification,reason} = command;
+    const validId = (id)=>typeof id === 'string' && id.length > 0 && id.length <= 128;
+    requireCondition((attendanceId == null || validId(attendanceId)) && validId(castId) && isBusinessDate(date)
+      && ['worked','late','absent','no-show'].includes(classification) && typeof reason === 'string' && reason.trim().length > 0
+      && (command.breaks === undefined || (Array.isArray(command.breaks) && command.breaks.every(isRecord))),
+    400,'invalid-command','勤怠の入力内容を確認してください。');
+  }
   if (isPayrollCommand(command.type)) {
     let valid;
     const hasTemplateId = typeof command.templateId === 'string' && command.templateId.length > 0 && command.templateId.length <= 128;
     if (command.type === 'savePayrollSettings') valid = isRecord(command.settings);
+    else if (command.type === 'saveEmployeeProfile') valid = typeof command.castId === 'string' && isRecord(command.profile);
+    else if (command.type === 'saveAttendanceItems') valid = Array.isArray(command.items) && command.items.length <= 50;
+    else if (command.type === 'savePayrollVariables') valid = Array.isArray(command.variables) && command.variables.length <= 30;
     else if (command.type === 'savePayrollTemplate') valid = (command.templateId == null || hasTemplateId)
       && typeof command.name === 'string' && Array.isArray(command.rules);
     else if (command.type === 'assignPayrollTemplate') valid = typeof command.castId === 'string' && (command.templateId === null || hasTemplateId);
@@ -97,11 +124,17 @@ export function verifyCommand(role, command) {
   if (command.type === 'seat') {
     requireCondition(command.newCustomer == null, 400, 'invalid-command',
       '顧客の新規登録は顧客管理から行ってください。来店登録では登録済みの顧客を選べます。');
+    requireCondition(command.arrivedAt === undefined || (Number.isSafeInteger(command.arrivedAt) && command.arrivedAt >= 0),
+      400,'invalid-command','来店時刻を確認してください。');
   }
   if (command.type === 'saveTicketNote' || command.type === 'adjustTicketEnd') {
     const validTicketId = typeof command.ticketId === 'string' && command.ticketId.length > 0 && command.ticketId.length <= 128;
+    const relativeTime = Number.isInteger(command.minutes) && command.minutes !== 0 && Math.abs(command.minutes) <= 180
+      && command.startsAt === undefined && command.endsAt === undefined;
+    const absoluteTime = command.minutes === undefined && Number.isSafeInteger(command.startsAt)
+      && Number.isSafeInteger(command.endsAt) && command.startsAt >= 0 && command.endsAt >= command.startsAt;
     const validChange = command.type === 'saveTicketNote' ? typeof command.note === 'string' && command.note.trim().length <= 400
-      : Number.isInteger(command.minutes) && command.minutes !== 0 && Math.abs(command.minutes) <= 180;
+      : relativeTime || absoluteTime;
     requireCondition(validTicketId && validChange, 400, 'invalid-command', '伝票と入力内容を確認してください。');
   }
   if (command.type === 'adjustTicketGuests') {
@@ -110,17 +143,35 @@ export function verifyCommand(role, command) {
       && ['correct','join','leave'].includes(mode) && Number.isInteger(count) && count > 0 && count <= 100,
     400, 'invalid-command', '伝票と人数変更の内容を確認してください。');
   }
-  if (command.type === 'extendOverdue') {
-    const {ticketId, menuId, expectedCount} = command;
-    requireCondition([ticketId,menuId].every((id) => typeof id === 'string' && id.length > 0 && id.length <= 128)
-      && Number.isInteger(expectedCount) && expectedCount > 0 && expectedCount <= maxOverdueExtensionCount,
-    400, 'invalid-command', '伝票と一括延長の内容を確認してください。');
+  if (command.type === 'editTicketLine' || command.type === 'cancelTicketExtension') {
+    const {ticketId,lineId,quantity,castIds,price} = command;
+    const validLine = [ticketId,lineId].every((id) => typeof id === 'string' && id.length > 0 && id.length <= 128);
+    const validEdit = Number.isInteger(quantity) && quantity > 0 && quantity <= 100 && (price === undefined || validYen(price))
+      && (castIds === undefined || (Array.isArray(castIds) && castIds.length <= 100
+        && castIds.every((id) => typeof id === 'string' && id.length > 0 && id.length <= 128)));
+    requireCondition(validLine && (command.type === 'cancelTicketExtension' || validEdit),
+      400,'invalid-command','訂正する明細を確認してください。');
+  }
+  if (command.type === 'extendOverdue' || (command.type === 'extend' && command.plans !== undefined)) {
+    const {ticketId, menuId, plans, expectedCount, expectedTotal} = command;
+    const validId = (id) => typeof id === 'string' && id.length > 0 && id.length <= 128;
+    const assignment = plans === undefined ? validId(menuId) : Array.isArray(plans) && plans.length > 0
+      && plans.length <= 24 && plans.every((row) => isRecord(row) && validId(row.menuId)
+        && Number.isInteger(row.quantity) && row.quantity > 0 && row.quantity <= 100);
+    const validCount = command.type === 'extend' || (Number.isInteger(expectedCount) && expectedCount > 0 && expectedCount <= maxOverdueExtensionCount);
+    requireCondition(validId(ticketId) && assignment && validCount && (expectedTotal === undefined || validYen(expectedTotal)),
+      400, 'invalid-command', '伝票と延長の内容を確認してください。');
   }
   if (command.type === 'setTicketCustomer' || command.type === 'correctSettledTicketCustomer') {
     const { ticketId, customerId } = command;
     requireCondition(typeof ticketId === 'string' && ticketId.trim().length > 0
       && (customerId === null || (typeof customerId === 'string' && customerId.trim().length > 0)),
     400, 'invalid-command', '伝票と顧客の選択内容を確認してください。');
+  }
+  if (command.type === 'setTicketCompanion') {
+    const {ticketId,customerId,mode} = command;
+    requireCondition([ticketId,customerId].every((id)=>typeof id === 'string' && id.trim() && id.length <= 128)
+      && ['add','remove'].includes(mode),400,'invalid-command','登録済みの同席者を選択してください。');
   }
   if (command.type === 'order') {
     requireCondition(Array.isArray(command.items) && command.items.length <= 100 && command.items.every(isRecord),
@@ -140,6 +191,12 @@ export function verifyCommand(role, command) {
   if (command.type === 'settle') {
     requireCondition(Array.isArray(command.payments) && command.payments.length <= 10 && command.payments.every(isRecord),
       400, 'invalid-command', '支払内容を確認してください。');
+    requireCondition(command.payments.every(({method,brandId,waiveFee}) =>
+      (brandId === undefined || (['card','qr'].includes(method) && validBrandId(brandId)))
+      && (waiveFee === undefined || typeof waiveFee === 'boolean')),
+    400,'invalid-command','決済ブランドと加算設定を確認してください。');
+    requireCondition(canWaivePaymentFee(role) || !command.payments.some(({waiveFee}) => waiveFee),
+      403,'forbidden','決済加算を免除するにはマネージャー以上の権限が必要です。');
     requireCondition(command.expectedCardFee === undefined || (Number.isSafeInteger(command.expectedCardFee) && command.expectedCardFee >= 0),
       400, 'invalid-command', 'カード会計加算額を確認してください。');
     requireCondition(command.cashReceived === undefined || (isRegisterCashAmount(command.cashReceived) && command.cashReceived > 0),
@@ -161,6 +218,15 @@ export function verifyCommand(role, command) {
         isRecord(row) && (paymentMethods.has(row.method) || row.method === 'receivable')
         && validYen(row.amount) && row.amount > 0),
     400, 'invalid-command', '伝票と訂正後の支払内容を確認してください。');
+  }
+  if (command.type === 'correctSettledContents') {
+    requireCondition(typeof command.ticketId === 'string' && command.ticketId.length <= 128 && validYen(command.expectedTotal)
+      && validYen(command.discount) && paymentMethods.has(command.adjustmentMethod)
+      && (command.lineId === '' || (typeof command.lineId === 'string' && command.lineId.length <= 128
+        && Number.isInteger(command.quantity) && command.quantity > 0 && command.quantity <= 100
+        && validYen(command.price) && Array.isArray(command.castIds) && command.castIds.length <= 100
+        && command.castIds.every((id) => typeof id === 'string' && id.length <= 128))),
+    400,'invalid-command','訂正する明細と金額を確認してください。');
   }
 }
 
@@ -188,6 +254,74 @@ function snapshotCashMovements(state) {
   return new Set([...(state.cashMovements ?? []), ...state.closedDays.flatMap((day) => day.cashMovements ?? [])]);
 }
 
+function clearCommissionDetails(state) {
+  for (const ticket of allSnapshotTickets(state)) {
+    for (const line of ticket.lines) {
+      delete line.castCommissions;
+      line.commission = emptyCommission;
+    }
+    if (ticket.settlement) {
+      ticket.settlement.commission = [];
+      ticket.settlement.commissionDetails = [];
+    }
+  }
+  for (const item of state.menu) {
+    item.acceptsCast = acceptsCast(item,state.cast);
+    delete item.commission;
+  }
+  for (const person of [...state.cast,...(state.archivedCast ?? [])]) delete person.commissionOverride;
+}
+
+function restrictRoleData(next, role) {
+  const allowed = (group) => roleGroupAllowed(next,role,group);
+  if (!allowed('staffing')) {
+    delete next.shifts;
+    delete next.castAttendance;
+    delete next.attendanceItems;
+  }
+  if (!allowed('reports')) {
+    next.closedDays = [];
+    next.day.openingCash = 0;
+    next.day.closingCash = null;
+    delete next.cancelledSettlements;
+    delete next.cashMovements;
+    delete next.cashAccounts;
+    delete next.dailyPayByDate;
+    delete next.floorMonthSales;
+    delete next.accountingCsv;
+    delete next.receivables;
+    delete next.recoveryTotalsForDay;
+    delete next.recoveryRowsForDay;
+    delete next.cashRecoveryRows;
+    next.printDocuments = next.printDocuments?.filter(({date}) => date === next.day.date);
+    clearCommissionDetails(next);
+  }
+  if (!allowed('customers')) {
+    next.customers = [];
+    delete next.receivables;
+    for (const ticket of allSnapshotTickets(next)) {
+      ticket.customer = '';
+      delete ticket.customerId;
+      delete ticket.activeCustomerLink;
+      delete ticket.companionCustomerIds;
+      delete ticket.activeCompanionLinks;
+    }
+    next.printDocuments = next.printDocuments?.map(printDocumentMetadata);
+  }
+  if (!allowed('inventory')) {
+    next.stock = [];
+    next.archivedStock = [];
+    next.movements = [];
+    for (const item of next.menu) delete item.recipe;
+    for (const ticket of allSnapshotTickets(next)) for (const line of ticket.lines) {
+      line.stockUses = [];
+      delete line.stockRecipe;
+    }
+  }
+  if (!allowed('printing')) delete next.printDocuments;
+  return next;
+}
+
 export function projectState(state, role, actorUid) {
   if (role === 'admin') return state;
   if (role === 'cast') return getCastWorkspace(state,actorUid);
@@ -201,6 +335,7 @@ export function projectState(state, role, actorUid) {
   if (role === 'staff') {
     delete next.shifts;
     delete next.castAttendance;
+    delete next.attendanceItems;
   } else if (next.castAttendance !== undefined) next.castAttendance = listCastAttendance(state);
   for (const ticket of allSnapshotTickets(next)) delete ticket.settledBy;
   if (next.printDocuments) {
@@ -220,6 +355,8 @@ export function projectState(state, role, actorUid) {
     for (const ticket of next.tickets) {
       if (ticket.status === 'open' && names.has(ticket.customerId)) {
         ticket.activeCustomerLink = { id: ticket.customerId, name: names.get(ticket.customerId) };
+        if (ticket.companionCustomerIds?.length) ticket.activeCompanionLinks = ticket.companionCustomerIds
+          .filter((id)=>names.has(id)).map((id)=>({id,name:names.get(id)}));
       }
     }
   }
@@ -241,13 +378,14 @@ export function projectState(state, role, actorUid) {
         delete ticket.customerId;
       }
       delete ticket.seatedByUid;
+      if (ticket.companionCustomerIds) ticket.companionCustomerIds = ticket.companionCustomerIds.filter((id)=>assigned.has(id));
       for (const entry of [ticket.discountDetails, ticket.discountRequest]) {
         for (const field of ['actor', 'approvedBy']) {
           if (entry?.[field] && entry[field].id !== actorUid) delete entry[field];
         }
       }
     }
-    return next;
+    return restrictRoleData(next,role);
   }
   next.floorMonthSales = getMonthlyReportSales(state);
   next.closedDays = [];
@@ -260,9 +398,11 @@ export function projectState(state, role, actorUid) {
   delete next.recoveryRowsForDay;
   delete next.cashRecoveryRows;
   delete next.cashMovements;
+  delete next.cashAccounts;
   for (const ticket of next.tickets) {
     ticket.customer = '';
     delete ticket.customerId;
+    delete ticket.companionCustomerIds;
     delete ticket.seatedByUid;
     delete ticket.discountDetails;
     if (ticket.discountRequest) ticket.discountRequest = { id: ticket.discountRequest.id };
@@ -286,7 +426,7 @@ export function projectState(state, role, actorUid) {
     entry.defaultUnitCost = 0;
     entry.value = 0;
   }
-  return next;
+  return restrictRoleData(next,role);
 }
 
 function uniqueRecords(records) {
@@ -307,9 +447,21 @@ function validFeeRate(value) {
   return Number.isSafeInteger(value) && value >= 0 && value <= 10_000;
 }
 
+function validBrandId(id) {
+  return typeof id === 'string' && /^[a-zA-Z0-9_-]{1,80}$/.test(id);
+}
+
 function validCardPayment(row) {
+  const hasBrand = row.brandId !== undefined || row.brandName !== undefined;
+  if (hasBrand && (!['card','qr'].includes(row.method) || !validBrandId(row.brandId)
+    || typeof row.brandName !== 'string' || !row.brandName.trim() || row.brandName.length > 40
+    || /[\p{Cc}\u2028\u2029]/u.test(row.brandName))) return false;
+  const waived = row.feeWaived !== undefined || row.waivedFeeRate !== undefined;
+  if (waived && (row.feeWaived !== true || !['card','qr'].includes(row.method)
+    || !validFeeRate(row.waivedFeeRate) || row.waivedFeeRate <= 0)) return false;
   const withFee = ['baseAmount', 'cardFee', 'cardFeeRateBps'].some((key) => row[key] !== undefined);
-  return !withFee || (row.method === 'card' && validYen(row.baseAmount) && validYen(row.cardFee) && row.cardFee > 0
+  return !withFee || (!waived && (row.method === 'card' || (row.method === 'qr' && hasBrand))
+    && validYen(row.baseAmount) && validYen(row.cardFee) && row.cardFee > 0
     && row.cardFee <= row.baseAmount && validFeeRate(row.cardFeeRateBps) && row.cardFeeRateBps > 0
     && row.amount === row.baseAmount + row.cardFee);
 }
@@ -317,18 +469,22 @@ function validCardPayment(row) {
 function validPayments(records, isSettlement = false) {
   return uniqueRecords(records) && records.every((row) =>
     (paymentMethods.has(row.method) || (isSettlement && row.method === 'receivable')) && nonnegative(row.amount)
+    && optionalText(row.memo,120)
     && validCardPayment(row) && (isSettlement || row.cardFee === undefined));
 }
 
 function validCardSettlement(ticket) {
   const settlement = ticket.settlement;
   const allocatedFees = ticket.payments.reduce((total, payment) => total + (payment.cardFee ?? 0), 0);
-  if (settlement?.cardFee === undefined) return allocatedFees === 0;
-  const {cardFee, cardFeeTax, cardFeeRateBps, baseTotal} = settlement;
+  if (settlement?.cardFee === undefined) return allocatedFees === 0 && settlement?.brandedFee === undefined;
+  const {cardFee, cardFeeTax, cardFeeRateBps, baseTotal, brandedFee} = settlement;
+  if (brandedFee !== undefined && brandedFee !== true) return false;
+  const hasBrandedFee = ticket.payments.some((payment)=>payment.cardFee > 0 && payment.brandId);
   const allocatedCorrectly = ticket.paymentsCorrectedAt === undefined ? cardFee === allocatedFees : allocatedFees === 0;
   return validYen(cardFee) && cardFee > 0 && allocatedCorrectly && validYen(cardFeeTax) && cardFeeTax <= cardFee
     && validFeeRate(cardFeeRateBps) && validYen(baseTotal) && baseTotal + cardFee === settlement.total
-    && ticket.payments.every((payment) => payment.cardFee === undefined || payment.cardFeeRateBps === cardFeeRateBps);
+    && (ticket.paymentsCorrectedAt !== undefined || Boolean(brandedFee) === hasBrandedFee)
+    && (brandedFee || ticket.payments.every((payment) => payment.cardFee === undefined || payment.cardFeeRateBps === cardFeeRateBps));
 }
 
 function validCashTender(ticket) {
@@ -363,6 +519,8 @@ function validTicket(ticket) {
     && isValidVisitAutoExtensionPause(ticket)
     && uniqueRecords(ticket.lines) && ticket.lines.every((line) =>
       typeof line.name === 'string' && typeof line.menuId === 'string'
+      && optionalText(line.printName,60)
+      && (line.hideReceiptLine === undefined || (typeof line.hideReceiptLine === 'boolean' && (!line.hideReceiptLine || line.price === 0)))
       && Number.isInteger(line.quantity) && line.quantity > 0
       && nonnegative(line.price) && nonnegative(line.total) && nonnegative(line.taxRate)
       && (line.autoExtension === undefined || typeof line.autoExtension === 'boolean')
@@ -410,6 +568,11 @@ function validCustomer(customer) {
   return typeof customer.name === 'string' && customer.name.trim().length > 0 && customer.name.length <= 60
     && optionalText(customer.kana, 60) && optionalText(customer.phone, 32) && optionalText(customer.memo, 400)
     && optionalText(customer.castId, 100) && optionalDate(customer.birthday) && optionalDate(customer.firstVisitDate)
+    && optionalText(customer.email, 254) && optionalText(customer.receiptRecipient, 80) && isCustomerPhoto(customer.photo)
+    && (customer.daysOff === undefined || (Array.isArray(customer.daysOff) && customer.daysOff.every((day) => customerWeekdays.includes(day))
+      && new Set(customer.daysOff).size === customer.daysOff.length))
+    && (customer.tags === undefined || (Array.isArray(customer.tags) && customer.tags.length <= 15
+      && customer.tags.every((tag) => typeof tag === 'string' && tag.trim().length > 0 && tag.length <= 27)))
     && (customer.flagged === undefined || typeof customer.flagged === 'boolean')
     && (customer.creditEnabled === undefined || typeof customer.creditEnabled === 'boolean')
     && ((customer.creditLimit === undefined && !customer.creditEnabled) || (Number.isSafeInteger(customer.creditLimit)
@@ -417,7 +580,7 @@ function validCustomer(customer) {
     && (customer.bottleKeeps === undefined || (Array.isArray(customer.bottleKeeps) && customer.bottleKeeps.length <= 30
       && customer.bottleKeeps.every((bottle) => isRecord(bottle) && typeof bottle.name === 'string'
         && bottle.name.trim().length > 0 && bottle.name.length <= 60 && nonnegative(bottle.quantity) && bottle.quantity <= 1_000_000
-        && optionalText(bottle.unit, 12) && optionalDate(bottle.expiresAt))));
+        && optionalText(bottle.unit, 12) && optionalDate(bottle.expiresAt) && isCustomerPhoto(bottle.photo))));
 }
 
 function validReceivable(entry, customerIds) {
@@ -499,6 +662,7 @@ export function validateSnapshot(state) {
       && state.cancelledSettlements.every(validCancelledSettlement)))
     && validControls(state.controls)
     && (state.autoExtensionSettings === undefined || isValidAutoExtensionSettings(state.autoExtensionSettings))
+    && (state.bulkExtensionEnabled === undefined || typeof state.bulkExtensionEnabled === 'boolean')
     && validTableAutoExtension(state)
     && Number.isSafeInteger(state.nextId) && state.nextId > 0
     && Number.isSafeInteger(state.nextTicket) && state.nextTicket > 0
@@ -515,7 +679,12 @@ export function validateSnapshot(state) {
   const customerIds = new Set(customers.map(({ id }) => id));
   requireCondition(receivables.every((entry) => validReceivable(entry, customerIds))
     && validReceivableLinks(state, receivables)
-    && allSnapshotTickets(state).every((ticket) => ticket.customerId == null || customerIds.has(ticket.customerId)),
+    && allSnapshotTickets(state).every((ticket) => (ticket.customerId == null || customerIds.has(ticket.customerId))
+      && (ticket.companionCustomerIds === undefined || (Array.isArray(ticket.companionCustomerIds)
+        && ticket.companionCustomerIds.length <= 20
+        && new Set(ticket.companionCustomerIds).size === ticket.companionCustomerIds.length
+        && (!ticket.companionCustomerIds.length || customerIds.has(ticket.customerId))
+        && ticket.companionCustomerIds.every((id)=>id !== ticket.customerId && customerIds.has(id))))),
   400, 'invalid-snapshot', message);
 
   let normalizedPrintSettings;
@@ -523,8 +692,17 @@ export function validateSnapshot(state) {
   let normalizedPayroll;
   let normalizedAttendances;
   try {
+    if (state.rolePolicy !== undefined) normalizeRolePolicy(state.rolePolicy);
+    if (state.cashAccounts !== undefined) normalizeCashAccounts(state.cashAccounts);
+    requireCondition(validCashAccountHistory(state),400,'invalid-snapshot','金庫と出金先の残高を確認してください。');
     validateShiftsSnapshot(state);
+    if (state.controls?.register !== undefined) normalizeRegisterSettings(state.controls.register);
+    if (state.accountingCsv !== undefined) {
+      requireCondition(isRecord(state.accountingCsv) && Object.keys(state.accountingCsv).every((mode) => ['daily','tickets'].includes(mode)),400,'invalid-snapshot',message);
+      for (const settings of Object.values(state.accountingCsv)) normalizeAccountingCsv(settings);
+    }
     validateCastAttendanceSnapshot(state);
+    if (state.attendanceItems !== undefined) normalizeAttendanceItems(state.attendanceItems);
     requireCondition(state.calculationSettings === undefined || isValidCalculationSettings(state.calculationSettings),400,'invalid-snapshot',message);
     requireCondition(isValidInitialSetSchedule(state.initialSetSchedule),400,'invalid-snapshot',message);
     normalizedPayroll = normalizePayrollSnapshot(state);
@@ -538,6 +716,8 @@ export function validateSnapshot(state) {
     throw new ApiError(400, 'invalid-snapshot', message);
   }
   const migrated = structuredClone(state);
+  if (migrated.rolePolicy !== undefined) migrated.rolePolicy = normalizeRolePolicy(migrated.rolePolicy);
+  if (migrated.cashAccounts !== undefined) migrated.cashAccounts = normalizeCashAccounts(migrated.cashAccounts);
   if (migrated.calculationSettings !== undefined) migrated.calculationSettings = normalizeCalculationSettings(migrated.calculationSettings);
   if (normalizedPayroll !== undefined) migrated.payroll = normalizedPayroll;
   if (normalizedAttendances !== undefined) migrated.attendances = normalizedAttendances;
@@ -574,6 +754,7 @@ export function validateSnapshot(state) {
     if (ticket.calculationSettings !== undefined) ticket.calculationSettings = normalizeCalculationSettings(ticket.calculationSettings);
     delete ticket.seatedByUid;
     delete ticket.activeCustomerLink;
+    delete ticket.activeCompanionLinks;
     delete ticket.settledBy;
   }
   return migrated;

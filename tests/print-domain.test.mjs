@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { apply, createDemo, quote, summary } from '../docs/engine.mjs';
-import { findPrintableTicket, getPrintDocuments, getPrintSettings, getPrintTenderReceived,
+import { apply, createDemo, quote, summary, yen } from '../docs/engine.mjs';
+import { findPrintableTicket, getPrintAutoKind, getPrintDocuments, getPrintSettings, getPrintTenderReceived,
   isValidPrintDocument } from '../docs/print-domain.mjs';
+import { renderPrintPreview } from '../docs/print-ui.mjs';
+import { validateSnapshot } from '../server/policy.mjs';
 
 const date = '2026-11-16';
 const now = Date.parse('2026-11-16T22:00+09:00');
@@ -62,6 +64,38 @@ test('confirmation and receipts keep separate counters without changing stock, s
   assert.equal(receipts[0].actor.id,staff.id);
   assert.ok(state.printDocuments.every(isValidPrintDocument));
   assert.deepEqual(quote(state,ticketId),settled);
+});
+
+test('grouped print settings, independent receipt details, and simultaneous store copies are compatible with existing records', () => {
+  let state = operatingState();
+  const ticketId = state.tickets[0].id;
+  state = step(state,{type:'order',ticketId,items:[
+    {menuId:'castDrink',quantity:1,castIds:['cast1','cast2']},
+    {menuId:'castDrink',quantity:2,castIds:['cast2','cast1']},
+  ]});
+  state = payCash(state);
+  const settings = {...getPrintSettings(state),autoPrintKind:'invoice',invoiceDate:'business',documents:{
+    receipt:{grouping:'cast',items:'show',showTender:false,storeCopy:true},
+    invoice:{grouping:'product',items:'hide',showTender:true,storeCopy:false},
+  }};
+  assert.throws(() => step(state,{type:'savePrintSettings',settings:{...settings,documents:{madeUp:settings.documents.receipt}}}),/帳票/);
+  state = step(state,{type:'savePrintSettings',settings});
+  assert.equal(getPrintAutoKind(getPrintSettings(state)),'invoice');
+  assert.deepEqual(validateSnapshot(state).printSettings,settings);
+  const context = {ticket:state.tickets[0],totals:quote(state,ticketId),date,settings:getPrintSettings(state),issuedAt:now + 86_400_000};
+  const api = {escape:String,yen};
+  const receipt = renderPrintPreview({...context,kind:'receipt'},api);
+  assert.equal([...receipt.matchAll(/class="np-print-paper"/g)].length,2);
+  assert.equal([...receipt.matchAll(/店舗控え/g)].length,1);
+  assert.equal([...receipt.matchAll(/¥1,500 × 3/g)].length,2);
+  assert.match(receipt,/class="np-print-cast">[^<]+・[^<]+/);
+  assert.doesNotMatch(receipt,/受取内訳/);
+  const invoice = renderPrintPreview({...context,kind:'invoice',recipient:'検証',purpose:'飲食代'},api);
+  assert.doesNotMatch(invoice,/会計明細|店舗控え/);
+  assert.match(invoice,/取引日（営業日） 2026\/11\/16/);
+  assert.match(invoice,/受取内訳/);
+  state = print(state,'receipt');
+  assert.equal(getPrintDocuments(state,state.tickets[0],date,'receipt').length,1);
 });
 
 test('reissued named receipts remember the latest recipient and purpose and exclude outstanding sales credit', () => {

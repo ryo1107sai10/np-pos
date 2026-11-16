@@ -1,0 +1,42 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { vaultBalance } from '../docs/cash-accounts.mjs';
+import { apply, createDemo, summary } from '../docs/engine.mjs';
+import { projectState, validateSnapshot, verifyCommand } from '../server/policy.mjs';
+
+const date = '2026-11-16';
+const now = Date.parse(date + 'T22:00:00+09:00');
+const owner = {id:'owner',label:'代表',role:'admin'};
+const manager = {id:'manager',label:'担当',role:'manager'};
+
+test('named vault movements reconcile the till and vault and named payees keep a historical label', () => {
+  let state = apply(createDemo('closed',now),{type:'open',date,openingCash:5000},now);
+  const vault = {id:'cash-account-vault',kind:'vault',name:'店舗金庫',openingBalance:1000,enabled:true};
+  const payee = {id:'cash-account-coffee',kind:'payee',name:'仕入会社',openingBalance:0,enabled:true};
+  const settings = {type:'saveCashAccounts',accounts:[vault,payee]};
+  assert.throws(()=>verifyCommand('manager',settings,state),{code:'forbidden'});
+  state = apply(state,settings,now,owner);
+  const record = (action,time = now) => apply(state,{type:'recordCashMovement',reason:'現金を記録',...action},time,manager);
+  const toTill = {kind:'deposit',category:'safe',cashAccountId:vault.id};
+  const fromTill = {kind:'withdrawal',category:'safe',cashAccountId:vault.id};
+  assert.throws(()=>record({...toTill,amount:1001}),/金庫の残高/);
+  assert.throws(()=>record({...fromTill,amount:5001}),/レジの理論残高/);
+  state = record({...fromTill,amount:2000});
+  assert.equal(vaultBalance(state,vault),3000);
+  assert.equal(summary(state).expectedCash,3000);
+  const move = state.cashMovements.at(-1);
+  assert.throws(()=>apply(state,{type:'voidCashMovement',movementId:move.id,correctionReason:'入力違い'},now,manager),/訂正できる/);
+  state = record({...toTill,amount:1800},now + 1000);
+  state = record({kind:'expense',category:'purchase',cashAccountId:payee.id,amount:500},now + 2000);
+  assert.equal(vaultBalance(state,vault),1200);
+  assert.equal(summary(state).expectedCash,4300);
+  assert.equal(state.cashMovements.at(-1).destination,'仕入会社');
+  assert.equal(state.auditLog[0].after.cashAccountId,payee.id);
+  const saved = apply(state,{...settings,accounts:[vault,{...payee,name:'変更後の会社名'}]},now + 3000,owner);
+  assert.equal(saved.cashMovements.at(-1).destination,'仕入会社');
+  assert.deepEqual(validateSnapshot(saved).cashAccounts,saved.cashAccounts);
+  assert.equal(projectState(saved,'staff','staff').cashAccounts,undefined);
+  const fake = structuredClone(saved);
+  fake.cashMovements[0].cashAccountId = 'cash-account-unknown';
+  assert.throws(()=>validateSnapshot(fake),{code:'invalid-snapshot'});
+});

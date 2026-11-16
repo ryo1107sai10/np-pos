@@ -1,3 +1,5 @@
+import { cashCounterparty, validCashAccountMetadata } from './cash-accounts.mjs';
+
 export const cashMovementKinds = Object.freeze({ deposit: '入金', withdrawal: '出金', expense: '経費' });
 
 export const cashMovementCategories = Object.freeze({
@@ -34,6 +36,8 @@ export function isValidCashMovement(entry) {
   return entry != null && validText(entry.id, 128, true) && validDate(entry.date) && Number.isSafeInteger(entry.at) && entry.at >= 0
     && validKind(entry.kind) && validCategory(entry.kind, entry.category) && validAmount(entry.amount)
     && validText(entry.reason, 120, true) && validText(entry.destination, 80)
+    && validCashAccountMetadata(entry)
+    && (entry.voidedAt === undefined || (Number.isSafeInteger(entry.voidedAt) && entry.voidedAt >= entry.at && validText(entry.voidReason,120,true)))
     && validText(entry.actor?.id, 256, true) && validText(entry.actor?.label, 320, true) && cashOperators.has(entry.actor?.role);
 }
 
@@ -47,7 +51,8 @@ export function createCashMovement(state, action, at, actor, allocateId) {
   const destination = action.destination ?? '';
   if (!validText(destination, 80)) throw new Error('移動先・支払先は80文字以内で入力してください。');
   return { id: allocateId(), date: state.day.date, at, kind: action.kind, amount: action.amount,
-    category: action.category, reason: action.reason.trim(), destination: destination.trim(), actor: { ...actor } };
+    category: action.category, reason: action.reason.trim(), destination: destination.trim(), actor: { ...actor },
+    ...cashCounterparty(state,action) };
 }
 
 export function getCashMovements(state, date) {
@@ -57,11 +62,19 @@ export function getCashMovements(state, date) {
 export function totalCashMovements(entries) {
   const totals = { cashIn: 0, cashOut: 0, expenses: 0 };
   for (const entry of entries) {
+    if (entry.voidedAt != null) continue;
     if (entry.kind === 'deposit') totals.cashIn += entry.amount;
     else totals.cashOut += entry.amount;
     if (entry.kind === 'expense') totals.expenses += entry.amount;
   }
   return totals;
+}
+
+export function editableCashMovement(state, id) {
+  if (state.payroll?.dailyPays?.some(({cashMovementId}) => cashMovementId === id)) return null;
+  const movement = state.cashMovements?.find((row) => row.id === id)
+    ?? state.closedDays.flatMap((day) => day.cashMovements ?? []).find((row) => row.id === id);
+  return movement?.voidedAt == null && movement?.cashAccountKind !== 'vault' ? movement : null;
 }
 
 export function getRecoveryRows(state, businessDate) {

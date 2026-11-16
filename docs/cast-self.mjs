@@ -1,12 +1,15 @@
 import { applyPayrollCommand, getDailyPayLimit, getPayrollDailyPays, getPayrollDraft, previewPayroll } from './payroll.mjs';
 import { applyShiftCommand } from './shifts.mjs';
+import { normalizeAttendanceItems, resolveAttendanceItems } from './payroll-records.mjs';
+import { getCastPerformance } from './cast-performance.mjs';
 
 const minute = 60_000;
 const day = 24 * 60 * minute;
 const japanOffset = 9 * 60 * minute;
 const businessDayCutoff = 6 * 60 * minute;
 const selfCommands = new Set(['castClockIn','castClockOut','castRequestShift','castRequestDailyPay']);
-const attendanceStatuses = new Set(['open','pending','approved','rejected']);
+const attendanceStatuses = new Set(['open','pending','approved','rejected','absent']);
+const absenceTypes = new Set(['absent','no-show']);
 const reviewerRoles = new Set(['admin','manager']);
 
 function check(condition, message) {
@@ -73,21 +76,29 @@ export function isCastAttendanceReview(type) {
   return type === 'reviewCastAttendance';
 }
 
+export function isManagedAttendanceCommand(type) {
+  return type === 'saveManagedAttendance';
+}
+
 function listOwnRows(state, castId) {
   return (state.castAttendance ?? []).filter((row) => row.castId === castId);
 }
 
 export function listCastAttendance(state) {
-  return (state.castAttendance ?? []).map(({id,castId,date,clockInAt,clockOutAt,status,minutes,breakMinutes,reviewedAt,reviewReason}) =>
-    ({id,castId,date,clockInAt,clockOutAt,status,minutes,breakMinutes,reviewedAt,reviewReason}))
-    .sort((first,second) => second.clockInAt - first.clockInAt);
+  return (state.castAttendance ?? []).map(({id,castId,date,clockInAt,clockOutAt,status,minutes,breakMinutes,reviewedAt,reviewReason,
+    breaks,classification,items}) =>
+    ({id,castId,date,clockInAt,clockOutAt,status,minutes,breakMinutes,reviewedAt,reviewReason,
+      ...(breaks && {breaks}),...(classification && {classification}),...(items && {items})}))
+    .sort((first,second) => second.date.localeCompare(first.date) || (second.clockInAt ?? 0) - (first.clockInAt ?? 0));
 }
 
 function payrollAmounts(pay) {
   const {month,castName,work,minutes,hourlyPay,commission,commissionDetails,points,pointPay,
-    allowances,deductions,allowanceTotal,deductionTotal,advance,net,statementItems} = pay;
+    allowances,deductions,allowanceTotal,deductionTotal,advance,net,statementItems,attendanceItems} = pay;
   return {month,castName,work,minutes,hourlyPay,commission,commissionDetails,points,pointPay,
-    allowances,deductions,allowanceTotal,deductionTotal,advance,net,statementItems};
+    allowances,deductions,allowanceTotal,deductionTotal,advance,net,
+    statementItems:statementItems?.filter(({kind}) => kind !== 'intermediate').map(({label,kind,amount}) => ({label,kind,amount})),
+    ...(attendanceItems && {attendanceItems})};
 }
 
 function privatePayroll(state, month, castId) {
@@ -121,7 +132,7 @@ export function getCastWorkspace(state, actorUid, now = Date.now()) {
     paidAt,paidDate,method,exceededLimit}) => ({id,month,amount,status,reason,requestedAt,reviewedAt,reviewReason,
     paidAt,paidDate,method,exceededLimit}));
   return structuredClone({cast:{id,name},date,shifts,attendances,openClock:attendances.find(({status}) => status === 'open') ?? null,
-    dailyPays,...privatePayroll(state,month,id)});
+    dailyPays,performance:getCastPerformance(state,id,date),...privatePayroll(state,month,id)});
 }
 
 function lastClockEnd(row) {
@@ -133,6 +144,7 @@ function clockIn(state, castId, now, allocateId) {
   check(!rows.some(({status}) => status === 'open'), 'すでに出勤しています。先に退勤を記録してください。');
   check(!rows.some((row) => lastClockEnd(row) > now), '直前の退勤時刻より後に出勤してください。');
   const date = dateForPunch(state,now);
+  check(!rows.some((row) => row.date === date && row.status === 'absent'), 'この営業日は欠勤が登録されています。マネージャーに確認してください。');
   check(getPayrollDraft(state,date.slice(0,7),castId)?.status !== 'final', '給与を確定した期間には打刻できません。');
   (state.castAttendance ??= []).push({id:allocateId('attendance'),castId,date,clockInAt:now,clockOutAt:null,status:'open'});
 }
@@ -191,6 +203,82 @@ function updatePayrollAttendance(state, row) {
   else (state.attendances ??= []).push({castId:row.castId,date:row.date,minutes,status:'approved'});
 }
 
+function calculateBreaks(breaks, clockInAt, clockOutAt) {
+  check(Array.isArray(breaks) && breaks.length <= 12, '休憩は12件以内で入力してください。');
+  const list = breaks.map(({startAt,endAt}) => {
+    check(isTimestamp(startAt) && isTimestamp(endAt) && startAt >= clockInAt && endAt <= clockOutAt
+      && endAt > startAt, '休憩の開始と終了は勤務時間内で指定してください。');
+    return {startAt,endAt};
+  }).sort((a,b) => a.startAt - b.startAt);
+  check(list.every((row,i) => i === 0 || row.startAt >= list[i-1].endAt), '休憩時間が重複しています。');
+  return {list,minutes:Math.floor(list.reduce((sum,row)=>sum + row.endAt - row.startAt,0) / minute)};
+}
+
+function attendanceMinutes(rows, castId, date) {
+  return rows.filter((row)=>row.castId === castId && row.date === date && row.status === 'approved').reduce((sum,row)=>sum+row.minutes,0);
+}
+
+function updateManagedPayrollAttendance(state, oldRows, newRows, castId, date) {
+  const previous = attendanceMinutes(oldRows,castId,date);
+  const rows = state.attendances ?? [];
+  const stored = rows.find((row)=>row.castId === castId && row.date === date);
+  const approved = newRows.filter((row)=>row.castId === castId && row.date === date && row.status === 'approved');
+  if (!stored && !approved.length) return;
+  check(!stored || (stored.minutes === previous && stored.status === 'approved'
+    && oldRows.some((row)=>row.castId === castId && row.date === date && row.status === 'approved')),
+  '同じ営業日に別の経路から登録した勤怠があります。給与の勤務記録を確認してください。');
+  const minutes = attendanceMinutes(newRows,castId,date);
+  check(minutes <= day / minute, '同じ営業日の勤務時間が24時間を超えます。');
+  state.attendances = rows.filter((row)=>row !== stored);
+  if (approved.length) state.attendances.push({castId,date,minutes,status:'approved'});
+}
+
+function saveManagedAttendance(state, action, now, actor, allocateId) {
+  check(reviewerRoles.has(actor.role), '勤怠記録にはマネージャー以上の権限が必要です。');
+  const rows = state.castAttendance ?? [];
+  const prior = rows.find((row)=>row.id === action.attendanceId);
+  check(action.attendanceId == null || prior, '訂正する勤怠が見つかりません。');
+  const {castId,date,clockInAt,clockOutAt,classification} = action;
+  check((prior ? prior.castId === castId : activeCast(state,castId))
+    && isDate(date) && date <= dateForPunch(state,now), '勤務者と営業日を確認してください。');
+  check([date,prior?.date].filter(Boolean).every((value)=>getPayrollDraft(state,value.slice(0,7),castId)?.status !== 'final'),
+    '給与を確定した期間の勤怠は変更できません。');
+  check(classification === 'worked' || classification === 'late' || absenceTypes.has(classification),'勤怠の区分を確認してください。');
+  const reason = optionalNote(action.reason,'勤怠登録・訂正の理由');
+  check(reason, '勤怠登録・訂正の理由を入力してください。');
+  const castRows = rows.filter((row)=>row.castId === castId && row !== prior);
+  const absent = absenceTypes.has(classification);
+  const dateStart = Date.parse(date) - japanOffset;
+  const row = {id:prior?.id ?? allocateId('attendance'),castId,date,classification,
+    reviewedAt:now,reviewReason:reason};
+  if (absent) {
+    check(!castRows.some((entry)=>entry.date === date && entry.status !== 'rejected'), '同じ営業日に勤務または欠勤の記録があります。');
+    Object.assign(row,{clockInAt:null,clockOutAt:null,status:'absent'});
+  } else {
+    check(!castRows.some((entry)=>entry.date === date && entry.status === 'absent'), 'この営業日は欠勤が登録されています。');
+    check(isTimestamp(clockInAt) && clockInAt >= dateStart && clockInAt < dateStart + day + businessDayCutoff && clockInAt <= now,
+      '営業日と出勤時刻を確認してください。');
+    check(clockOutAt === null || (isTimestamp(clockOutAt) && clockOutAt > clockInAt && clockOutAt <= now && clockOutAt - clockInAt <= day),
+      '退勤時刻は出勤から24時間以内で指定してください。');
+    const end = clockOutAt ?? Infinity;
+    check(!castRows.some((entry)=>entry.status !== 'absent' && clockInAt < (lastClockEnd(entry) ?? Infinity) && entry.clockInAt < end),
+      '同じ勤務者の打刻時間が重複しています。');
+    Object.assign(row,{clockInAt,clockOutAt,status:clockOutAt === null ? 'open' : 'approved'});
+    if (clockOutAt !== null) {
+      const elapsedMinutes = Math.floor((clockOutAt - clockInAt) / minute);
+      const breakData = calculateBreaks(action.breaks ?? [],clockInAt,clockOutAt);
+      const breakMinutes = breakData.list.length ? breakData.minutes : (action.breakMinutes ?? 0);
+      check(Number.isInteger(breakMinutes) && breakMinutes >= 0 && breakMinutes <= elapsedMinutes,'休憩時間を確認してください。');
+      Object.assign(row,{breakMinutes,minutes:elapsedMinutes-breakMinutes,...(breakData.list.length && {breaks:breakData.list})});
+    }
+  }
+  const items = absent ? [] : resolveAttendanceItems(state,action.itemIds ?? [],prior?.items);
+  if (items.length) row.items = items;
+  const next = [...rows.filter((entry)=>entry !== prior),row];
+  for (const updatedDate of new Set([date,prior?.date].filter(Boolean))) updateManagedPayrollAttendance(state,rows,next,castId,updatedDate);
+  state.castAttendance = next;
+}
+
 function reviewAttendance(state, action, now, actor) {
   check(reviewerRoles.has(actor.role), '勤怠承認にはマネージャー以上の権限が必要です。');
   const row = (state.castAttendance ?? []).find(({id}) => id === action.attendanceId);
@@ -208,6 +296,10 @@ function reviewAttendance(state, action, now, actor) {
 
 export function applyCastSelfCommand(state, action, now, actor, allocateId) {
   check(isTimestamp(now), '打刻時刻を確認してください。');
+  if (isManagedAttendanceCommand(action.type)) {
+    saveManagedAttendance(state,action,now,actor,allocateId);
+    return;
+  }
   if (isCastAttendanceReview(action.type)) {
     reviewAttendance(state,action,now,actor);
     return;
@@ -227,13 +319,18 @@ export function applyCastSelfCommand(state, action, now, actor, allocateId) {
 
 function validAttendance(row, castIds) {
   if (!isRecord(row) || !boundedText(row.id,128) || !row.id || !castIds.has(row.castId) || !isDate(row.date)
-    || !isTimestamp(row.clockInAt) || !attendanceStatuses.has(row.status)) return false;
+    || !attendanceStatuses.has(row.status)) return false;
+  if (row.items !== undefined) normalizeAttendanceItems(row.items);
+  if (row.status === 'absent') return row.clockInAt === null && row.clockOutAt === null && absenceTypes.has(row.classification)
+    && isTimestamp(row.reviewedAt) && boundedText(row.reviewReason,120) && Boolean(row.reviewReason.trim());
+  if (!isTimestamp(row.clockInAt) || (row.classification !== undefined && !['worked','late'].includes(row.classification))) return false;
   if (row.clockOutAt !== null) {
     if (!isTimestamp(row.clockOutAt) || row.clockOutAt <= row.clockInAt || row.clockOutAt - row.clockInAt > day) return false;
     const elapsedMinutes = Math.floor((row.clockOutAt - row.clockInAt) / minute);
     const {breakMinutes = 0} = row;
     if (!Number.isInteger(breakMinutes) || breakMinutes < 0 || breakMinutes > elapsedMinutes
       || row.minutes !== elapsedMinutes - breakMinutes) return false;
+    if (row.breaks !== undefined && calculateBreaks(row.breaks,row.clockInAt,row.clockOutAt).minutes !== breakMinutes) return false;
   } else if (row.minutes !== undefined || row.breakMinutes !== undefined) return false;
   if (row.status === 'open' || row.status === 'pending') return (row.status === 'open') === (row.clockOutAt === null);
   return (row.status !== 'approved' || row.clockOutAt !== null) && isTimestamp(row.reviewedAt)
@@ -248,7 +345,7 @@ export function validateCastAttendanceSnapshot(state) {
   check(Array.isArray(rows) && rows.every((row) => validAttendance(row,castIds))
     && new Set(rows.map(({id}) => id)).size === rows.length, '勤怠打刻の保存内容を確認してください。');
   for (const castId of new Set(rows.map((row) => row.castId))) {
-    const group = rows.filter((row) => row.castId === castId).sort((first,second) => first.clockInAt - second.clockInAt);
+    const group = rows.filter((row) => row.castId === castId && row.status !== 'absent').sort((first,second) => first.clockInAt - second.clockInAt);
     check(group.every((row,index) => index === 0 || (lastClockEnd(group[index - 1]) ?? Infinity) <= row.clockInAt),
       '勤怠打刻が重複しています。');
   }

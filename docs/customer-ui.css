@@ -315,3 +315,14 @@
 @media (hover: none) {
   .np-directory-toolbar :is(input,select), .np-seat-customer :is(input:not([type=radio]),select) { min-height: 44px; }
 }
+.np-directory-avatar { overflow: hidden; }
+.np-directory-avatar img { inline-size: 100%; block-size: 100%; object-fit: cover; }
+.np-bottle-thumbnail { inline-size: 3rem; block-size: 3rem; object-fit: cover; border-radius: .5rem; }
+.np-directory-filters { margin: 0 0 .75rem; }
+.np-directory-filters summary { cursor: pointer; padding: .45rem 0; }
+.np-directory-days, .np-directory-photo { min-inline-size: 0; margin: .5rem 0; padding: .55rem .7rem; border: 1px solid var(--line, #dce3ed); border-radius: .55rem; }
+.np-directory-days .np-directory-checks { display: flex; flex-wrap: wrap; gap: .7rem; }
+.np-directory-photo { grid-column: 1 / -1; display: grid; gap: .3rem; }
+.np-directory-photo input[type=file] { inline-size: 100%; min-inline-size: 0; }
+.np-directory-photo [role=status] { font-size: .8rem; }
+.np-directory-account small { display: block; }

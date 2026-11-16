@@ -1,12 +1,15 @@
 const orderCategories = new Set(['ドリンク', 'ボトル', 'フード', '指名']);
 const menuCategories = new Set(['セット', '延長', ...orderCategories]);
+export function getOrderCategories(state) {
+  return [...orderCategories,...(state.customMenuCategories ?? [])];
+}
 const castColors = new Set(['violet', 'rose', 'sky', 'green', 'amber']);
 const generatedId = /^(menu|cast|stock)-[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 const stockIdPattern = /^[a-zA-Z0-9_-]+$/;
 const menuFields = ['id', 'name', 'category', 'price', 'duration', 'enabled', 'popular', 'requiresCast',
-  'taxRate', 'serviceEligible'];
+  'taxRate', 'serviceEligible', 'printName', 'hideReceiptLine'];
 const castFields = ['id', 'name', 'initials', 'color', 'enabled'];
-const stockFields = ['id', 'name', 'category', 'unit', 'minimum', 'hidden'];
+const stockFields = ['id', 'name', 'category', 'unit', 'minimum', 'hidden', 'maximum', 'itemCode', 'barcode'];
 const commissionFields = ['fixed', 'rate', 'points'];
 const inUseTicketStatuses = new Set(['open', 'paid']);
 
@@ -43,6 +46,7 @@ export function getStoreSettings(state) {
   return {
     menu: state.menu.map(projectMenu),
     cast: state.cast.map(projectCast),
+    ...(state.customMenuCategories !== undefined && {customMenuCategories:[...state.customMenuCategories]}),
     stock: state.stock.map((item) => ({
       ...pick(item, stockFields),
       defaultUnitCost: item.defaultUnitCost ?? item.unitCost,
@@ -95,14 +99,16 @@ function validateRecipe(recipe, allowed, stockIds, label) {
   }
 }
 
-function normalizeMenu(item, { menuIds, stockIds }) {
+function normalizeMenu(item, { menuIds, stockIds, customMenuCategories }) {
   assert(isRecord(item), 'メニュー項目の形式を確認してください。');
   validateId(item.id, 'menu', menuIds, 'メニュー');
   const name = normalizeName(item.name, 60, 'メニュー名');
   const label = `「${name}」`;
-  assert(menuCategories.has(item.category), `${label}のカテゴリを選択してください。`);
+  assert(menuCategories.has(item.category) || customMenuCategories.includes(item.category), `${label}のカテゴリを選択してください。`);
   assert(isAmount(item.price, 0, 100_000_000), `${label}の料金は0円以上の整数で入力してください。`);
-  for (const key of ['enabled', 'popular', 'requiresCast', 'serviceEligible']) validateBoolean(item[key], label);
+  for (const key of ['enabled', 'popular', 'requiresCast', 'serviceEligible','hideReceiptLine']) validateBoolean(item[key], label);
+  assert(item.hideReceiptLine !== true || (item.price === 0 && !['セット','延長'].includes(item.category)),
+    '印字対象から外せるのは0円の注文商品です。');
   assert(item.taxRate === undefined || isAmount(item.taxRate, 0, 10_000), `${label}の税率を確認してください。`);
   const supplement = item.id === 'nominationExtra';
   assert(!supplement || item.category === '延長', '延長指名料のカテゴリを確認してください。');
@@ -110,8 +116,10 @@ function normalizeMenu(item, { menuIds, stockIds }) {
   assert(timed ? isAmount(item.duration, 1, 1_440) : item.duration === undefined, `${label}の時間を確認してください。`);
   assert(!timed || !item.requiresCast, `${label}では担当キャストの選択を必須にできません。`);
   validateCommission(item.commission, label);
-  validateRecipe(item.recipe, orderCategories.has(item.category), stockIds, label);
-  return { ...projectMenu(item), name };
+  validateRecipe(item.recipe, !['セット','延長'].includes(item.category), stockIds, label);
+  const output = { ...projectMenu(item), name };
+  if (item.printName !== undefined) output.printName = normalizeName(item.printName,60,'帳票に印字する商品名');
+  return output;
 }
 
 function normalizeCast(person, { castIds }) {
@@ -137,6 +145,17 @@ function normalizeStock(item, stockMasterIds) {
     `「${name}」の仕入原価は0円以上の数値を小数第6位まで入力してください。`);
   validateBoolean(item.hidden, `「${name}」の表示`);
   const definition = { id: item.id, name, category, unit, minimum: item.minimum, defaultUnitCost: item.defaultUnitCost };
+  if (item.maximum !== undefined) {
+    assert(item.maximum === null || isAmount(item.maximum,item.minimum,1_000_000,1_000_000),
+      `「${name}」の上限は下限以上の数値を入力してください。`);
+    definition.maximum = item.maximum;
+  }
+  for (const [field,label] of [['itemCode','品目コード'],['barcode','バーコード']]) {
+    if (item[field] === undefined) continue;
+    const value = typeof item[field] === 'string' ? item[field].trim().normalize('NFKC') : null;
+    assert(value !== null && value.length <= 64 && !/[\p{C}\r\n]/u.test(value),`「${name}」の${label}を確認してください。`);
+    definition[field] = value;
+  }
   if (item.hidden !== undefined) definition.hidden = item.hidden;
   return definition;
 }
@@ -149,14 +168,23 @@ export function normalizeStoreSettings(settings, { menuIds, castIds, stockMaster
   const stock = settings.stock?.map((item) => normalizeStock(item, stockMasterIds));
   const importedIds = stock?.map(({ id }) => id) ?? [];
   assert(new Set(importedIds).size === importedIds.length, '同じ在庫品目IDが重複しています。');
+  for (const [field,label] of [['itemCode','品目コード'],['barcode','バーコード']]) {
+    const codes = (stock ?? []).map((item) => item[field]?.toLowerCase()).filter(Boolean);
+    assert(new Set(codes).size === codes.length,`${label}が重複しています。`);
+  }
   const stockIds = stock || localStockIds ? new Set([...(localStockIds ?? []), ...importedIds]) : null;
-  const menu = settings.menu.map((item) => normalizeMenu(item, { menuIds, stockIds }));
+  const categories = settings.customMenuCategories === undefined ? [] : settings.customMenuCategories;
+  assert(Array.isArray(categories) && categories.length <= 24, '独自カテゴリは24件以内で設定してください。');
+  const customMenuCategories = categories.map((name) => normalizeName(name,24,'カテゴリ名'));
+  assert(new Set(customMenuCategories).size === customMenuCategories.length
+    && customMenuCategories.every((name) => !menuCategories.has(name) && name !== 'よく使う'), 'カテゴリ名が重複しています。');
+  const menu = settings.menu.map((item) => normalizeMenu(item, { menuIds, stockIds, customMenuCategories }));
   const cast = settings.cast.map((person) => normalizeCast(person, { castIds }));
   assert(new Set(menu.map(({ id }) => id)).size === menu.length, '同じメニューIDが重複しています。');
   assert(new Set(cast.map(({ id }) => id)).size === cast.length, '同じキャストIDが重複しています。');
   assert(menu.some((item) => item.category === 'セット' && item.enabled !== false),
     '利用できる初回セットを1件以上設定してください。');
-  return stock ? { menu, cast, stock } : { menu, cast };
+  return {menu,cast,...(stock && {stock}),...(settings.customMenuCategories !== undefined && {customMenuCategories})};
 }
 
 export function stockDeletionBlocker(state, stockId, menu = state.menu) {
@@ -202,7 +230,7 @@ function verifyCatalogRemovals(state, menu, cast, removeMenuIds, removeCastIds) 
   }
 }
 
-export function replaceStoreSettings(state, { menu, cast, stock }, removeStockIds = [], {
+export function replaceStoreSettings(state, { menu, cast, stock, customMenuCategories }, removeStockIds = [], {
   removeMenuIds = [], removeCastIds = [],
 } = {}) {
   assert(Array.isArray(removeStockIds) && removeStockIds.every((id) => typeof id === 'string')
@@ -218,6 +246,8 @@ export function replaceStoreSettings(state, { menu, cast, stock }, removeStockId
   for (const person of cast) archive.delete(person.id);
   if (archive.size || state.archivedCast) state.archivedCast = [...archive.values()];
   state.menu = menu;
+  if (customMenuCategories !== undefined) state.customMenuCategories = customMenuCategories;
+  else delete state.customMenuCategories;
   state.cast = cast;
   if (!stock && !removeStockIds.length) return;
   const existingStock = new Map(state.stock.map((item) => [item.id, item]));

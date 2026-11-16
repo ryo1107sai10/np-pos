@@ -95,6 +95,9 @@
 .billing-switch input:disabled { opacity: .6; cursor: default; }
 .billing-switch input:focus-visible { outline: 2px solid #5345a0; outline-offset: 3px; }
 .billing-dialog .field-help { margin: 0; }
+.payment-brand-fields { grid-column: 1 / -1; display: grid; gap: 6px; }
+.payment-brand-fields:empty { display: none; }
+.payment-brand-setting { padding: 12px 0; border-bottom: 1px solid var(--line); }
 .card-fee-preview:not([hidden]) {
   padding: 9px 12px;
   border: 1px solid #d9d7f0;
@@ -109,3 +112,34 @@
 
 .toast.toast-error { color: #852c40; background: #fff1f4; border-color: #efcbd4; }
 .toast.toast-error .icon { color: #a1364d; }
+.arrival-time-detail { margin-block: 12px; }
+.arrival-time-detail > summary { font-weight: 700; cursor: pointer; }
+.arrival-time-detail .field { margin-top: 8px; }
+.ticket-line { grid-template-columns: minmax(0,1fr) auto auto auto; }
+.ticket-line-action.btn { min-height: 28px; padding: 4px 6px; font-size: 11px; white-space: nowrap; }
+.order-cart { margin-top: 14px; }
+.order-cart h3 { margin-bottom: 8px; }
+.order-cart h3 small,.order-cart li small { color: var(--muted); font-weight: 500; }
+.order-cart ul { margin: 0; padding: 0; list-style: none; }
+.order-cart li { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 6px 10px; align-items: start; padding: 8px 0; border-top: 1px solid #e6e9f3; }
+.order-cart li small { display: block; }
+.order-cart li .ops-actions { grid-column: 1 / -1; margin: 0; }
+@media (pointer: coarse) {
+  .ticket-line-action.btn { min-height: 44px; }
+}
+
+.ops-practice {
+  margin: 0 0 18px;
+  padding: 14px 16px;
+  border: 1px solid var(--line, #d0d9e4);
+  border-radius: 14px;
+  background: var(--paper, #fff);
+}
+.ops-practice-head { display:flex; align-items:start; justify-content:space-between; gap: 10px 16px; flex-wrap:wrap; }
+.ops-practice-head h2 { display:flex; gap:8px; align-items:center; margin:0; font-size:1rem; }
+.ops-practice-head h2 small { font-size:.82rem; color:var(--muted,#536575); }
+.ops-practice-head p { margin:6px 0 0; font-size:.9rem; }
+.ops-practice-steps { display:flex; flex-wrap:wrap; gap:6px; margin:10px 0 0; padding:0; list-style:none; }
+.ops-practice-steps li { display:flex; gap:4px; align-items:center; border:1px solid var(--line,#d0d9e4); border-radius:1rem; padding:4px 9px; font-size:.78rem; }
+.ops-practice-steps li[aria-current="step"] { font-weight:700; border-color:#2763af; color:#194b8d; }
+.ops-practice-steps .is-complete { color:#185b4c; border-color:#bddbd3; }

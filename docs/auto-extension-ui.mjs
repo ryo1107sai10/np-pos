@@ -4,7 +4,8 @@ export function formatAutoExtensionCountdown(deadline, now) {
   return `${String(minutes).padStart(2,'0')}:${String(seconds % 60).padStart(2,'0')}`;
 }
 
-export function renderAutoExtensionWarnings(notices, now, {escape, icon, tableName, canCheckout = () => true, pendingTicketId = null}) {
+export function renderAutoExtensionWarnings(notices, now, {escape, icon, tableName, canCheckout = () => true, pendingTicketId = null,
+  showPause = true, showCheckout = true}) {
   const entries = notices.map(({ticketId, tableIds, deadline}) => {
     const names = tableIds.map(tableName).join('・');
     const id = escape(ticketId);
@@ -21,13 +22,13 @@ export function renderAutoExtensionWarnings(notices, now, {escape, icon, tableNa
           ${icon('chevron-right',16)}
         </span>
       </button>
-      <div class="auto-extension-warning-actions" role="group" aria-label="${escape(names)}の延長前の操作">
-        <button type="button" class="btn auto-extension-warning-pause" data-action="auto-extension-pause"
-          data-id="${id}"${pending ? ' disabled' : ''}>今回の来店だけ自動延長を止める</button>
-        <button type="button" class="btn btn-primary" data-action="auto-extension-checkout"
+      ${showPause || showCheckout ? `<div class="auto-extension-warning-actions" role="group" aria-label="${escape(names)}の延長前の操作">
+        ${showPause ? `<button type="button" class="btn auto-extension-warning-pause" data-action="auto-extension-pause"
+          data-id="${id}"${pending ? ' disabled' : ''}>今回の来店だけ自動延長を止める</button>` : ''}
+        ${showCheckout ? `<button type="button" class="btn btn-primary" data-action="auto-extension-checkout"
           data-id="${id}"${pending || !checkoutAllowed ? ' disabled' : ''}>${icon('arrow-right',15)}会計へ進む</button>
-        ${checkoutAllowed ? '' : '<p class="auto-extension-checkout-note">値引きの承認後に会計できます。</p>'}
-      </div>
+          ${checkoutAllowed ? '' : '<p class="auto-extension-checkout-note">値引きの承認後に会計できます。</p>'}` : ''}
+      </div>` : ''}
     </li>`;
   });
   return `<section class="auto-extension-warnings" id="auto-extension-warnings"

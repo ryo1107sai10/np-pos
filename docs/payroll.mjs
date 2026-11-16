@@ -1,6 +1,10 @@
+import { normalizeEmployeeProfiles, payrollAttendanceItems, replaceAttendanceItems, saveEmployeeProfile } from './payroll-records.mjs';
+import { advancedPayrollBases, calculateAdvancedPayrollRule, ensurePayrollVariableReferences, getPayrollVariables, getPayrollVariableValues,
+  normalizeAdvancedPayrollRule, normalizeFormulaContext, normalizePayrollVariables, savePayrollVariables } from './payroll-formula.mjs';
+
 const dailyPayActions = new Set(['requestDailyPay', 'reviewDailyPay', 'payDailyPay']);
 const payrollActions = new Set(['savePayrollDraft', 'finalizePayroll', 'savePayrollRate', 'savePayrollSettings',
-  'savePayrollTemplate', 'assignPayrollTemplate', 'removePayrollTemplate', ...dailyPayActions]);
+  'savePayrollTemplate', 'assignPayrollTemplate', 'removePayrollTemplate', 'saveEmployeeProfile', 'saveAttendanceItems','savePayrollVariables', ...dailyPayActions]);
 const paidStatuses = new Set(['paid', 'departed']);
 const defaults = Object.freeze({ pointRate: 0, commissionRounding: 'nearest', commissionUnit: 1, dailyPayLimitBps: 8000 });
 const statementBases = new Set(['fixed','hourlyPay','commission','pointPay','baseGross']);
@@ -58,9 +62,12 @@ export function getPayrollSettings(state) {
 
 function normalizeStatementRules(rules) {
   check(Array.isArray(rules) && rules.length <= 20, '支給明細の計算項目は20件以内で登録してください。');
-  return rules.map((row) => {
-    check(isRecord(row) && ['allowance','deduction'].includes(row.kind) && statementBases.has(row.basis),
+  return rules.map((row,index) => {
+    check(isRecord(row) && ['allowance','deduction','intermediate'].includes(row.kind)
+      && (statementBases.has(row.basis) || advancedPayrollBases.has(row.basis)),
       '支給明細の項目区分と計算方法を選択してください。');
+    if (advancedPayrollBases.has(row.basis)) return {label:text(row.label,60,'支給明細の項目名'),kind:row.kind,basis:row.basis,
+      ...normalizeAdvancedPayrollRule(row,index)};
     return {label:text(row.label,60,'支給明細の項目名'),kind:row.kind,basis:row.basis,
       value:row.basis === 'fixed' ? money(row.value,'支給明細の固定額') : integer(row.value,0,10_000,'支給明細の率の設定値')};
   });
@@ -76,7 +83,9 @@ export function getPayrollTemplateAssignment(state, castId) {
 
 function normalizeTemplate(row) {
   check(isRecord(row), '計算テンプレートを確認してください。');
-  return {id:text(row.id,128,'テンプレートID'), name:text(row.name,60,'テンプレート名'), rules:normalizeStatementRules(row.rules)};
+  return {id:text(row.id,128,'テンプレートID'), name:text(row.name,60,'テンプレート名'), rules:normalizeStatementRules(row.rules),
+    ...(row.columns !== undefined && {columns:integer(row.columns,1,4,'支給明細の列数')}),
+    ...(row.isDefault === true && {isDefault:true})};
 }
 
 function applyTemplateCommand(state, action, allocateId) {
@@ -97,8 +106,11 @@ function applyTemplateCommand(state, action, allocateId) {
     return;
   }
   check(index >= 0 || templates.length < 20, '計算テンプレートは20件以内で登録してください。');
-  const entry = normalizeTemplate({id:templateId ?? allocateId('pay-template'),name:action.name,rules:action.rules});
+  const entry = normalizeTemplate({id:templateId ?? allocateId('pay-template'),name:action.name,rules:action.rules,
+    columns:action.columns,isDefault:action.isDefault});
+  ensurePayrollVariableReferences(entry.rules,getPayrollVariables(state));
   check(!templates.some((row) => row.id !== entry.id && row.name === entry.name), '同じ名前の計算テンプレートが登録されています。');
+  if (entry.isDefault) for (const template of templates) delete template.isDefault;
   if (index >= 0) templates[index] = entry;
   else templates.push(entry);
 }
@@ -231,13 +243,19 @@ function attendanceWork(state, month, castId, manualWork) {
   return [...work.values()].sort((first, second) => first.date.localeCompare(second.date));
 }
 
-function calculateStatementItems(settings, hourlyPay, commission, pointPay) {
+function calculateStatementItems(settings, hourlyPay, commission, pointPay, context = {}) {
   const baseGross = hourlyPay + commission + pointPay;
   check([hourlyPay,commission,pointPay,baseGross].every((amount) => Number.isSafeInteger(amount) && amount >= 0),
     '給与の計算範囲を超えています。');
-  const bases = {hourlyPay,commission,pointPay,baseGross};
-  return settings.statementRules.map((rule) => ({...rule,amount:rule.basis === 'fixed' ? rule.value
-    : Number((BigInt(bases[rule.basis]) * BigInt(rule.value) + 5_000n) / 10_000n)}));
+  const bases = {hourlyPay,commission,pointPay,baseGross,...context};
+  const computed = [];
+  for (const rule of settings.statementRules) {
+    const amount = advancedPayrollBases.has(rule.basis) ? calculateAdvancedPayrollRule(rule,computed,bases)
+      : rule.basis === 'fixed' ? rule.value : Number((BigInt(bases[rule.basis]) * BigInt(rule.value) + 5_000n) / 10_000n);
+    check(Number.isSafeInteger(amount) && (rule.kind === 'intermediate' || amount >= 0), '支給・控除項目の計算額を確認してください。');
+    computed.push({...rule,amount});
+  }
+  return computed;
 }
 
 function adjustmentTotals(allowances, deductions, statementItems) {
@@ -276,7 +294,7 @@ export function previewPayroll(state, input) {
   });
   if (missingDates.length) throw new MissingPayrollRateError(missingDates);
   const templateId = getPayrollTemplateAssignment(state,castId);
-  const template = getPayrollTemplates(state).find(({id}) => id === templateId);
+  const template = getPayrollTemplates(state).find(({id,isDefault}) => templateId ? id === templateId : isDefault);
   const settings = getPayrollSettings(state);
   if (template) settings.statementRules = template.rules.map((row) => ({...row}));
   const minutes = work.reduce((sum, row) => sum + row.minutes, 0);
@@ -284,18 +302,25 @@ export function previewPayroll(state, input) {
   const {rawCommission, pointUnits, commissionDetails} = confirmedCommission(state, month, castId);
   const round = settings.commissionRounding === 'floor' ? Math.floor : Math.round;
   const commission = round(rawCommission / settings.commissionUnit) * settings.commissionUnit;
-  const points = pointUnits / 1000;
-  check(Number.isSafeInteger(pointUnits), 'ポイントの計算範囲を超えています。');
-  const pointPay = Number((BigInt(pointUnits) * BigInt(settings.pointRate) + 500n) / 1000n);
-  const statementItems = calculateStatementItems(settings,hourlyPay,commission,pointPay);
-  const {allowanceTotal,deductionTotal} = adjustmentTotals(allowances,deductions,statementItems);
+  const attendanceItems = payrollAttendanceItems(state,month,castId);
+  const attendancePoints = attendanceItems.reduce((sum,row)=>sum + (row.kind === 'points' ? row.amount : 0),0);
+  const totalPointUnits = pointUnits + attendancePoints * 1000;
+  const points = totalPointUnits / 1000;
+  check(Number.isSafeInteger(totalPointUnits), 'ポイントの計算範囲を超えています。');
+  const pointPay = Number((BigInt(totalPointUnits) * BigInt(settings.pointRate) + 500n) / 1000n);
+  const hasFormula = settings.statementRules.some(({basis}) => advancedPayrollBases.has(basis));
+  const formulaContext = hasFormula ? {variables:getPayrollVariableValues(state,castId)} : null;
+  const statementItems = calculateStatementItems(settings,hourlyPay,commission,pointPay,{...formulaContext,minutes,points});
+  const {allowanceTotal,deductionTotal} = adjustmentTotals(allowances,deductions,[...statementItems,...attendanceItems]);
   const paidDailyPay = getPayrollDailyPays(state,{month,castId}).filter(({status}) => status === 'paid')
     .reduce((sum,row) => sum + row.amount, 0);
   const advance = manualAdvance + paidDailyPay;
   const net = netPay(hourlyPay,commission,pointPay,allowanceTotal,deductionTotal,advance);
   return { month, castId, castName:castById(state, castId).name, work, minutes, hourlyPay, rawCommission, commission,
     commissionDetails, points, pointPay, allowances, deductions, statementItems, allowanceTotal, deductionTotal, manualAdvance,
-    paidDailyPay, advance, net, settings, ...(template && {templateName:template.name}) };
+    paidDailyPay, advance, net, settings, ...(formulaContext && {formulaContext}),
+    ...(attendanceItems.length && {attendanceItems}), ...(template && {templateName:template.name}),
+    ...(template?.columns !== undefined && {templateColumns:template.columns}) };
 }
 
 export function getDailyPayLimit(state, month, castId) {
@@ -358,12 +383,26 @@ function applyDailyPayCommand(state, action, now, { allocateId, recordCashPayout
 export function applyPayrollCommand(state, action, now, actor, services) {
   check(actor.role === 'admin', '給与の操作には店舗管理者の権限が必要です。');
   state.payroll ??= { settings:getPayrollSettings(state), rates:[], records:[] };
+  if (action.type === 'saveEmployeeProfile') {
+    saveEmployeeProfile(state,action.castId,action.profile);
+    return;
+  }
+  if (action.type === 'saveAttendanceItems') {
+    replaceAttendanceItems(state,action.items,services.allocateId);
+    return;
+  }
+  if (action.type === 'savePayrollVariables') {
+    savePayrollVariables(state,action,services.allocateId);
+    return;
+  }
   if (isDailyPayCommand(action.type)) {
     applyDailyPayCommand(state,action,now,services);
     return;
   }
   if (action.type === 'savePayrollSettings') {
-    state.payroll.settings = normalizeSettings({ ...getPayrollSettings(state), ...action.settings });
+    const settings = normalizeSettings({ ...getPayrollSettings(state), ...action.settings });
+    ensurePayrollVariableReferences(settings.statementRules,getPayrollVariables(state));
+    state.payroll.settings = settings;
     return;
   }
   if (['savePayrollTemplate','assignPayrollTemplate','removePayrollTemplate'].includes(action.type)) {
@@ -404,6 +443,7 @@ function normalizeFinalSnapshot(state, record, snapshot) {
   const { work, hourlyPay, rawCommission, commission, commissionDetails, points, pointPay, advance, net } = snapshot;
   const settings = normalizeSettings(snapshot.settings);
   const templateName = snapshot.templateName === undefined ? undefined : text(snapshot.templateName,60,'テンプレート名');
+  const templateColumns = snapshot.templateColumns === undefined ? undefined : integer(snapshot.templateColumns,1,4,'支給明細の列数');
   const castName = text(snapshot.castName, 60, 'キャスト名');
   const normalizedWork = normalizeWork(work,record.month).map((entry,index) => {
     // Stored rows are always sorted. Preserve the source and rate instead of using today's settings.
@@ -412,8 +452,16 @@ function normalizeFinalSnapshot(state, record, snapshot) {
     return { ...entry, source:row.source, hourlyRate:money(row.hourlyRate,'時給') };
   });
   const minutes = normalizedWork.reduce((sum, row) => sum + row.minutes, 0);
-  const statementItems = calculateStatementItems(settings,hourlyPay,commission,pointPay);
-  const {allowanceTotal,deductionTotal} = adjustmentTotals(record.allowances,record.deductions,statementItems);
+  const hasFormula = settings.statementRules.some(({basis}) => advancedPayrollBases.has(basis));
+  const formulaContext = hasFormula ? normalizeFormulaContext(snapshot.formulaContext) : null;
+  const statementItems = calculateStatementItems(settings,hourlyPay,commission,pointPay,{...formulaContext,minutes,points});
+  const attendanceItems = snapshot.attendanceItems ?? [];
+  check(Array.isArray(attendanceItems) && attendanceItems.length <= 1550,'確定済みの勤怠項目を確認してください。');
+  const normalizedAttendanceItems = attendanceItems.map((row) => {
+    check(isRecord(row) && ['allowance','deduction','points'].includes(row.kind),'確定済みの勤怠項目を確認してください。');
+    return {kind:row.kind,label:text(row.label,60,'勤怠項目'),amount:integer(row.amount,0,Number.MAX_SAFE_INTEGER,'勤怠項目')};
+  });
+  const {allowanceTotal,deductionTotal} = adjustmentTotals(record.allowances,record.deductions,[...statementItems,...normalizedAttendanceItems]);
   const savedItems = snapshot.statementItems === undefined ? [] : snapshot.statementItems;
   check(Array.isArray(savedItems) && savedItems.length === statementItems.length
     && statementItems.every((expected,index) => isRecord(savedItems[index])
@@ -433,7 +481,9 @@ function normalizeFinalSnapshot(state, record, snapshot) {
   return { month:record.month, castId:record.castId, castName, work:normalizedWork, minutes, hourlyPay, rawCommission, commission,
     commissionDetails:detail, points, pointPay, allowances:record.allowances, deductions:record.deductions, statementItems,
     allowanceTotal, deductionTotal, manualAdvance:record.manualAdvance, paidDailyPay, advance, net, settings,
-    ...(templateName !== undefined && {templateName}) };
+    ...(normalizedAttendanceItems.length && {attendanceItems:normalizedAttendanceItems}),
+    ...(formulaContext && {formulaContext}),
+    ...(templateName !== undefined && {templateName}), ...(templateColumns !== undefined && {templateColumns}) };
 }
 
 function normalizeDailyPay(state, row, cashById) {
@@ -507,6 +557,8 @@ export function normalizePayrollSnapshot(state) {
   });
   check(new Set(templateAssignments.map(({castId}) => castId)).size === assignments.length, '同じキャストに複数の給与テンプレートが割り当てられています。');
   return { settings:normalizeSettings(payroll.settings), rates, records, dailyPays,
+    ...(payroll.variables !== undefined && {variables:normalizePayrollVariables(state,payroll.variables)}),
+    ...(payroll.employeeProfiles !== undefined && {employeeProfiles:normalizeEmployeeProfiles(state,payroll.employeeProfiles)}),
     ...(payroll.templates !== undefined && {templates:normalizedTemplates}),
     ...(payroll.templateAssignments !== undefined && {templateAssignments}) };
 }

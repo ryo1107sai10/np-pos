@@ -1,8 +1,38 @@
-import { findCustomer, getCustomerDetail, listUnlinkedVisits, searchCustomers } from './customers.mjs';
+import { customerPhotoMax, customerWeekdays, findCustomer, getCustomerDetail, getCustomerDirectory,
+  isCustomerPhoto, listUnlinkedVisits, searchCustomers } from './customers.mjs';
 
 const appointment = new Intl.DateTimeFormat('ja-JP', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'Asia/Tokyo' });
 const canView = (api) => ['admin', 'manager'].includes(api.role);
 const canViewCustomer = (customer, api) => canView(api) && customer && !customer.restricted;
+
+function ticketCompanionAliases(state,ticket) {
+  if (ticket.activeCompanionLinks) return ticket.activeCompanionLinks;
+  return (ticket.companionCustomerIds ?? []).flatMap((id)=>{
+    const customer = findCustomer(state,id);
+    return customer ? [{id,name:customer.name}] : [];
+  });
+}
+
+export function renderCompanionResults(workspace,ticket,primary,query,api) {
+  if (!query.trim()) return '<p class="field-help">名前を入力すると登録済みの候補が表示されます。</p>';
+  const excluded = new Set([primary.id,...ticketCompanionAliases(workspace,ticket).map(({id})=>id)]);
+  const matches = searchCustomers(workspace,query).filter(({id})=>!excluded.has(id)).slice(0,8);
+  if (!matches.length) return '<p class="field-help">該当するお客様は見つかりません。</p>';
+  return `<div class="ops-actions">${matches.map(({id,name})=>
+    action(api,`同席者に追加 ／ ${api.escape(name)}`,'save-ticket-companion',id,'plus')).join('')}</div>`;
+}
+
+export function renderCompanionEditor(workspace,ticket,primary,api) {
+  const companions = ticketCompanionAliases(workspace,ticket);
+  return `<p class="form-copy">会計の代表 ／ <strong>${api.escape(primary.name)}</strong></p>
+    <p class="field-help">伝票の売上は代表のお客様に集計し、同席者には来店履歴だけを記録します。</p>
+    ${companions.length ? `<ul class="compact-history">${companions.map(({id,name})=>`<li>
+      <span>${api.escape(name)}</span><button class="btn btn-secondary" type="button" data-action="save-ticket-companion"
+        data-mode="remove" data-id="${api.escape(id)}">解除</button></li>`).join('')}</ul>` : ''}
+    ${companions.length >= Math.min(20,ticket.guests - 1) ? '<p class="field-help">登録できる同席者が上限に達しました。</p>'
+      : `${field('同席者を検索','<input type="search" name="companionQuery" maxlength="100" autocomplete="off" aria-controls="companion-results">')}
+        <div id="companion-results" aria-live="polite">${renderCompanionResults(workspace,ticket,primary,'',api)}</div>`}`;
+}
 
 function dateAndTime(date, at, {escape}) {
   const parsed = new Date(at);
@@ -38,37 +68,75 @@ function visitAction(entry, api) {
   return `<button class="np-directory-inline" type="button" data-action="customer-visit" data-id="${api.escape(entry.id)}" data-date="${api.escape(entry.date)}">伝票 ${api.escape(entry.number || 'を見る')}${api.icon('chevron-right', 16)}</button>`;
 }
 
+function avatar(photo, api, size = 18) {
+  return `<span class="np-directory-avatar" aria-hidden="true">${photo && isCustomerPhoto(photo)
+    ? `<img src="${api.escape(photo)}" alt="" ${size === 18 ? 'loading="lazy"' : ''}>` : api.icon('user', size)}</span>`;
+}
+
+function options(entries, selected, escape) {
+  return entries.map(([key,label]) =>
+    `<option value="${escape(key)}"${key === selected ? ' selected' : ''}>${escape(label)}</option>`).join('');
+}
+
+function filtersView(state, filter, {escape}) {
+  const cast = [...(state.cast ?? []), ...(state.archivedCast ?? [])].map(({id,name}) => [id,name]);
+  const select = (title, key, entries) => field(title, `<select data-customer-filter="${key}">${options(entries,filter[key],escape)}</select>`);
+  const date = (title, key) => field(title,`<input type="date" data-customer-filter="${key}" value="${escape(filter[key] ?? '')}">`);
+  return `<details class="np-directory-filters"${Object.values(filter).some(Boolean) ? ' open' : ''}><summary>条件で絞り込む</summary>
+    <div class="form-grid">
+    ${select('誕生月','birthdayMonth',[['','すべて'],...Array.from({length:12},(_,i) => [String(i+1).padStart(2,'0'),`${i+1}月`])])}
+    ${select('指名履歴のキャスト','nomination',[['','すべて'],...cast])}
+    ${date('最終来店日（から）','visitFrom')}${date('最終来店日（まで）','visitTo')}
+    ${select('お休みの曜日','dayOff',[['','すべて'],...customerWeekdays.map((day) => [day,`${day}曜日`])])}
+    ${select('来店・ボトル','status',[['','すべて'],['inactive','来店から30日以上（来店2回以上）'],['bottle','期限間近・期限切れのボトル']])}
+    ${select('並び順','sort',[['','登録順'],['sales','累計売上の高い順'],['visits','来店回数の多い順']])}
+    </div><button class="btn btn-quiet" type="button" data-action="customer-reset-filters">条件をクリア</button></details>`;
+}
+
 export function renderCustomers(state, api) {
   if (!canView(api)) return denied(api);
-  const {escape, icon, query = ''} = api;
-  const customers = searchCustomers(state, query).filter((customer) => canViewCustomer(customer, api));
-  const rows = customers.map((customer) => `<li><button class="np-directory-row np-customer-row" type="button" data-action="customer-detail" data-id="${escape(customer.id)}">
-    <span class="np-directory-avatar" aria-hidden="true">${icon('user', 18)}</span>
-    <span class="np-directory-row-name"><strong>${escape(customer.name)}</strong>${customer.kana ? `<small>${escape(customer.kana)}</small>` : ''}</span>
+  const {escape, icon, yen, query = '', filter = {}} = api;
+  const customers = getCustomerDirectory(state, query, filter, api.businessDate);
+  const rows = customers.map(({customer,lastVisit,visits,totalSales,bottleExpiry,lapsed}) => `<li><button class="np-directory-row np-customer-row" type="button" data-action="customer-detail" data-id="${escape(customer.id)}">
+    ${avatar(customer.photo, api)}
+    <span class="np-directory-row-name"><strong>${escape(customer.name)}</strong>${customer.kana ? `<small>${escape(customer.kana)}</small>` : ''}
+    ${customer.tags?.length ? `<small>${customer.tags.map((tag) => escape(`#${tag}`)).join(' ')}</small>` : ''}</span>
     <span class="np-directory-contact">${escape(customer.phone || '—')}</span>
-    <span class="np-directory-account">${customer.flagged ? '<span class="np-directory-badge np-ar-status-overdue">要注意</span>' : ''}</span>
+    <span class="np-directory-account">
+    ${filter.sort === 'sales' ? `<small>累計 ${yen(totalSales)}</small>` : ''}
+    ${filter.sort === 'visits' ? `<small>${visits}回来店</small>` : ''}
+    ${customer.flagged ? '<span class="np-directory-badge np-ar-status-overdue">要注意</span>' : ''}
+    ${lapsed ? `<small>最終来店 ${escape(lastVisit)}</small>` : ''}
+    ${bottleExpiry ? `<small>ボトル期限 ${escape(bottleExpiry)}</small>` : ''}</span>
     ${icon('chevron-right', 17)}</button></li>`).join('');
   return `<div class="np-directory"><div class="np-directory-actions np-directory-page-actions">
     ${api.role === 'admin' ? action(api, 'CSV一括登録', 'customer-import', '', 'plus') : ''}
     ${action(api, '顧客を登録', 'customer-new', '', 'plus', true)}</div>
-    ${panel('顧客一覧', `<div class="np-directory-toolbar">${field('顧客を検索', `<input type="search" name="customerSearch" value="${escape(query)}" placeholder="表示名・ふりがな・電話番号" autocomplete="off" maxlength="100">`)}</div>
-    ${rows ? `<ul class="np-directory-list">${rows}</ul>` : empty(api, 'users', query ? '一致する顧客が見つかりません' : '登録された顧客はまだいません', query ? '別の名前や番号で検索できます。' : '')}`, `${customers.length}件`)}</div>`;
+    ${panel('顧客一覧', `<div class="np-directory-toolbar">${field('顧客を検索', `<input type="search" name="customerSearch" value="${escape(query)}" placeholder="表示名・ふりがな・電話番号・タグ" autocomplete="off" maxlength="100">`)}</div>
+    ${filtersView(state, filter, api)}
+    ${rows ? `<ul class="np-directory-list">${rows}</ul>` : empty(api, 'users', query || Object.values(filter).some(Boolean)
+      ? '一致する顧客が見つかりません' : '登録された顧客はまだいません')}`, `${customers.length}件`)}</div>`;
 }
 
 export function renderCustomerDetail(state, id, api) {
   if (!canViewCustomer(findCustomer(state, id), api)) return denied(api);
-  const {escape, icon, yen} = api;
+  const {escape, yen} = api;
   const {customer, visits, nominations, totalSales, preferredCast} = getCustomerDetail(state, id);
-  const visitRows = visits.map((visit) => `<li><div><strong>${dateAndTime(visit.date, visit.at, api)}</strong><small>${escape(visit.tableLabels?.join('・') || '—')}${visit.status === 'open' ? ' ／ 利用中' : ''}</small></div>${visitAction(visit, api)}</li>`).join('');
+  const visitRows = visits.map((visit) => `<li><div><strong>${dateAndTime(visit.date, visit.at, api)}</strong><small>${escape(visit.tableLabels?.join('・') || '—')}${visit.status === 'open' ? ' ／ 利用中' : ''}${visit.companion ? ' ／ 同席' : ''}</small></div>${visit.companion && api.role !== 'admin' ? '' : visitAction(visit, api)}</li>`).join('');
   const nominationRows = nominations.map((entry) => `<li><div><strong>${escape(entry.castName || '—')}</strong><small>${dateAndTime(entry.date, entry.at, api)}${entry.name ? ` ／ ${escape(entry.name)}` : ''}</small></div></li>`).join('');
-  const bottles = (customer.bottleKeeps ?? []).map((bottle) => `<li><div><strong>${escape(bottle.name)}</strong><small>残り ${escape(bottle.quantity)} ${escape(bottle.unit || '')}${bottle.expiresAt ? ` ／ 期限 ${escape(bottle.expiresAt)}` : ''}</small></div></li>`).join('');
-  return `<div class="np-directory np-directory-detail"><div class="np-directory-profile"><span class="np-directory-avatar" aria-hidden="true">${icon('user', 22)}</span>
+  const bottles = (customer.bottleKeeps ?? []).map((bottle) => `<li><div><strong>${escape(bottle.name)}</strong><small>残り ${escape(bottle.quantity)} ${escape(bottle.unit || '')}${bottle.expiresAt ? ` ／ 期限 ${escape(bottle.expiresAt)}` : ''}</small></div>
+    ${bottle.photo && isCustomerPhoto(bottle.photo) ? `<img class="np-bottle-thumbnail" src="${escape(bottle.photo)}" alt="${escape(bottle.name)}の記録写真" loading="lazy">` : ''}</li>`).join('');
+  return `<div class="np-directory np-directory-detail"><div class="np-directory-profile">${avatar(customer.photo, api, 22)}
     <div><strong>${escape(customer.name)}</strong>${customer.kana ? `<small>${escape(customer.kana)}</small>` : ''}</div>
     ${customer.flagged ? '<span class="np-directory-badge np-ar-status-overdue">要注意</span>' : ''}</div>
     <div class="np-directory-actions">${action(api, '編集', 'customer-edit', id, 'edit')}${api.role === 'admin' ? action(api, '伝票を紐づける', 'customer-link', id, 'ticket') + action(api, '重複顧客を統合', 'customer-merge', id, 'users') : ''}</div>
     <div class="np-directory-stats">${stat('来店回数', `${visits.length}回`)}${stat('累計売上', yen(totalSales))}</div>
     <dl class="np-directory-facts"><div><dt>担当キャスト</dt><dd>${escape(preferredCast?.name || '—')}</dd></div><div><dt>初回来店日</dt><dd>${escape(customer.firstVisitDate || visits.at(-1)?.date || '—')}</dd></div>
     <div><dt>電話番号</dt><dd>${escape(customer.phone || '—')}</dd></div><div><dt>誕生日</dt><dd>${escape(customer.birthday || '—')}</dd></div>
+    ${customer.email ? `<div><dt>メールアドレス</dt><dd>${escape(customer.email)}</dd></div>` : ''}
+    ${customer.receiptRecipient ? `<div><dt>領収書宛名</dt><dd>${escape(customer.receiptRecipient)}</dd></div>` : ''}
+    ${customer.daysOff?.length ? `<div><dt>お休み</dt><dd>${escape(customer.daysOff.join('・'))}曜日</dd></div>` : ''}
+    ${customer.tags?.length ? `<div><dt>タグ</dt><dd>${customer.tags.map((tag) => escape(`#${tag}`)).join(' ')}</dd></div>` : ''}
     ${customer.memo ? `<div class="np-directory-note"><dt>メモ</dt><dd>${escape(customer.memo)}</dd></div>` : ''}</dl>
     ${panel('来店履歴', compactHistory(visitRows) || empty(api, 'calendar', '来店履歴はありません'), `${visits.length}件`)}
     ${panel('指名履歴', compactHistory(nominationRows) || empty(api, 'user', '指名履歴はありません'), `${nominations.length}件`)}
@@ -90,10 +158,26 @@ export function renderCustomerForm(state, id, api) {
     ${field('表示名', `<input name="name" required maxlength="60" value="${value('name')}" autocomplete="off">`)}
     ${field('ふりがな（任意）', `<input name="kana" maxlength="60" value="${value('kana')}" autocomplete="off">`)}
     ${field('電話番号（任意）', `<input name="phone" type="tel" maxlength="32" value="${value('phone')}" autocomplete="off">`)}
+    ${field('メールアドレス（任意）', `<input name="email" type="email" maxlength="254" value="${value('email')}" autocomplete="off">`)}
+    ${field('領収書宛名（任意）', `<input name="receiptRecipient" maxlength="80" value="${value('receiptRecipient')}">`)}
     ${field('誕生日（任意）', `<input name="birthday" type="date" value="${value('birthday')}" autocomplete="off">`)}
     ${field('担当キャスト（任意）', `<select name="castId"><option value="">担当なし</option>${castOptions}</select>`)}
-    </div><div class="np-directory-checks"><label><input name="flagged" type="checkbox" value="1"${customer.flagged ? ' checked' : ''}>要注意として表示</label>
+    ${field('タグ（任意）', `<input name="tags" maxlength="420" value="${escape((customer.tags ?? []).join('、'))}" placeholder="ウイスキー、日本酒">`,'「、」で区切って入力します。')}
+    </div><fieldset class="np-directory-days"><legend>お休みの曜日（任意）</legend><div class="np-directory-checks">${customerWeekdays.map((day) =>
+      `<label><input name="daysOff" type="checkbox" value="${day}"${customer.daysOff?.includes(day) ? ' checked' : ''}>${day}</label>`).join('')}</div></fieldset>
+    ${photoInput('写真・名刺（任意）','profilePhoto',customer.photo,escape)}
+    <div class="np-directory-checks"><label><input name="flagged" type="checkbox" value="1"${customer.flagged ? ' checked' : ''}>要注意として表示</label>
     </div>${field('メモ（任意）', `<textarea name="memo" rows="3" maxlength="400">${value('memo')}</textarea>`)}${bottleFields(customer, api)}</div>`;
+}
+
+function photoInput(title, name, photo, escape) {
+  const current = isCustomerPhoto(photo) ? photo ?? '' : '';
+  return `<div class="np-directory-photo">
+    ${field(title,'<input type="file" data-customer-photo accept="image/jpeg,image/png,image/webp">')}
+    <input type="hidden" name="${name}" value="${escape(current)}">
+    <label class="inline-check"><input type="checkbox" data-photo-remove> 写真を外す</label>
+    <span data-photo-status role="status">${current ? '写真登録済み' : ''}</span>
+    </div>`;
 }
 
 function bottleFields(customer, {escape}) {
@@ -103,7 +187,64 @@ function bottleFields(customer, {escape}) {
     ${field('残量', `<input name="bottleQuantity" type="number" min="0" max="1000000" step="any" inputmode="decimal" value="${escape(entry.quantity ?? '')}" placeholder="0.5">`)}
     ${field('単位', `<input name="bottleUnit" maxlength="12" value="${escape(entry.unit || '')}" placeholder="本">`)}
     ${field('期限', `<input type="date" name="bottleExpiresAt" value="${escape(entry.expiresAt || '')}">`)}
+    ${photoInput('残量写真（任意）','bottlePhoto',entry.photo,escape)}
     </div>`).join('')}</fieldset>`;
+}
+
+export function readCustomerForm(form, data) {
+  if (form.querySelector('[data-photo-processing]')) throw new Error('写真の読み込みが完了してから保存してください。');
+  const customer = Object.fromEntries(['name','kana','phone','email','receiptRecipient','birthday','castId','memo'].map((key) => [key,data.get(key) ?? '']));
+  customer.flagged = data.has('flagged');
+  customer.daysOff = data.getAll('daysOff');
+  customer.tags = String(data.get('tags') ?? '').split(/[,、，]/u).map((tag) => tag.trim()).filter(Boolean);
+  const photoValue = (field) => field?.closest('.np-directory-photo')?.querySelector('[data-photo-remove]')?.checked ? '' : field?.value ?? '';
+  customer.photo = photoValue(form.querySelector('[name=profilePhoto]'));
+  const names = data.getAll('bottleName');
+  const quantities = data.getAll('bottleQuantity');
+  const units = data.getAll('bottleUnit');
+  const dates = data.getAll('bottleExpiresAt');
+  const photos = [...form.querySelectorAll('[name=bottlePhoto]')];
+  customer.bottleKeeps = names.map((name,index) => ({name,quantity:Number(quantities[index]),unit:units[index],expiresAt:dates[index],
+    photo:photoValue(photos[index])})).filter(({name}) => name.trim());
+  return customer;
+}
+
+export async function updateCustomerPhoto(input) {
+  const file = input.files?.[0];
+  if (!file) return;
+  const field = input.closest('.np-directory-photo');
+  const status = field.querySelector('[data-photo-status]');
+  if (field.hasAttribute('data-photo-processing')) return;
+  field.setAttribute('data-photo-processing','');
+  status.textContent = '写真を読み込み中…';
+  try {
+    if (!['image/jpeg','image/png','image/webp'].includes(file.type) || file.size > 12 * 1024 * 1024) {
+      throw new Error('12MB以下のJPEG・PNG・WebP画像を選んでください。');
+    }
+    const bitmap = await createImageBitmap(file);
+    try {
+      const canvas = document.createElement('canvas');
+      const context = canvas.getContext('2d');
+      const aspect = bitmap.width / bitmap.height;
+      for (const limit of [256,192,128,96]) {
+        canvas.width = Math.max(1,Math.floor(aspect >= 1 ? limit : limit * aspect));
+        canvas.height = Math.max(1,Math.floor(aspect <= 1 ? limit : limit / aspect));
+        context.drawImage(bitmap,0,0,canvas.width,canvas.height);
+        const photo = canvas.toDataURL('image/webp',0.72);
+        if (photo.length > customerPhotoMax) continue;
+        field.querySelector('input[type=hidden]').value = photo;
+        field.querySelector('[data-photo-remove]').checked = false;
+        status.textContent = '写真を読み込みました。';
+        return;
+      }
+    } finally { bitmap.close(); }
+    throw new Error('小さい画像を選んでください。');
+  } catch (error) {
+    status.textContent = `写真を読み込めませんでした。 ${error.message}`;
+  } finally {
+    field.removeAttribute('data-photo-processing');
+    input.value = '';
+  }
 }
 
 export function renderCustomerMerge(state, id, api) {
@@ -151,7 +292,9 @@ function renderSeatCustomerSuggestion(state, id, api) {
   const preferred = detail.preferredCast?.name;
   const last = detail.lastNomination?.castName;
   const {escape} = api;
-  return preferred || last ? `<div class="np-seat-customer-hints">${preferred ? `<span>担当キャスト <strong>${escape(preferred)}</strong></span>` : ''}${last ? `<span>前回の指名 <strong>${escape(last)}</strong></span>` : ''}</div>` : '';
+  const bottles = (detail.customer.bottleKeeps ?? []).filter(({quantity}) => quantity > 0).slice(0,3);
+  return preferred || last || bottles.length ? `<div class="np-seat-customer-hints">${preferred ? `<span>担当キャスト <strong>${escape(preferred)}</strong></span>` : ''}${last ? `<span>前回の指名 <strong>${escape(last)}</strong></span>` : ''}
+    ${bottles.map(({name,quantity,unit}) => `<span>キープ <strong>${escape(name)} ${escape(quantity)}${escape(unit)}</strong></span>`).join('')}</div>` : '';
 }
 
 export function renderSeatCustomerSelection(state, id, api) {

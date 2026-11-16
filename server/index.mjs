@@ -99,9 +99,12 @@ function sinceRevision(search) {
 function auditPage(search) {
   const before = search.get('before');
   const limit = search.get('limit');
+  const ticketId = search.get('ticketId');
   requireCondition(before === null || /^\d+$/.test(before), 400, 'invalid-audit-cursor', '監査ログの表示位置を確認してください。');
   requireCondition(limit === null || /^\d+$/.test(limit), 400, 'invalid-audit-limit', '監査ログの表示件数を確認してください。');
-  return { before: before === null ? undefined : Number(before), limit: limit === null ? undefined : Number(limit) };
+  requireCondition(ticketId === null || /^[a-zA-Z0-9_.:-]{1,128}$/.test(ticketId),
+    400,'invalid-audit-target','伝票の操作履歴を確認してください。');
+  return { before: before === null ? undefined : Number(before), limit: limit === null ? undefined : Number(limit), ticketId };
 }
 
 function validPathId(value) {

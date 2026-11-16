@@ -8,10 +8,12 @@ import { getPrintSettings, printDocumentKinds } from './print-domain.mjs';
 import { getPayrollDraft, getPayrollRates, getPayrollSettings, getPayrollTemplateAssignment, getPayrollTemplates, isDailyPayCommand, isPayrollCommand } from './payroll.mjs';
 import { isCastAttendanceReview, linkedCastForActor } from './cast-self.mjs';
 import { getCalculationSettings } from './calculation-settings.mjs';
+import { getEmployeeProfile } from './payroll-records.mjs';
 
 const ticketActions = new Set([
   'discount', 'approveDiscount', 'rejectDiscount', 'settle', 'cancelSettlement', 'reopenTicket',
-  'cancelLine', 'void', 'deposit', 'cancelDeposit', 'extendOverdue',
+  'cancelLine', 'void', 'deposit','editDeposit','cancelDeposit', 'extendOverdue',
+  'seat', 'order', 'move', 'extend', 'serve', 'depart', 'editTicketLine', 'cancelTicketExtension',
 ]);
 const settingActions = new Set(['saveLayout', 'importLayout', 'saveStoreSettings', 'importStoreConfiguration']);
 const customerActions = new Set(['saveCustomer', 'linkCustomer', 'mergeCustomers', 'importCustomers']);
@@ -81,6 +83,10 @@ function auditSettings(before, after, action) {
     beforeInfo.calculationSettings = previousCalculation;
     afterInfo.calculationSettings = nextCalculation;
   }
+  if ((before.bulkExtensionEnabled !== false) !== (after.bulkExtensionEnabled !== false)) {
+    beforeInfo.bulkExtensionEnabled = before.bulkExtensionEnabled !== false;
+    afterInfo.bulkExtensionEnabled = after.bulkExtensionEnabled !== false;
+  }
   if (!Object.keys(beforeInfo).length) return null;
   return {
     target: target('settings', null, '店舗設定'), before: beforeInfo, after: afterInfo,
@@ -89,7 +95,10 @@ function auditSettings(before, after, action) {
 }
 
 function auditPayments(rows = []) {
-  return rows.map(({ method, amount }) => ({ method, amount }));
+  return rows.map(({method,amount,brandName,feeWaived,waivedFeeRate,cardFee,cardFeeRateBps,memo}) => ({
+    method,amount,...(brandName && {brandName}),...(feeWaived && {feeWaived,waivedFeeRate}),
+    ...(cardFee && brandName && {cardFee,cardFeeRateBps}),...(memo && {memo}),
+  }));
 }
 
 function ticketValues(ticket) {
@@ -116,7 +125,18 @@ function auditMovements(before, after) {
   }));
 }
 
+function auditLine({id,name,quantity,price,total,castIds,castNames,cancelledAt,providedAt}) {
+  return {id,name,quantity,price,amount:total,castNames:castNames ?? castIds,
+    ...(cancelledAt && {cancelledAt}),...(providedAt && {providedAt})};
+}
+
 function auditTicket(before, after, action) {
+  if (action.type === 'seat') {
+    const current = after.tickets.at(-1);
+    return { target:target('ticket',current.id,`伝票 No. ${current.number}`),before:null,
+      after:{guests:current.guests,tableIds:current.tableIds,arrivedAt:current.createdAt,endsAt:current.endsAt,
+        lines:current.lines.map(auditLine)},reason:'来店を登録' };
+  }
   const previous = before.tickets.find(({ id }) => id === action.ticketId);
   const current = after.tickets.find(({ id }) => id === action.ticketId);
   if (!previous || !current) return null;
@@ -150,11 +170,31 @@ function auditTicket(before, after, action) {
     oldValues.line = { id: line.id, name: line.name, quantity: line.quantity, amount: line.total };
     newValues.line = { ...oldValues.line, cancelled: true };
   }
+  if (action.type === 'order' || action.type === 'extend') {
+    newValues.lines = current.lines.slice(previous.lines.length).map(auditLine);
+    if (action.type === 'extend') {
+      oldValues.endsAt = previous.endsAt;
+      newValues.endsAt = current.endsAt;
+    }
+  }
+  if (action.type === 'editTicketLine' || action.type === 'serve') {
+    oldValues.line = auditLine(previous.lines.find(({id}) => id === action.lineId));
+    newValues.line = auditLine(current.lines.find(({id}) => id === action.lineId));
+  }
+  if (action.type === 'cancelTicketExtension') {
+    const reversed = current.lines.filter((line,index) => line.cancelledAt !== previous.lines[index].cancelledAt);
+    const ids = new Set(reversed.map(({id})=>id));
+    oldValues.lines = previous.lines.filter(({id})=>ids.has(id)).map(auditLine);
+    newValues.lines = reversed.map(auditLine);
+    oldValues.endsAt = previous.endsAt;
+    newValues.endsAt = current.endsAt;
+  }
   if (action.type === 'extendOverdue') {
     oldValues.endsAt = previous.endsAt;
     newValues.endsAt = current.endsAt;
     newValues.extensionCount = action.expectedCount;
     newValues.extensionPlan = current.lines[previous.lines.length].name;
+    if (action.plans !== undefined) newValues.lines = current.lines.slice(previous.lines.length).map(auditLine);
     reason = '超過時間の延長を一括登録';
   }
   const stock = auditMovements(before, after);
@@ -163,6 +203,7 @@ function auditTicket(before, after, action) {
     action: auditAction, target: target('ticket', current.id, `伝票 No. ${current.number}`),
     before: oldValues, after: newValues, reason: reason || {
       settle: '会計を確定', deposit: '前受金を登録', cancelDeposit: '前受金を取り消し', void: '伝票を取り消し',
+      order:'注文を登録',move:'使用卓を変更',extend:'延長を登録',serve:'提供済みに変更',depart:'退店を登録',
     }[action.type] || '',
   };
 }
@@ -175,6 +216,12 @@ function auditTicketDetails(before, after, action) {
     return { target:target('ticket',current.id,`伝票 No. ${current.number}`),
       before:{guests:previous.guests,admittedGuests:previous.admittedGuests ?? previous.guests},
       after:{guests:current.guests,admittedGuests:current.admittedGuests,guestChangeMode:action.mode}, reason:textReason(action.reason) };
+  }
+  if (action.type === 'adjustTicketEnd' && action.startsAt !== undefined) {
+    const beforeTimes = {startsAt:previous.setStartedAt ?? previous.createdAt,endsAt:previous.endsAt};
+    const afterTimes = {startsAt:current.setStartedAt ?? current.createdAt,endsAt:current.endsAt};
+    return sameValue(beforeTimes,afterTimes) ? null : {target:target('ticket',current.id,`伝票 No. ${current.number}`),
+      before:beforeTimes,after:afterTimes,reason:textReason(action.reason)};
   }
   const memo = action.type === 'saveTicketNote';
   const key = memo ? 'note' : 'endsAt';
@@ -207,7 +254,8 @@ function auditCustomers(before, after, action) {
   const oldCustomer = previous.find(({ id }) => id === action.customerId);
   const newCustomer = oldCustomer ? latest.find(({ id }) => id === oldCustomer.id) : latest.at(-1);
   const changedFields = ['name', 'kana', 'phone', 'birthday', 'castId', 'memo', 'flagged', 'creditEnabled',
-    'creditLimit', 'bottleKeeps'].filter((key) => !sameValue(oldCustomer?.[key], newCustomer[key]));
+    'creditLimit', 'bottleKeeps','email','receiptRecipient','daysOff','tags','photo']
+    .filter((key) => !sameValue(oldCustomer?.[key], newCustomer[key]));
   if (!changedFields.length) return null;
   const auditFields = ['name', 'castId', 'flagged', 'creditEnabled', 'creditLimit'].filter((key) => changedFields.includes(key));
   const auditProfile = (customer) => customer
@@ -287,6 +335,24 @@ function auditPaymentCorrection(before, after, action) {
 }
 
 function auditPayroll(before, after, action) {
+  if (action.type === 'savePayrollVariables') {
+    const previous = before.payroll?.variables ?? [];
+    const next = after.payroll.variables;
+    return sameValue(previous,next) ? null : {target:target('payroll',action.castId,'給与の個人別変数'),
+      before:previous,after:next,reason:'給与計算に使う個人別変数を更新'};
+  }
+  if (action.type === 'saveEmployeeProfile') {
+    const previous = getEmployeeProfile(before,action.castId);
+    const next = getEmployeeProfile(after,action.castId);
+    const updatedFields = Object.keys(next).filter((key)=>key !== 'castId' && next[key] !== (previous?.[key] ?? ''));
+    return updatedFields.length ? {target:target('employee',action.castId,'従業員台帳'),before:null,after:{updatedFields},
+      reason:'従業員台帳を更新'} : null;
+  }
+  if (action.type === 'saveAttendanceItems') {
+    const previous = before.attendanceItems ?? [];
+    const next = after.attendanceItems ?? [];
+    return sameValue(previous,next) ? null : {target:target('settings',null,'勤怠項目'),before:previous,after:next,reason:'勤怠項目を更新'};
+  }
   if (isDailyPayCommand(action.type)) {
     const rows = after.payroll.dailyPays;
     const next = action.type === 'requestDailyPay' ? rows.at(-1) : rows.find(({id}) => id === action.dailyPayId);
@@ -350,8 +416,22 @@ export function buildOperationAudit(before, after, action, at, actor) {
     details = auditCustomers(before, after, action);
   } else if (action.type === 'setTicketCustomer' || action.type === 'correctSettledTicketCustomer') {
     details = auditTicketCustomer(before, after, action);
+  } else if (action.type === 'setTicketCompanion') {
+    const previous = before.tickets.find(({id})=>id === action.ticketId);
+    const next = after.tickets.find(({id})=>id === action.ticketId);
+    details = {target:target('ticket',next.id,`伝票 No. ${next.number}`),reason:action.mode === 'add' ? '同席者を追加' : '同席者を解除',
+      before:{companionCustomerIds:previous.companionCustomerIds ?? []},after:{companionCustomerIds:next.companionCustomerIds ?? []}};
   } else if (action.type === 'correctSettledTicketPayments') {
     details = auditPaymentCorrection(before, after, action);
+  } else if (action.type === 'correctSettledContents') {
+    const old = findSettledCustomerTicket(before,action.ticketId);
+    const current = findSettledCustomerTicket(after,action.ticketId);
+    const oldLine = old.ticket.lines.find(({id})=>id === action.lineId);
+    const newLine = current.ticket.lines.find(({id})=>id === action.lineId);
+    details = {businessDate:old.date,target:target('ticket',action.ticketId,`伝票 No. ${old.ticket.number}`),
+      before:{...ticketValues(old.ticket),...(oldLine && {line:auditLine(oldLine)})},
+      after:{...ticketValues(current.ticket),...(newLine && {line:auditLine(newLine)}),stockMovements:auditMovements(before,after)},
+      reason:textReason(action.reason)};
   } else if (isPayrollCommand(action.type) || action.type === 'castRequestDailyPay') {
     details = auditPayroll(before, after, action.type === 'castRequestDailyPay' ? {...action,type:'requestDailyPay'} : action);
   } else if (action.type === 'saveShift' || action.type === 'removeShift' || action.type === 'castRequestShift') {
@@ -368,6 +448,12 @@ export function buildOperationAudit(before, after, action, at, actor) {
     const current = after.castAccounts?.find(({uid}) => uid === action.memberUid) ?? null;
     if (!sameValue(previous,current)) details = {target:target('cast-account',action.memberUid,'キャストアカウント'),
       before:previous,after:current,reason:current ? 'アカウントのひもづけ' : 'アカウントのひもづけ解除'};
+  } else if (action.type === 'saveManagedAttendance') {
+    const previous = before.castAttendance?.find(({id})=>id === action.attendanceId) ?? null;
+    const current = after.castAttendance.at(-1);
+    const cast = [...after.cast,...(after.archivedCast ?? [])].find(({id})=>id===current.castId);
+    details = {businessDate:current.date,target:target('attendance',current.id,cast?.name ?? current.castId),
+      before:previous,after:current,reason:current.reviewReason};
   } else if (['castClockIn','castClockOut'].includes(action.type) || isCastAttendanceReview(action.type)) {
     const person = linkedCastForActor(before,actor.id);
     const previous = (before.castAttendance ?? []).find((row) => action.attendanceId ? row.id === action.attendanceId
@@ -384,6 +470,21 @@ export function buildOperationAudit(before, after, action, at, actor) {
     const current = after.initialSetSchedule ?? [];
     if (!sameValue(previous,current)) details = {target:target('settings',null,'時間帯別セット'),
       before:previous,after:current,reason:'初回セットを提案する時間帯を更新'};
+  } else if (action.type === 'saveRolePolicy') {
+    const previous = before.rolePolicy ?? {};
+    const current = after.rolePolicy;
+    if (!sameValue(previous,current)) details = {target:target('settings',null,'役職・権限'),
+      before:previous,after:current,reason:'役職名と利用できる機能を更新'};
+  } else if (action.type === 'saveCashAccounts') {
+    const previous = before.cashAccounts ?? [];
+    const current = after.cashAccounts;
+    if (!sameValue(previous,current)) details = {target:target('settings',null,'金庫・出金先'),
+      before:previous,after:current,reason:'金庫と出金先を更新'};
+  } else if (action.type === 'saveAccountingCsv') {
+    const previous = before.accountingCsv?.[action.mode] ?? null;
+    const current = after.accountingCsv[action.mode];
+    if (!sameValue(previous,current)) details = {target:target('settings',null,'会計CSV設定'),
+      before:previous,after:current,reason:'会計CSVの列と文字コードを更新'};
   } else if (action.type === 'saveCalculationSettings') {
     const previous = getCalculationSettings(before);
     const current = getCalculationSettings(after);
@@ -403,18 +504,23 @@ export function buildOperationAudit(before, after, action, at, actor) {
   } else if (action.type === 'saveControls') {
     const previous = before.controls?.managerDiscountRateBps ?? 1_000;
     const current = after.controls.managerDiscountRateBps;
-    if (previous !== current) {
+    const registerBefore = before.controls?.register ?? null;
+    const registerAfter = after.controls?.register ?? null;
+    if (previous !== current || !sameValue(registerBefore,registerAfter)) {
       details = {
-        target: target('settings', null, '値引き承認設定'),
-        before: { managerDiscountRateBps: previous }, after: { managerDiscountRateBps: current },
-        reason: 'マネージャーの値引き上限を更新',
+        target: target('settings', null, '営業と値引きの設定'),
+        before: { managerDiscountRateBps: previous,...(registerBefore && {register:registerBefore}) },
+        after: { managerDiscountRateBps: current,...(registerAfter && {register:registerAfter}) },
+        reason: '営業・レジ運用の設定を更新',
       };
     }
   } else if (action.type === 'saveAutoExtensionSettings' || action.type === 'saveCardFeeSettings') {
     const auto = action.type === 'saveAutoExtensionSettings';
     const settings = auto ? getAutoExtensionSettings : getCardFeeSettings;
-    const previous = settings(before);
-    const current = settings(after);
+    const previous = {...settings(before),...(auto && action.bulkExtensionEnabled !== undefined
+      && {bulkExtensionEnabled:before.bulkExtensionEnabled !== false})};
+    const current = {...settings(after),...(auto && action.bulkExtensionEnabled !== undefined
+      && {bulkExtensionEnabled:after.bulkExtensionEnabled !== false})};
     const label = auto ? '自動延長設定' : 'カード会計加算設定';
     if (!sameValue(previous,current)) {
       details = { target:target('settings',null,label), before:previous, after:current, reason:`${label}を更新` };
@@ -476,13 +582,26 @@ export function buildOperationAudit(before, after, action, at, actor) {
       after: {kind:printDocumentKinds[kind], issueNumber:number},
       reason: number > 1 ? '再発行' : '発行',
     };
+  } else if (['editCashMovement','voidCashMovement'].includes(action.type)) {
+    const row = (state) => state.cashMovements?.find(({id}) => id === action.movementId)
+      ?? state.closedDays.flatMap((day) => day.cashMovements ?? []).find(({id}) => id === action.movementId);
+    const previous = row(before);
+    const current = row(after);
+    if (!sameValue(previous,current)) details = {businessDate:previous.date,target:target('cashMovement',previous.id,'入出金'),
+      before:previous,after:current,reason:textReason(action.correctionReason)};
+  } else if (action.type === 'correctRegisterCount') {
+    const row = (state) => {
+      const {actualCash,discrepancy,cashDenominations} = state.closedDays.find(({date}) => date === action.date);
+      return {actualCash,discrepancy,cashDenominations};
+    };
+    details = {businessDate:action.date,target:target('day',action.date,'閉店時のレジ照合'),before:row(before),after:row(after),reason:textReason(action.reason)};
   } else if (action.type === 'recordCashMovement') {
-    const { id, kind, category, amount, reason, destination } = after.cashMovements.at(-1);
+    const { id, kind, category, amount, reason, destination, cashAccountId } = after.cashMovements.at(-1);
     const label = cashMovementKinds[kind];
     details = {
       target: target('cashMovement', id, label),
       before: null,
-      after: { kind: label, category: cashMovementCategories[kind][category], amount, destination },
+      after: { kind: label, category: cashMovementCategories[kind][category], amount, destination, ...(cashAccountId && {cashAccountId}) },
       reason,
     };
   } else if (action.type === 'close') {

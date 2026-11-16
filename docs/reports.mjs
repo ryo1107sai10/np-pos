@@ -1,6 +1,8 @@
 import { cashMovementCategories, cashMovementKinds } from './cash-ledger.mjs';
+import { cashAccounts, vaultBalance } from './cash-accounts.mjs';
 import { cashDenominations } from './register-cash.mjs';
-import { getTicketCommissionDetails, getTicketTableLabels } from './engine.mjs';
+import { businessDate, getTicketCommissionDetails, getTicketTableLabels } from './engine.mjs';
+import { getInventoryCostSummary, purchaseCancellationBlocker } from './inventory-operations.mjs';
 import { getReportPeriod } from './report-period.mjs';
 import { getDailyPayTotals } from './payroll.mjs';
 
@@ -172,16 +174,22 @@ function renderStock(state, api) {
   const {yen, escape, icon, showHiddenStock = false, canAdjustStock = true} = api;
   const names = byId([...(state.archivedStock ?? []), ...state.stock]);
   const tickets = byId(state.tickets);
+  const archivedTickets = new Map(state.closedDays.flatMap((day) => (day.ticketSnapshots ?? [])
+    .map((ticket) => [ticket.id,{date:day.date,ticket}])));
   const low = state.stock.filter(({quantity, minimum}) => quantity <= minimum);
   const valuation = (item) => item.value ?? item.quantity * asNumber(item.unitCost);
   const shown = state.stock.filter((item) => item.hidden !== true);
   const hiddenCount = state.stock.length - shown.length;
-  const rows = (showHiddenStock ? state.stock : shown).map((item) => {
+  const query = (api.stockSearch ?? '').trim().toLowerCase();
+  const rows = (showHiddenStock ? state.stock : shown).filter((item) => (!api.stockLowOnly || item.quantity <= item.minimum)
+    && [item.name,item.itemCode,item.barcode].some((value) => String(value ?? '').toLowerCase().includes(query))).map((item) => {
     const isLow = item.quantity <= item.minimum;
     const status = item.quantity === 0 ? '在庫なし' : isLow ? '残りわずか' : '在庫あり';
     const restockCost = stockNumber.format(item.defaultUnitCost ?? item.unitCost);
     const unit = escape(item.unit);
-    return `<tr><td><span class="lr-stock-name"><strong>${escape(item.name)}</strong>${item.hidden ? '<span class="lr-badge">非表示</span>' : ''}</span></td><td class="lr-numeric"><span class="lr-mobile-label" aria-hidden="true">現在庫</span><strong>${stockNumber.format(item.quantity)}</strong><span class="lr-unit"> ${unit}</span></td>
+    const reorder = item.maximum == null ? '' : `<small class="lr-row-note">発注目安 ${stockNumber.format(Math.max(0,item.maximum - item.quantity))}${unit}</small>`;
+    return `<tr><td><span class="lr-stock-name"><strong>${escape(item.name)}</strong>${item.hidden ? '<span class="lr-badge">非表示</span>' : ''}</span>
+      ${item.itemCode || item.barcode ? `<small class="lr-row-note">${escape([item.itemCode,item.barcode].filter(Boolean).join(' ／ '))}</small>` : ''}</td><td class="lr-numeric"><span class="lr-mobile-label" aria-hidden="true">現在庫</span><strong>${stockNumber.format(item.quantity)}</strong><span class="lr-unit"> ${unit}</span>${reorder}</td>
       <td class="lr-numeric lr-muted"><span class="lr-mobile-label" aria-hidden="true">下限</span>${stockNumber.format(item.minimum)} ${unit}</td>
       <td class="lr-numeric"><span class="lr-mobile-label" aria-hidden="true">仕入原価</span>¥${restockCost}<span class="lr-unit"> / ${unit}</span></td>
       <td class="lr-numeric"><span class="lr-mobile-label" aria-hidden="true">評価額</span>${yen(Math.round(valuation(item)))}</td>
@@ -191,25 +199,36 @@ function renderStock(state, api) {
         <button class="lr-link" type="button" data-action="stocktake" data-id="${escape(item.id)}" aria-label="${escape(item.name)}の棚卸">棚卸</button>
         </div></td>` : ''}</tr>`;
   });
-  const movements = (state.movements || []).slice().sort((a, b) => asNumber(b.at) - asNumber(a.at));
+  const movements = (state.movements || []).filter(({stockId}) => !api.stockHistoryId || api.stockHistoryId === stockId)
+    .sort((a, b) => asNumber(b.at) - asNumber(a.at));
   const movementRows = movements.map((entry) => {
     const item = names.get(entry.stockId);
     const labels = {order: '注文出庫', return: '戻し入れ', adjust: '在庫調整', purchase: '仕入れ・入庫',
-      loss: '廃棄・破損（ロス）', usage: '店舗消費', stocktake: '棚卸'};
+      loss: '廃棄・破損（ロス）', usage: '店舗消費', stocktake: '棚卸',purchaseCancellation:'入庫取消'};
     const unit = escape(entry.unit ?? item?.unit ?? '');
     const detail = entry.kind === 'stocktake' && Number.isFinite(entry.bookQuantity) && Number.isFinite(entry.actualQuantity)
       ? `<span class="lr-row-note">帳簿 ${stockNumber.format(entry.bookQuantity)} ${unit} → 実数 ${stockNumber.format(entry.actualQuantity)} ${unit}</span>`
       : entry.kind === 'purchase' && Number.isFinite(entry.unitCost) ? `<span class="lr-row-note">仕入単価 ¥${stockNumber.format(entry.unitCost)} / ${unit}</span>` : '';
     const date = new Date(entry.at);
     const time = entry.at && Number.isFinite(date.valueOf()) ? movementTime.format(date) : '—';
-    return `<tr><td class="lr-muted lr-numeric">${time}</td><td><strong>${escape(entry.stockName ?? item?.name ?? entry.stockId)}</strong></td>
+    const archive = archivedTickets.get(entry.ticketId);
+    const linked = tickets.get(entry.ticketId);
+    const receipt = archive ? `<button type="button" class="lr-link" data-action="history-receipt" data-id="${escape(archive.ticket.id)}" data-date="${escape(archive.date)}">No. ${escape(archive.ticket.number)}</button>`
+      : ticketLink(linked,api);
+    return `<tr><td class="lr-muted lr-numeric">${time}${entry.actorLabel ? `<small class="lr-row-note">${escape(entry.actorLabel)}</small>` : ''}</td><td><strong>${escape(entry.stockName ?? item?.name ?? entry.stockId)}</strong></td>
       <td>${escape(labels[entry.kind] || '入出庫')}${detail}${entry.reason ? `<span class="lr-row-note">${escape(entry.reason)}</span>` : ''}</td>
       <td class="lr-numeric ${entry.quantity > 0 ? 'lr-positive' : ''}">${signedQuantity(entry.quantity)}<span class="lr-unit"> ${unit}</span></td>
-      <td>${ticketLink(tickets.get(entry.ticketId), api)}</td></tr>`;
+      <td>${receipt}${canAdjustStock && entry.kind === 'purchase' && !purchaseCancellationBlocker(state,entry)
+        ? `<button type="button" class="lr-link" data-action="stock-cancel-purchase" data-id="${escape(entry.id)}">入庫を取消</button>` : ''}</td></tr>`;
   });
   const stockValue = state.stock.reduce((sum, item) => sum + valuation(item), 0);
-  const control = hiddenCount ? `<button type="button" class="btn lr-stock-filter" data-action="toggle-hidden-stock"
+  const visibility = hiddenCount ? `<button type="button" class="btn lr-stock-filter" data-action="toggle-hidden-stock"
     aria-pressed="${showHiddenStock}" aria-label="非表示を含む">${icon('filter', 15)}非表示を含む${panelCount(hiddenCount, '件')}</button>` : '';
+  const control = `<div class="ops-actions"><label class="field"><span>品目検索</span><input name="stockSearch" type="search" value="${escape(api.stockSearch ?? '')}" placeholder="品目名・コード・バーコード"></label>
+    <label class="inline-check"><input name="stockLowOnly" type="checkbox"${api.stockLowOnly ? ' checked' : ''}>在庫不足のみ</label>${visibility}</div>`;
+  const historyPicker = `<label class="field"><span>品目別の履歴</span><select name="stockHistoryId"><option value="">すべて</option>
+    ${[...names.values()].map(({id,name}) => `<option value="${escape(id)}"${id === api.stockHistoryId ? ' selected' : ''}>${escape(name)}</option>`).join('')}</select></label>`;
+  const costs = getInventoryCostSummary(state.movements,state.day.date.slice(0,7),businessDate);
   const balanceColumns = ['品目', '現在庫', '下限', '仕入原価', '評価額', '在庫状態'];
   if (canAdjustStock) balanceColumns.push('操作');
   const balance = rows.length ? table(api, balanceColumns, rows, 'lr-stock-table')
@@ -219,9 +238,11 @@ function renderStock(state, api) {
     ${stat(api, 'box', '管理品目', `${state.stock.length}<small> 品目</small>`)}
     ${stat(api, 'alert', '下限に達した品目', `${low.length}<small> 品目</small>`, low.length ? 'warning' : '')}
     ${stat(api, 'wallet', '現在庫評価額', yen(Math.round(stockValue)), 'accent')}
+    ${stat(api,'box','今月の消費原価',yen(Math.round(costs.consumption)))}
+    ${stat(api,'alert','今月のロス原価',yen(Math.round(costs.losses)))}
     </div>${panel('在庫残高', balance, control)}
     ${panel('在庫の入出庫履歴', movementRows.length ? table(api, ['時刻', '品目', '種別', '増減', '伝票'], movementRows, 'lr-stock-history')
-      : empty(api, 'history', '入出庫の記録はまだありません', '在庫連動のメニューを注文すると、出庫がここに表示されます。'), panelCount(movementRows.length, '件'))}</div>`;
+      : empty(api, 'history', '入出庫の記録はまだありません', '在庫連動のメニューを注文すると、出庫がここに表示されます。'), historyPicker + panelCount(movementRows.length, '件'))}</div>`;
 }
 
 function signedYen(amount, yen, showPlus = false) {
@@ -251,16 +272,20 @@ function describeClosing(period, current, api) {
       <div${discrepancy ? ' class="lr-variance"' : ''}><dt>差額</dt><dd>${variance}</dd></div>
     </dl>${close?.reason ? `<p class="lr-report-note"><strong>差額理由</strong> ${escape(close.reason)}</p>` : ''}
     ${countDetails ? `<details class="lr-cash-count"><summary>金種別の内訳</summary>${countRows
-      ? `<dl class="lr-money-list">${countRows}</dl>` : '<p>現金なし</p>'}</details>` : ''}</section>`;
+      ? `<dl class="lr-money-list">${countRows}</dl>` : '<p>現金なし</p>'}</details>` : ''}
+    ${close && api.canCorrectRegister ? `<button type="button" class="btn" data-action="correct-register-count" data-id="${escape(close.date)}">実残高を訂正</button>` : ''}</section>`;
 }
 
 function registerBreakdown(state, period, current, api) {
+  const recorded = period.closed ?? state.day;
   return panel('レジの内訳', moneyRows([
     ['釣銭準備金', period.closed?.openingCash ?? state.day.openingCash],
     ['会計・前受金の現金受取', current.payments?.cash ?? 0],
     ['その他の入金', asNumber(current.cashIn) + asNumber(current.recoveries?.cash)],
     ['出金・経費', -asNumber(current.cashOut)],
-  ], api));
+  ], api) + (recorded.openingExpected === undefined ? '' : moneyRows([
+    ['開店時の想定残高',recorded.openingExpected],['開店時の現金過不足',recorded.openingDifference],
+  ],api)));
 }
 
 function tenderBreakdown(current, api, multiple = false) {
@@ -291,7 +316,10 @@ function cashLedgerHistory(current, api) {
         <div><strong>${escape(title)}</strong><small>${escape(type)} · ${when}</small></div></div>
       <strong class="lr-cash-entry-amount ${inflow ? 'lr-positive' : ''}">${signedYen(inflow ? item.amount : -item.amount,yen,true)}</strong>
       <div class="lr-cash-entry-extra">${item.reason ? `<p>${escape(item.reason)}</p>` : ''}
-        <small>${[item.destination ? `相手先 ${item.destination}` : '', actor?.label ? `担当 ${actor.label}` : ''].filter(Boolean).map(escape).join(' · ')}</small></div>
+        <small>${[item.destination ? `相手先 ${item.destination}` : '', actor?.label ? `担当 ${actor.label}` : ''].filter(Boolean).map(escape).join(' · ')}</small>
+        ${item.voidedAt != null ? `<p>取消済み ／ ${escape(item.voidReason)}</p>` : ''}
+        ${api.canEditCash?.(item) ? `<div class="ops-actions"><button type="button" class="btn" data-action="edit-cash-movement" data-id="${escape(item.id)}">訂正</button>
+          <button type="button" class="btn" data-action="void-cash-movement" data-id="${escape(item.id)}">入出金を取消</button></div>` : ''}</div>
     </li>`;
   });
   return panel('入出金履歴', rows.length ? `<ul class="lr-cash-entries">${rows.join('')}</ul>`
@@ -310,13 +338,18 @@ function cashTotals(current, api) {
 }
 
 function renderCash(state, api, period, current) {
-  const {icon} = api;
+  const {icon,escape,yen} = api;
   const canRecord = period.date === state.day.date && state.day.status === 'open' && !period.closed;
+  const vaults = cashAccounts(state,'vault');
+  const vaultPanel = vaults.length ? panel('金庫の現在残高',
+    `<dl class="lr-money-list">${vaults.map((vault)=>`<div><dt>${escape(vault.name)}${vault.enabled ? '' : '（停止中）'}</dt>
+      <dd>${yen(vaultBalance(state,vault))}</dd></div>`).join('')}</dl>`) : '';
   return `<div class="lr-view">
     <div class="lr-report-toolbar">${dayPicker(state, period.date, api)}
       ${canRecord ? `<button type="button" class="btn btn-primary" data-action="record-cash">${icon('plus',16)}入出金を記録</button>` : ''}</div>
     ${describeClosing(period, current, api)}
     <div class="lr-split">${registerBreakdown(state, period, current, api)}${cashTotals({...current,dailyPayTotals:getDailyPayTotals(state,period.date)}, api)}</div>
+    ${vaultPanel}
     ${cashLedgerHistory(current, api)}</div>`;
 }
 
@@ -403,6 +436,11 @@ function renderReportControls(state, interval, period, api) {
         <span>freee向け</span>
         ${exportButton('daily','日次集計CSV',canExportSales)}
         ${exportButton('tickets','伝票別CSV',canExportSales)}
+      </div>
+      <div class="lr-period-freee" role="group" aria-label="設定した会計CSV">
+        <span>カスタム会計CSV</span>
+        ${exportButton('custom-daily','日次CSV',canExportSales)}
+        ${exportButton('custom-tickets','伝票CSV',canExportSales)}
       </div>
     </div>
     ${api.reportExportError ? `<p class="lr-period-note lr-period-error" data-report-export-error role="alert"

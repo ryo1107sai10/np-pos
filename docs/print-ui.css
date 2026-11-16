@@ -33,6 +33,10 @@
   overflow-wrap: anywhere;
 }
 .np-print-paper[data-paper-width="80"] { --paper-width: 80mm; --paper-inset: 4mm; }
+.np-print-preview-frame [data-print-copy="store"] { margin-block-start: 12px; }
+.np-print-paper .np-print-copy { padding: 0 5px; border: 1px solid #515151; }
+.np-print-paper .np-print-cast { margin-block: 2mm 1mm; font-weight: 700; }
+.np-print-rule + .np-print-rule { margin-block-start: 7px; }
 .np-print-paper :where(h3,h4,ul,dl,dd,p) { margin: 0; }
 .np-print-paper-header { display: grid; justify-items: center; gap: 1px; text-align: center; }
 .np-print-paper-header h3 { font-size: 13pt; line-height: 1.35; letter-spacing: .07em; }
@@ -109,6 +113,7 @@
     margin: 0;
     box-shadow: none;
   }
+  body.np-print-active .np-print-paper[data-print-copy="store"] { break-before: page; }
   .np-print-paper-header, .np-print-meta, .np-print-amount, .np-print-items li, .np-print-rows > div { break-inside: avoid; }
   .np-print-section h4 { break-after: avoid; }
 }

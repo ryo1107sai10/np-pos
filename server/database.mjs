@@ -211,16 +211,19 @@ export async function readState(db, actor, storeId, since) {
   return visibleSnapshot(current, actor.uid);
 }
 
-export async function listAudit(db, actor, storeId, { before = null, limit = 50 } = {}) {
+export async function listAudit(db, actor, storeId, { before = null, limit = 50, ticketId = null } = {}) {
   requireCondition(before === null || (Number.isSafeInteger(before) && before > 0),
     400, 'invalid-audit-cursor', '監査ログの表示位置を確認してください。');
   requireCondition(Number.isInteger(limit) && limit >= 1 && limit <= 100,
     400, 'invalid-audit-limit', '監査ログの表示件数を確認してください。');
+  requireCondition(ticketId === null || typeof ticketId === 'string' && /^[a-zA-Z0-9_.:-]{1,128}$/.test(ticketId),
+    400,'invalid-audit-target','伝票の操作履歴を確認してください。');
   const rows = await readRows(db, `SELECT m.role, e.revision, e.payload FROM np_members m
     LEFT JOIN np_audit_events e ON e.store_id = m.store_id AND m.role = 'admin'
       AND (? IS NULL OR e.revision < ?)
+      AND (? IS NULL OR (json_extract(e.payload,'$.target.kind') = 'ticket' AND json_extract(e.payload,'$.target.id') = ?))
     WHERE m.store_id = ? AND m.uid = ? ORDER BY e.revision DESC LIMIT ?`,
-  before, before, storeId, actor.uid, limit + 1);
+  before, before, ticketId, ticketId, storeId, actor.uid, limit + 1);
   adminRequired(memberRequired(rows[0]));
   const page = rows.slice(0, limit).filter((row) => row.payload !== null);
   return {
@@ -331,7 +334,7 @@ async function saveOperation(db, actor, storeId, command, observed, observedAt) 
     400, 'invalid-revision', '保存番号が無効です。');
   const current = observed ?? await snapshot(db, actor, storeId);
   if (operation === 'migrate') adminRequired(current);
-  else verifyCommand(current.role, value);
+  else verifyCommand(current.role, value, current.state);
   const fingerprint = await getFingerprint(operation, value);
   if (matchingOperation(await operationLog(db, storeId, operationId), actor, fingerprint)) {
     return readVisibleState(db, actor, storeId);
