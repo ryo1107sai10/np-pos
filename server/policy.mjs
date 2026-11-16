@@ -16,10 +16,10 @@ const roleCommands = {
   manager: new Set(managerCommands),
   admin: new Set([...managerCommands, 'saveLayout', 'importLayout', 'saveStoreSettings', 'importStoreConfiguration',
     'approveDiscount', 'rejectDiscount', 'saveControls', 'cancelSettlement', 'reopenTicket',
-    'mergeCustomers', 'linkCustomer', 'importCustomers', 'savePrintSettings',
+    'mergeCustomers', 'linkCustomer', 'correctSettledTicketCustomer', 'importCustomers', 'savePrintSettings',
     'saveAutoExtensionSettings', 'saveCardFeeSettings']),
 };
-const reasonCommands = new Set(['discount', 'cancelSettlement', 'reopenTicket', 'cancelLine', 'recordCashMovement']);
+const reasonCommands = new Set(['discount', 'cancelSettlement', 'reopenTicket', 'cancelLine', 'recordCashMovement', 'correctSettledTicketCustomer']);
 const paymentMethods = new Set(['cash', 'card', 'qr']);
 const ticketStatuses = new Set(['open', 'paid', 'departed', 'void', 'cancelled']);
 const emptyCommission = { fixed: 0, rate: 0, points: 0 };
@@ -55,7 +55,7 @@ export function verifyCommand(role, command) {
     requireCondition(command.newCustomer == null, 400, 'invalid-command',
       '顧客の新規登録は顧客管理から行ってください。来店登録では登録済みの顧客を選べます。');
   }
-  if (command.type === 'setTicketCustomer') {
+  if (command.type === 'setTicketCustomer' || command.type === 'correctSettledTicketCustomer') {
     const { ticketId, customerId } = command;
     requireCondition(typeof ticketId === 'string' && ticketId.trim().length > 0
       && (customerId === null || (typeof customerId === 'string' && customerId.trim().length > 0)),

@@ -1,3 +1,5 @@
+import { reassignSettledTicketReceivable } from './receivables.mjs';
+
 const settled = new Set(['paid', 'departed']);
 const editors = new Set(['admin', 'manager']);
 const datePattern = /^\d{4}-\d{2}-\d{2}$/;
@@ -79,6 +81,16 @@ function ticketSnapshots(state) {
   return [...snapshots.values()].sort((a, b) => (b.ticket.createdAt ?? 0) - (a.ticket.createdAt ?? 0));
 }
 
+export function findSettledCustomerTicket(state, ticketId) {
+  if (typeof ticketId !== 'string' || !ticketId) return undefined;
+  const current = state.tickets.find(({ id }) => id === ticketId);
+  if (current) return settled.has(current.status) ? { ticket: current, date: state.day.date } : undefined;
+  for (const day of state.closedDays ?? []) {
+    const ticket = day.ticketSnapshots?.find(({ id }) => id === ticketId);
+    if (ticket) return settled.has(ticket.status) ? { ticket, date: day.date } : undefined;
+  }
+}
+
 export function isAssignedCustomer(_state, customer, actorId) {
   return Boolean(actorId && customer?.createdByUid === actorId);
 }
@@ -155,28 +167,48 @@ export function customerForSeat(state, action) {
   return { customer: customer.name, customerId: customer.id };
 }
 
-export function setTicketCustomer(state, ticket, { customerId }, actor) {
-  check(['admin', 'manager', 'staff'].includes(actor.role), '伝票の顧客を変更する権限がありません。');
+function ticketCustomerTarget(state, customerId) {
   check(customerId === null || typeof customerId === 'string', '登録済みの顧客を選んでください。');
   const customer = findCustomer(state, customerId);
   check(customerId === null || customer, '顧客が見つかりません。選び直してください。');
-  if (customer && ticket.customerId === customer.id) return;
+  return customer;
+}
 
-  const previous = findCustomer(state, ticket.customerId);
-  ticket.customer = customer?.name ?? '';
-  if (customer) {
-    ticket.customerId = customer.id;
-    firstVisit(customer, state.day.date);
-  } else {
-    delete ticket.customerId;
+function updateTicketCustomer(state, tickets, customer, date) {
+  const previous = findCustomer(state, tickets[0].customerId);
+  for (const ticket of tickets) {
+    ticket.customer = customer?.name ?? '';
+    if (customer) ticket.customerId = customer.id;
+    else delete ticket.customerId;
   }
-
-  if (previous?.firstVisitDate === state.day.date) {
+  if (customer) firstVisit(customer, date);
+  if (previous?.firstVisitDate === date) {
     previous.firstVisitDate = '';
     for (const { ticket: visit, date } of ticketSnapshots(state)) {
       if (visit.customerId === previous.id && visit.status !== 'void') firstVisit(previous, date);
     }
   }
+}
+
+export function setTicketCustomer(state, ticket, { customerId }, actor) {
+  check(['admin', 'manager', 'staff'].includes(actor.role), '伝票の顧客を変更する権限がありません。');
+  const customer = ticketCustomerTarget(state, customerId);
+  if (customer && ticket.customerId === customer.id) return;
+  updateTicketCustomer(state, [ticket], customer, state.day.date);
+}
+
+function correctSettledTicketCustomer(state, action) {
+  profileText(action.reason, 120, '訂正理由', true);
+  const entry = findSettledCustomerTicket(state, action.ticketId);
+  check(entry, '会計済みの伝票を選んでください。');
+  const { ticket, date } = entry;
+  const customer = ticketCustomerTarget(state, action.customerId);
+  if (customer ? ticket.customerId === customer.id : !ticket.customerId && !ticket.customer) return;
+
+  reassignSettledTicketReceivable(state, ticket, date, action.customerId);
+  const archive = state.closedDays?.find((day) => day.date === date)?.ticketSnapshots?.find(({ id }) => id === ticket.id);
+  const copies = archive && archive !== ticket ? [ticket, archive] : [ticket];
+  updateTicketCustomer(state, copies, customer, date);
 }
 
 function rewriteTicketLinks(state, from, to) {
@@ -192,6 +224,7 @@ function rewriteTicketLinks(state, from, to) {
 function linkLegacyVisit(state, action, customer) {
   const entry = ticketSnapshots(state).find(({ticket}) => ticket.id === action.ticketId);
   check(entry && entry.ticket.status !== 'void' && !entry.ticket.customerId, '未登録の来店伝票を選んでください。');
+  check(!settled.has(entry.ticket.status), '会計済みの伝票は訂正理由を入力して顧客を設定してください。');
   const attach = (ticket) => {
     if (ticket?.id === action.ticketId) ticket.customerId = customer.id;
   };
@@ -214,6 +247,10 @@ export function applyCustomerCommand(state, action, actor, now, allocateId) {
     return;
   }
   check(actor.role === 'admin', 'この操作には店舗管理者の権限が必要です。');
+  if (action.type === 'correctSettledTicketCustomer') {
+    correctSettledTicketCustomer(state, action);
+    return;
+  }
   if (action.type === 'importCustomers') {
     check(Array.isArray(action.customers) && action.customers.length > 0 && action.customers.length <= 500,
       '顧客CSVは1回に1〜500件まで登録できます。');

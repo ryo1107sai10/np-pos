@@ -911,6 +911,111 @@ test('operators update an unpaid ticket customer across devices without widening
   assert.equal(edits[1].after.customerName, second.name);
 });
 
+test('settled ticket customer correction requires an admin and reason and audits the original business day', async (t) => {
+  const db = database();
+  const tenant = await store(db);
+  for (const [person, role] of [[helper, 'manager'], [outsider, 'staff']]) {
+    await inviteMember(db, owner, tenant, person.email, role);
+    await listStores(db, person);
+  }
+  const businessDay = '2026-11-16';
+  let now = Date.parse(`${businessDay}T20:00:00+09:00`);
+  t.mock.method(Date, 'now', () => now);
+  const run = (actor, revision, suffix, action) => command(db, actor, tenant, revision, `settled-customer-${suffix}`, action);
+
+  await run(owner, 0, 'open', { type: 'open', date: businessDay, openingCash: 0 });
+  const registered = await run(owner, 1, 'profile', { type: 'saveCustomer', customer: { name: '訂正先の顧客' } });
+  const [{ id: customerId, name }] = registered.state.customers;
+  const seated = await run(outsider, 2, 'seat', { type: 'seat', tableIds: ['a1'], setId: 'set60', guests: 1 });
+  const [{ id: ticketId }] = seated.state.tickets;
+  const update = { type: 'correctSettledTicketCustomer', ticketId, customerId, reason: '  来店履歴を照合  ' };
+  await assert.rejects(run(owner, 3, 'unpaid-rejected', update), { code: 'rejected-command' });
+  const amount = quote(seated.state, ticketId).remaining;
+  const paid = await run(owner, 3, 'settle', { type: 'settle', ticketId, payments: [{ method: 'cash', amount }] });
+  for (const actor of [helper, outsider]) {
+    await assert.rejects(run(actor, 4, 'role-denied', update), { code: 'forbidden' });
+  }
+  await assert.rejects(run(owner, 4, 'blank-reason', { ...update, reason: '  ' }), { code: 'reason-required' });
+  await assert.rejects(run(owner, 4, 'no-selection', { ...update, customerId: undefined }), { code: 'invalid-command' });
+  await assert.rejects(run(owner, 3, 'stale', update), { code: 'revision-conflict' });
+  const attached = await run(owner, 4, 'attach', update);
+  assert.deepEqual(await run(owner, 4, 'attach', update), attached);
+  assert.deepEqual(attached.state.tickets[0], { ...paid.state.tickets[0], customerId, customer: name });
+  assert.deepEqual(summary(attached.state), summary(paid.state));
+  await run(owner, 5, 'same-again', update);
+  await run(outsider, 6, 'depart', { type: 'depart', ticketId });
+  await run(owner, 7, 'close', { type: 'close', actualCash: amount });
+
+  const detached = await run(owner, 8, 'detach', { ...update, customerId: null, reason: '顧客登録を再確認' });
+  for (const ticket of [detached.state.tickets[0], detached.state.closedDays[0].ticketSnapshots[0]]) {
+    assert.equal(ticket.customerId, undefined);
+    assert.equal(ticket.customer, '');
+  }
+  now = Date.parse('2026-11-17T20:00:00+09:00');
+  await run(owner, 9, 'new-business-day', { type: 'open', date: '2026-11-17', openingCash: 0 });
+  await assert.rejects(run(owner, 10, 'reason-bypass', { type: 'linkCustomer', ticketId, customerId }), { code: 'rejected-command' });
+  const archived = await run(owner, 10, 'correct-archived', update);
+  assert.equal(archived.state.tickets.length, 0);
+  assert.equal(archived.state.closedDays[0].ticketSnapshots[0].customerId, customerId);
+  assert.equal(archived.state.closedDays[0].sales, amount);
+  assert.equal((await readState(db, helper, tenant)).state.closedDays[0].ticketSnapshots[0].customerId, undefined);
+
+  const audits = (await listAudit(db, owner, tenant)).events.filter(({ action }) => action === update.type);
+  assert.equal(audits.length, 3);
+  assert.equal(audits[0].businessDate, businessDay);
+  assert.equal(audits[0].at, now);
+  assert.equal(audits[0].reason, '来店履歴を照合');
+  assert.equal(audits[0].actor.id, owner.uid);
+  assert.equal(audits[0].target.id, ticketId);
+  assert.deepEqual(audits[0].before, { customerId: null, customerName: null });
+  assert.deepEqual(audits[0].after, { customerId, customerName: name });
+  await assert.rejects(listAudit(db, helper, tenant), { code: 'forbidden' });
+});
+
+test('settled ticket correction keeps receivable collections and reports intact when ownership changes', async () => {
+  const db = database();
+  const tenant = await store(db);
+  await inviteMember(db, owner, tenant, helper.email, 'manager');
+  await listStores(db, helper);
+  const date = '2026-11-16';
+  const run = (actor, revision, suffix, action) => command(db, actor, tenant, revision, `settled-credit-${suffix}`, action);
+  await run(owner, 0, 'open', { type: 'open', date, openingCash: 0 });
+  const registered = await run(owner, 1, 'source', { type: 'saveCustomer', customer: { name: '訂正元', creditEnabled: true, creditLimit: 10_000 } });
+  const [{ id: sourceId }] = registered.state.customers;
+  const added = await run(helper, 2, 'target', { type: 'saveCustomer', customer: { name: '訂正先' } });
+  const [, { id: customerId, name: customer }] = added.state.customers;
+  const seated = await run(owner, 3, 'seat', { type: 'seat', tableIds: ['a1'], setId: 'set60', guests: 1, customerId: sourceId });
+  const [{ id: ticketId }] = seated.state.tickets;
+  const amount = quote(seated.state, ticketId).remaining;
+  const paid = await run(owner, 4, 'settle', { type: 'settle', ticketId, creditDueDate: date, payments: [{ method: 'receivable', amount }] });
+  const [{ id: receivableId }] = paid.state.receivables;
+  await run(owner, 5, 'collect', { type: 'recoverReceivable', receivableId, method: 'cash', date, amount: 1_000 });
+  await run(owner, 6, 'depart', { type: 'depart', ticketId });
+  await run(owner, 7, 'close', { type: 'close', actualCash: 1_000 });
+  const before = await run(owner, 8, 'next-day', { type: 'open', date: '2026-11-17', openingCash: 0 });
+  const correction = { type: 'correctSettledTicketCustomer', ticketId, customerId, reason: '売掛の名義訂正' };
+  await assert.rejects(run(owner, 9, 'unlinked-credit', { ...correction, customerId: null }), { code: 'rejected-command' });
+  assert.deepEqual(await readState(db, owner, tenant), before);
+  assert.deepEqual((await readState(db, helper, tenant)).state.receivables, []);
+  const corrected = await run(owner, 9, 'correct-credit', correction);
+  const [entry] = corrected.state.receivables;
+  assert.deepEqual(entry, { ...before.state.receivables[0], customerId });
+  const [earlier] = before.state.closedDays;
+  assert.deepEqual(corrected.state.closedDays[0], { ...earlier,
+    ticketSnapshots: [{ ...earlier.ticketSnapshots[0], customerId, customer }] });
+  assert.deepEqual((await readState(db, helper, tenant)).state.receivables, [entry]);
+
+  const [audit] = (await listAudit(db, owner, tenant)).events;
+  assert.equal(audit.action, correction.type);
+  assert.deepEqual(audit.before.receivable, { id: receivableId, customerId: sourceId, balance: amount - 1_000 });
+  assert.deepEqual(audit.after.receivable, { id: receivableId, customerId, balance: amount - 1_000 });
+  const migratedTenant = await store(db);
+  const migrated = await migrateState(db, owner, migratedTenant, {
+    operationId: 'migrate-corrected-receivable', snapshot: corrected.state,
+  });
+  assert.deepEqual(migrated.state.receivables, [entry]);
+});
+
 test('migration strips forged active customer links from every ticket view', async () => {
   const db = database();
   const tenant = await store(db);

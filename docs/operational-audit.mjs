@@ -1,5 +1,6 @@
 import { getAutoExtensionSettings, getTableAutoExtensionEnabled, isVisitAutoExtensionPaused } from './auto-extension.mjs';
 import { getCardFeeSettings } from './card-fee.mjs';
+import { findSettledCustomerTicket } from './customers.mjs';
 import { getStoreSettings } from './store-settings.mjs';
 import { getReceivableBalance } from './receivables.mjs';
 import { cashMovementCategories, cashMovementKinds } from './cash-ledger.mjs';
@@ -181,6 +182,37 @@ function auditCustomers(before, after, action) {
     reason: oldCustomer ? '顧客情報を更新' : '顧客を登録' };
 }
 
+function auditTicketCustomer(before, after, action) {
+  const { ticketId } = action;
+  const correction = action.type === 'correctSettledTicketCustomer';
+  const findVisit = (state) => correction ? findSettledCustomerTicket(state, ticketId)
+    : { ticket: state.tickets.find(({ id }) => id === ticketId) };
+  const previous = findVisit(before)?.ticket;
+  const { ticket: current, date } = findVisit(after) ?? {};
+  if (!previous || !current) return null;
+  const customerLink = (ticket) => ({
+    customerId: ticket.customerId ?? null,
+    customerName: typeof ticket.customer === 'string' ? ticket.customer || null : null,
+  });
+  const oldLink = customerLink(previous);
+  const newLink = customerLink(current);
+  if (sameValue(oldLink, newLink)) return null;
+  const entry = { target: target('ticket', current.id, `伝票 No. ${current.number}`), before: oldLink, after: newLink };
+  if (correction) {
+    const loan = before.receivables?.find((row) => row.ticketId === ticketId && row.cancelledAt == null);
+    const updatedLoan = loan && after.receivables.find(({ id }) => id === loan.id);
+    if (updatedLoan && updatedLoan.customerId !== loan.customerId) {
+      const receivableDetails = (row) => ({ id: row.id, customerId: row.customerId, balance: getReceivableBalance(row) });
+      oldLink.receivable = receivableDetails(loan);
+      newLink.receivable = receivableDetails(updatedLoan);
+    }
+    return { ...entry, businessDate: date, reason: textReason(action.reason) };
+  }
+  const reason = !newLink.customerId ? '顧客のひもづけを解除'
+    : oldLink.customerId || oldLink.customerName ? '顧客のひもづけを変更' : '顧客をひもづけ';
+  return { ...entry, reason };
+}
+
 export function buildOperationAudit(before, after, action, at, actor) {
   let details;
   if (ticketActions.has(action.type)) {
@@ -189,21 +221,8 @@ export function buildOperationAudit(before, after, action, at, actor) {
     details = auditSettings(before, after, action);
   } else if (customerActions.has(action.type)) {
     details = auditCustomers(before, after, action);
-  } else if (action.type === 'setTicketCustomer') {
-    const previous = before.tickets.find(({ id }) => id === action.ticketId);
-    const current = after.tickets.find(({ id }) => id === action.ticketId);
-    const customerLink = (ticket) => ({
-      customerId: ticket.customerId ?? null,
-      customerName: typeof ticket.customer === 'string' ? ticket.customer || null : null,
-    });
-    const oldLink = customerLink(previous);
-    const newLink = customerLink(current);
-    if (!sameValue(oldLink, newLink)) {
-      const reason = !newLink.customerId ? '顧客のひもづけを解除'
-        : oldLink.customerId || oldLink.customerName ? '顧客のひもづけを変更' : '顧客をひもづけ';
-      details = { target: target('ticket', current.id, `伝票 No. ${current.number}`),
-        before: oldLink, after: newLink, reason };
-    }
+  } else if (action.type === 'setTicketCustomer' || action.type === 'correctSettledTicketCustomer') {
+    details = auditTicketCustomer(before, after, action);
   } else if (action.type === 'stockAdjust') {
     const previous = before.stock.find(({ id }) => id === action.stockId);
     const current = after.stock.find(({ id }) => id === action.stockId);

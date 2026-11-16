@@ -153,7 +153,7 @@ export function renderCustomerLink(state, id, api) {
   if (api.role !== 'admin' || !canViewCustomer(customer, api)) return denied(api);
   const visits = listUnlinkedVisits(state);
   return `<p class="form-copy"><strong>${escape(customer.name)}</strong> の来店履歴に、顧客未登録の伝票を追加します。</p>
-    ${field('伝票', `<select name="ticketId" required><option value="">${visits.length ? '選択してください' : '紐づけられる伝票がありません'}</option>${visits.map((entry) => `<option value="${escape(entry.id)}">${escape(entry.date)} ／ No. ${escape(entry.number)} ／ ${escape(entry.customer || 'お客様名なし')}</option>`).join('')}</select>`)}`;
+    ${field('伝票', `<select name="ticketId" required><option value="">${visits.length ? '選択してください' : '紐づけられる伝票がありません'}</option>${visits.map((entry) => `<option value="${escape(entry.id)}">${escape(entry.date)} ／ No. ${escape(entry.number)} ／ ${escape(entry.customer || 'お客様名なし')}</option>`).join('')}</select>`, '会計済みの伝票を選ぶと、訂正理由を入力する画面が開きます。')}`;
 }
 
 export function renderCustomerImport(api) {
@@ -276,27 +276,33 @@ export function renderSeatCustomer(state, api, {query = '', selected = ''} = {})
   });
 }
 
-export function renderTicketCustomerSelection(state, selected, api, currentAlias) {
+export function renderTicketCustomerSelection(state, selected, api, currentAlias, {canDetach = true} = {}) {
   const hasCurrent = Boolean(currentAlias?.id || currentAlias?.name);
   const detachLabel = hasCurrent ? 'ひもづけを解除' : '選択を解除';
-  if (selected === null) return hasCurrent
+  const detach = canDetach ? action(api, detachLabel, 'seat-customer-clear') : '';
+  if (selected === null) return hasCurrent && canDetach
     ? '<p class="np-ticket-customer-detached">保存後は顧客の指定が解除されます。</p>' : '';
-  if (selected === undefined || selected === currentAlias?.id) return hasCurrent
-    ? `<div class="np-ticket-customer-actions">${action(api, detachLabel, 'seat-customer-clear')}</div>` : '';
+  if (selected === undefined || selected === currentAlias?.id) return hasCurrent && detach
+    ? `<div class="np-ticket-customer-actions">${detach}</div>` : '';
   const customer = findCustomer(state, selected);
   if (!customer) return '';
   return `<div class="np-seat-customer-current"><span>保存後のお客様 <strong>${api.escape(customer.name)}</strong></span>
-    ${action(api, detachLabel, 'seat-customer-clear')}</div>${renderSeatCustomerSuggestion(state, selected, api)}`;
+    ${detach}</div>${renderSeatCustomerSuggestion(state, selected, api)}`;
 }
 
-export function renderTicketCustomerEditor(state, {currentAlias, query = '', selected = currentAlias?.id}, api) {
+export function renderTicketCustomerEditor(state, {
+  currentAlias, query = '', selected = currentAlias?.id, settled = false, reason = '', canDetach = true, receivableConstraint = '',
+}, api) {
+  const {escape} = api;
   const hasCurrent = Boolean(currentAlias?.id || currentAlias?.name);
   const currentName = currentAlias?.name || (hasCurrent ? '指定済み' : '顧客の指定なし');
   return `<div class="np-ticket-customer">
-    <dl class="np-ticket-customer-current"><dt>現在のお客様</dt><dd>${api.escape(currentName)}</dd></dl>
+    <dl class="np-ticket-customer-current"><dt>現在のお客様</dt><dd>${escape(currentName)}</dd></dl>
+    ${receivableConstraint ? `<p class="ops-highlight np-ticket-customer-constraint">${escape(receivableConstraint)}</p>` : ''}
     ${renderSeatCustomerPicker(state, api, {
       query, selected, label: '登録済みのお客様', help: '検索結果からお客様を選び、保存します。',
-      selection: renderTicketCustomerSelection(state, selected, api, currentAlias),
+      selection: renderTicketCustomerSelection(state, selected, api, currentAlias, {canDetach}),
     })}
+    ${settled ? field('訂正理由', `<textarea name="customerCorrectionReason" rows="3" maxlength="120" required>${escape(reason)}</textarea>`, '訂正理由は必須です。監査ログに記録されます。') : ''}
   </div>`;
 }

@@ -191,7 +191,7 @@
 .np-directory-bottle legend { padding: 0 4px; font-size: 12px; font-weight: 680; }
 .np-directory-bottle-row { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(0, .75fr) minmax(0, .65fr) minmax(0, 1.25fr); gap: 6px; }
 .np-directory-bottle-row > label, .np-directory-bottle-row input, .np-directory-detail :is(input[type=date], textarea) { min-width: 0; width: 100%; }
-.modal .field :is(textarea[name=memo], textarea[name=csv], textarea[name=creditOverrideReason]) {
+.modal .field :is(textarea[name=memo], textarea[name=csv], textarea[name=creditOverrideReason], textarea[name=customerCorrectionReason]) {
   width: 100%;
   min-height: 65px;
   padding: 9px;
@@ -268,6 +268,7 @@
 }
 .np-ticket-customer-current dt { color: #56617b; }
 .np-ticket-customer-current dd { margin: 0; color: var(--text); font-weight: 680; overflow-wrap: anywhere; }
+.np-ticket-customer-constraint { margin: 0; }
 .np-ticket-customer-actions { display: flex; justify-content: flex-end; }
 .np-ticket-customer-actions .btn { min-height: 44px; }
 .np-ticket-customer-detached {
@@ -307,7 +308,7 @@
   .np-directory-bottle-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .np-seat-customer-results { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .np-seat-customer input[type=search] { font-size: 16px; }
-  .modal .field :is(textarea[name=memo], textarea[name=csv], textarea[name=creditOverrideReason]), .np-directory-toolbar :is(input,select) { font-size: 16px; }
+  .modal .field :is(textarea[name=memo], textarea[name=csv], textarea[name=creditOverrideReason], textarea[name=customerCorrectionReason]), .np-directory-toolbar :is(input,select) { font-size: 16px; }
 }
 @media (max-width: 390px) {
   .np-ticket-customer .np-seat-customer-current { align-items: stretch; flex-direction: column; }

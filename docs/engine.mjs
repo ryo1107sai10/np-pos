@@ -820,7 +820,7 @@ function reduce(state, action, now, actor) {
     applyPrintCommand(next, action, actor, now, () => createId(next, 'print'));
     return next;
   }
-  if (['saveCustomer', 'mergeCustomers', 'linkCustomer', 'importCustomers'].includes(action.type)) {
+  if (['saveCustomer', 'mergeCustomers', 'linkCustomer', 'correctSettledTicketCustomer', 'importCustomers'].includes(action.type)) {
     applyCustomerCommand(next, action, actor, now, () => createId(next, 'customer'));
     return next;
   }

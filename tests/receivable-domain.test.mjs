@@ -173,4 +173,34 @@ test('uncollected credit is reversed without erasing its history and a reopened 
   assert.equal(getCustomerReceivableBalance(reissued, initial.customerId), 7_500);
   assert.equal(summary(reissued).sales, 13_200);
   assert.equal(summary(reissued).receivableSales, 7_500);
+
+  const withCustomer = run(reissued, { type: 'saveCustomer', customer: { name: '正しい売掛先' } });
+  const customerId = withCustomer.customers.at(-1).id;
+  const recovered = run(withCustomer, recovery(withCustomer.receivables[0].id, 7_500));
+  const correction = { type: 'correctSettledTicketCustomer', ticketId, reason: '会計後に顧客名を確認' };
+  assert.throws(() => run(recovered, { ...correction, customerId: null }), /売掛のある伝票/);
+  const corrected = run(recovered, { ...correction, customerId });
+  assert.deepEqual(corrected.receivables[0], { ...recovered.receivables[0], customerId });
+  assert.equal(getReceivableStatus(corrected.receivables[0], initialDate), 'paid');
+  assert.deepEqual(corrected.receivables[1], cancelled.receivables[0]);
+  assert.deepEqual(corrected.cancelledSettlements, recovered.cancelledSettlements);
+  assert.deepEqual(summary(corrected), summary(recovered));
+});
+
+test('a settled customer correction rejects inconsistent receivables without touching state', () => {
+  const initial = fixture();
+  const registered = run(initial.state, { type: 'saveCustomer', customer: { name: '訂正先' } });
+  const customerId = registered.customers.at(-1).id;
+  const { state: seated, ticketId } = seat(registered, initial.customerId);
+  const issued = run(seated, creditSale(seated, ticketId, 10_000));
+  const [row] = issued.receivables;
+  const correction = { type: 'correctSettledTicketCustomer', ticketId, customerId, reason: '選び間違い' };
+  const invalidRows = [[], [{ ...row, amount: 9_999 }], [{ ...row, customerId }],
+    [row, { ...row, id: 'duplicate' }]];
+  for (const receivables of invalidRows) {
+    const state = { ...issued, receivables };
+    const before = structuredClone(state);
+    assert.throws(() => run(state, correction), /売掛台帳が一致しません/);
+    assert.deepEqual(state, before);
+  }
 });

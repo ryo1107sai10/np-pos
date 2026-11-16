@@ -11,7 +11,8 @@ const auditLabels = {
   cancelLine: '注文取消', void: '伝票取消', settle: '会計確定', cancelSettlement: '会計取消', reopenTicket: '伝票の再オープン',
   deposit: '前受金の登録', cancelDeposit: '前受金の取消', stockAdjust: '在庫調整',
   saveStoreSettings: '店舗設定の変更', saveLayout: '卓レイアウトの変更', importStoreConfiguration: '店舗設定の読み込み',
-  saveCustomer: '顧客情報の登録・変更', setTicketCustomer: '伝票の顧客設定', mergeCustomers: '顧客の統合', linkCustomer: '来店と顧客の関連づけ',
+  saveCustomer: '顧客情報の登録・変更', setTicketCustomer: '伝票の顧客設定', correctSettledTicketCustomer: '会計済み伝票の顧客訂正',
+  mergeCustomers: '顧客の統合', linkCustomer: '来店と顧客の関連づけ',
   importCustomers: '顧客の一括登録', recoverReceivable: '売掛の回収',
   recordCashMovement: '入出金の記録', close: '閉店・レジ締め',
   savePrintSettings: '印刷設定の変更', issuePrintDocument: '伝票・領収書の発行',
@@ -96,7 +97,9 @@ export function renderAuditLog({entries, loading, more, failed}, {escape, icon})
       <span class="ops-audit-header"><span class="ops-audit-action">${escape(label)}</span><span>${escape(auditTarget(entry.target))}</span></span>
       <span class="ops-audit-meta"><time>${escape(date)}</time><span>${escape(entry.actor?.label ?? entry.actor?.id ?? '—')}</span>
         ${roles[entry.actor?.role] ? `<span>${roles[entry.actor.role]}</span>` : ''}</span>
-    </summary><div class="ops-audit-detail">${entry.reason ? `<p class="ops-audit-reason"><strong>理由</strong> ${escape(entry.reason)}</p>` : ''}
+    </summary><div class="ops-audit-detail">
+      ${entry.action === 'correctSettledTicketCustomer' ? `<p class="ops-audit-reason"><strong>会計の営業日</strong> ${escape(entry.businessDate)}</p>` : ''}
+      ${entry.reason ? `<p class="ops-audit-reason"><strong>理由</strong> ${escape(entry.reason)}</p>` : ''}
       <div class="ops-audit-compare">${auditValues('変更前', entry.before, escape)}${auditValues('変更後', entry.after, escape)}</div>
     </div></details>`;
   }).join('');
