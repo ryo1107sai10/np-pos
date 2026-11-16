@@ -1,4 +1,4 @@
-import { getAutoExtensionSettings } from './auto-extension.mjs';
+import { getAutoExtensionSettings, getTableAutoExtensionEnabled } from './auto-extension.mjs';
 import { getCardFeeSettings } from './card-fee.mjs';
 import { getStoreSettings } from './store-settings.mjs';
 import { getReceivableBalance } from './receivables.mjs';
@@ -216,6 +216,14 @@ export function buildOperationAudit(before, after, action, at, actor) {
     const label = auto ? '自動延長設定' : 'カード会計加算設定';
     if (!sameValue(previous,current)) {
       details = { target:target('settings',null,label), before:previous, after:current, reason:`${label}を更新` };
+    }
+  } else if (action.type === 'setTableAutoExtension') {
+    const previous = getTableAutoExtensionEnabled(before,action.tableId);
+    const current = getTableAutoExtensionEnabled(after,action.tableId);
+    if (previous !== current) {
+      const table = after.tables.find(({id}) => id === action.tableId);
+      details = { target:target('table',table.id,table.name), before:{enabled:previous}, after:{enabled:current},
+        reason:'卓の自動延長設定を更新' };
     }
   } else if (action.type === 'syncAutoExtensions') {
     const previousById = new Map(before.tickets.map((ticket) => [ticket.id,ticket]));

@@ -88,5 +88,8 @@ export function createBillingDemo(now = Date.now()) {
   sample = step(sample,{type:'open',date:sample.day.date,openingCash:20_000},now - 75 * minute);
   sample = step(sample,{type:'saveAutoExtensionSettings',enabled:true,menuId:'extend30'},now - 74 * minute);
   sample = step(sample,{type:'saveCardFeeSettings',settings:{enabled:true,rateBps:500}},now - 73 * minute);
-  return step(sample,{type:'seat',tableIds:['a1'],guests:2,setId:'set60'},now - 60 * minute + 30_000);
+  sample = step(sample,{type:'setTableAutoExtension',tableId:'a2',enabled:false},now - 72 * minute);
+  const seatedAt = now - 60 * minute + 30_000;
+  sample = step(sample,{type:'seat',tableIds:['a1'],guests:2,setId:'set60'},seatedAt);
+  return step(sample,{type:'seat',tableIds:['a2'],guests:1,setId:'set60'},seatedAt);
 }

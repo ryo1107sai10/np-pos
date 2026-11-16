@@ -43,21 +43,53 @@ export function getAutomaticExtensionPlan(state) {
   return settings.enabled ? availablePlan(state, settings.menuId) : undefined;
 }
 
-function dueAt(ticket, effectiveAt, interval) {
-  if (ticket.status !== 'open' || !isTimestamp(ticket.endsAt)) return null;
+export function getTableAutoExtensionEnabled(state, tableId) {
+  return state.tableAutoExtension?.[tableId] !== false;
+}
+
+export function getLinkedTablesAutoExtensionEnabled(state, tableIds) {
+  return tableIds?.every((tableId) => getTableAutoExtensionEnabled(state, tableId)) ?? true;
+}
+
+function automaticSchedule(state) {
+  if (state.day.status !== 'open') return null;
+  const plan = getAutomaticExtensionPlan(state);
+  if (!plan) return null;
+  return {plan,effectiveAt:getAutoExtensionSettings(state).effectiveAt,interval:plan.duration * minuteMs};
+}
+
+function dueAt(state, ticket, {effectiveAt, interval}) {
+  if (ticket.status !== 'open' || !isTimestamp(ticket.endsAt)
+    || !getLinkedTablesAutoExtensionEnabled(state, ticket.tableIds)) return null;
   const resumedAt = isTimestamp(ticket.autoExtensionResumedAt) ? ticket.autoExtensionResumedAt : 0;
   const activeSince = Math.max(effectiveAt, resumedAt);
   return ticket.endsAt <= activeSince ? activeSince + interval : ticket.endsAt;
 }
 
+export function getTicketAutoExtensionAt(state, ticket) {
+  const schedule = automaticSchedule(state);
+  return schedule ? dueAt(state, ticket, schedule) : null;
+}
+
+export function getAutoExtensionNotices(state, now = Date.now(), leadMs = minuteMs) {
+  const schedule = automaticSchedule(state);
+  if (!schedule) return [];
+  const notices = [];
+  for (const ticket of state.tickets) {
+    const deadline = dueAt(state, ticket, schedule);
+    if (ticket.tableIds?.length && deadline != null && now < deadline && deadline - now <= leadMs) {
+      notices.push({ticketId:ticket.id,tableIds:ticket.tableIds.slice(),deadline});
+    }
+  }
+  return notices.sort((first, second) => first.deadline - second.deadline);
+}
+
 export function getNextAutoExtensionAt(state) {
-  if (state.day.status !== 'open') return null;
-  const plan = getAutomaticExtensionPlan(state);
-  if (!plan) return null;
-  const {effectiveAt} = getAutoExtensionSettings(state);
+  const schedule = automaticSchedule(state);
+  if (!schedule) return null;
   let next = null;
   for (const ticket of state.tickets) {
-    const due = dueAt(ticket, effectiveAt, plan.duration * minuteMs);
+    const due = dueAt(state, ticket, schedule);
     if (due !== null && (next === null || due < next)) next = due;
   }
   return next;
@@ -73,21 +105,37 @@ export function saveAutoExtensionSettings(state, action, now, actor) {
   state.autoExtensionSettings = {enabled: action.enabled, menuId: action.menuId, effectiveAt};
 }
 
+export function setTableAutoExtension(state, {tableId, enabled}, now, actor) {
+  if (!operatorRoles.has(actor.role)) throw new Error('卓の自動延長を変更する権限がありません。');
+  if (typeof enabled !== 'boolean') throw new Error('卓の自動延長の設定を確認してください。');
+  if (typeof tableId !== 'string' || !state.tables.some(({id}) => id === tableId)) {
+    throw new Error('指定された卓が見つかりません。');
+  }
+  if (getTableAutoExtensionEnabled(state, tableId) === enabled) return;
+  const entries = new Map(Object.entries(state.tableAutoExtension ?? {}));
+  if (enabled) entries.delete(tableId);
+  else entries.set(tableId, false);
+  if (entries.size) state.tableAutoExtension = Object.fromEntries(entries);
+  else delete state.tableAutoExtension;
+  if (!enabled) return;
+  for (const ticket of state.tickets) {
+    if (ticket.status === 'open' && ticket.tableIds?.includes(tableId)
+      && getLinkedTablesAutoExtensionEnabled(state, ticket.tableIds)) ticket.autoExtensionResumedAt = now;
+  }
+}
+
 export function syncAutomaticExtensions(state, now, actor, addExtension) {
   if (!operatorRoles.has(actor.role)) throw new Error('自動延長を反映する権限がありません。');
-  if (state.day.status !== 'open') return;
-  const plan = getAutomaticExtensionPlan(state);
-  if (!plan) return;
-  const {effectiveAt} = getAutoExtensionSettings(state);
-  const interval = plan.duration * minuteMs;
+  const schedule = automaticSchedule(state);
+  if (!schedule) return;
   let available = maxIntervalsPerSync;
   for (const ticket of state.tickets) {
-    let due = dueAt(ticket, effectiveAt, interval);
+    let due = dueAt(state, ticket, schedule);
     if (due === null) continue;
     while (due <= now && available > 0) {
       // With existing overtime, advance from the new schedule instead of billing time before activation.
       ticket.endsAt = due;
-      addExtension(state, ticket, plan, due, true);
+      addExtension(state, ticket, schedule.plan, due, true);
       due = ticket.endsAt;
       available--;
     }

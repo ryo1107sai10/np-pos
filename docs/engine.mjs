@@ -6,7 +6,8 @@ import { getCustomerReceivableBalance, getReceivableBalance, getReceivableRecove
   receivableCollectionMethods } from './receivables.mjs';
 import { createCashMovement, getCashMovements, getDailyRecoveryRows, totalCashMovements } from './cash-ledger.mjs';
 import { applyPrintCommand } from './print-domain.mjs';
-import { saveAutoExtensionSettings, syncAutomaticExtensions } from './auto-extension.mjs';
+import { getLinkedTablesAutoExtensionEnabled, saveAutoExtensionSettings, setTableAutoExtension,
+  syncAutomaticExtensions } from './auto-extension.mjs';
 
 const movementScale = 1_000_000;
 const pointsScale = 1_000;
@@ -679,6 +680,11 @@ function doSaveLayout(state, { areas, tables }, allowSampleTableIds = false) {
   state.archivedTables = [...archive, ...existing.filter((table) => !updatedById.has(table.id))];
   state.tables = [...existing.map((table) => updatedById.get(table.id)).filter(Boolean),
     ...[...updatedById.values()].filter((table) => !tablesById.has(table.id))];
+  if (state.tableAutoExtension) {
+    const retained = Object.entries(state.tableAutoExtension).filter(([id]) => updatedById.has(id));
+    if (retained.length) state.tableAutoExtension = Object.fromEntries(retained);
+    else delete state.tableAutoExtension;
+  }
 }
 
 function normalizeLayoutFile(file) {
@@ -802,6 +808,10 @@ function reduce(state, action, now, actor) {
     saveAutoExtensionSettings(next, action, now, actor);
     return next;
   }
+  if (action.type === 'setTableAutoExtension') {
+    setTableAutoExtension(next, action, now, actor);
+    return next;
+  }
   if (action.type === 'syncAutoExtensions') {
     syncAutomaticExtensions(next, now, actor, extendTicket);
     return next;
@@ -893,6 +903,8 @@ function reduce(state, action, now, actor) {
   switch (action.type) {
     case 'move': {
       const tableIds = tableSet(next, action.tableIds, ticket.guests, ticket.id);
+      if (!getLinkedTablesAutoExtensionEnabled(next, ticket.tableIds)
+        && getLinkedTablesAutoExtensionEnabled(next, tableIds)) ticket.autoExtensionResumedAt = now;
       recordTableAssignment(ticket, tableIds, now);
       ticket.tableIds = tableIds;
       break;

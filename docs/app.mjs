@@ -1,7 +1,10 @@
 import { apply, businessDate, createDemo, discountReasonCodes, exportStoreConfiguration, getItemCommission, getLayoutAreas, getLayoutTables, getManagerDiscountLimit, getTableLabel, getTicketForTable, getTicketTableLabels, parseStoreConfiguration, quote, summary, tableStatus, yen } from './engine.mjs';
 import { icon } from './icons.mjs';
 import { renderReport } from './reports.mjs';
-import { getAutoExtensionPlans, getAutoExtensionSettings, getNextAutoExtensionAt } from './auto-extension.mjs';
+import { getAutoExtensionNotices, getAutoExtensionPlans, getAutoExtensionSettings, getAutomaticExtensionPlan,
+  getNextAutoExtensionAt, getTableAutoExtensionEnabled } from './auto-extension.mjs';
+import { formatAutoExtensionCountdown, renderAutoExtensionBadge, renderAutoExtensionWarnings, renderTableAutoExtensionControl,
+  renderTableAutoExtensionSettings } from './auto-extension-ui.mjs';
 import { getCardFee, getCardFeeSettings } from './card-fee.mjs';
 import { getMonthlyReportSales, getReportDates, getReportPeriod } from './report-period.mjs';
 import { buildDailyReportCsv } from './report-export.mjs';
@@ -25,6 +28,7 @@ import { operationReason, renderAuditLog, renderDiscountForm } from './operation
 const app = document.querySelector('#app');
 const dialog = document.querySelector('#dialog');
 const notifications = document.querySelector('#notifications');
+const autoExtensionLive = document.querySelector('#auto-extension-live');
 const printOutput = document.querySelector('#print-output');
 const storageKey = 'np-pos.demo.v1';
 const legacyStorageKey = 'lumi-pos.demo.v1';
@@ -74,6 +78,8 @@ let mobileDetails = false;
 let modal = null;
 let priorFocus = null;
 let lastStatuses = '';
+let lastAutoExtensionNotices = '';
+const announcedAutoExtensions = new Map();
 let lastMinute = '';
 let saveAvailable = true;
 let pendingStorage = false;
@@ -192,6 +198,7 @@ function permittedAction(action) {
   if (store && ['demo', 'demo-start', 'demo-live', 'demo-cash', 'demo-reports', 'demo-billing', 'demo-role'].includes(action)) return false;
   if (ownerActions.has(action) || action.startsWith('store-editor-') || action.startsWith('layout-editor-')) return role === 'admin';
   if (managerActions.has(action)) return role === 'admin' || role === 'manager';
+  if (action === 'table-auto-extension') return ['admin','manager','staff'].includes(role);
   return true;
 }
 
@@ -270,20 +277,44 @@ function renderMetrics() {
   return `<section aria-label="営業状況" class="metrics">${figures.map(([glyph,label,value,hint,tone]) => `<article class="metric"><span class="metric-icon ${tone}">${icon(glyph, 19)}</span><div><div class="metric-title">${label}</div><div class="metric-value numeric">${value}</div><div class="metric-hint">${hint}</div></div></article>`).join('')}</section>`;
 }
 
-function renderTable(table) {
+function autoNoticesKey(notices) {
+  return notices.map(({ticketId,deadline}) => `${ticketId}:${deadline}`).join('|');
+}
+
+function announceAutoExtensionNotices(notices, now) {
+  if (!autoExtensionLive) return;
+  for (const [key,deadline] of announcedAutoExtensions) {
+    if (deadline <= now) announcedAutoExtensions.delete(key);
+  }
+  const newLabels = [];
+  for (const {ticketId,tableIds,deadline} of notices) {
+    const key = `${ticketId}:${deadline}`;
+    if (announcedAutoExtensions.has(key)) continue;
+    announcedAutoExtensions.set(key,deadline);
+    newLabels.push(tableIds.map(tableName).join('・'));
+  }
+  if (newLabels.length) autoExtensionLive.textContent = `${newLabels.join('、')}は1分以内に自動延長されます。`;
+  else if (!notices.length) autoExtensionLive.textContent = '';
+}
+
+function renderTable(table, warning = false) {
   const ticket = getTicketForTable(state, table.id);
   const status = tableStatus(state, table.id);
   const isSelected = table.id === selected;
   const name = escape(table.name);
-  return `<button type="button" class="seat seat-${status}${isSelected ? ' is-selected' : ''}" data-action="table" data-id="${escape(table.id)}" aria-pressed="${isSelected}" aria-label="${name} ${statuses[status]}${ticket?.tableIds.length > 1 ? ' 複数卓' : ''} 定員${table.capacity}名 ${escape(table.area)}">
+  const autoMode = !getTableAutoExtensionEnabled(state,table.id) ? 'off' : warning ? 'soon' : null;
+  const autoLabel = autoMode === 'off' ? ' 自動延長オフ' : autoMode === 'soon' ? ' まもなく自動延長' : '';
+  return `<button type="button" class="seat seat-${status}${isSelected ? ' is-selected' : ''}" data-action="table" data-id="${escape(table.id)}" aria-pressed="${isSelected}" aria-label="${name} ${statuses[status]}${ticket?.tableIds.length > 1 ? ' 複数卓' : ''} 定員${table.capacity}名 ${escape(table.area)}${autoLabel}">
     <div class="seat-top"><span><span class="seat-name" title="${name}">${name}</span><span class="seat-area" title="${escape(table.area)}">${escape(table.area)}${ticket?.tableIds.length > 1 ? ` <span class="seat-linked">· ${ticket.tableIds.length}卓共有</span>` : ''}</span></span>${pill(status)}</div>
-    <div class="seat-timer">${icon(ticket ? (status === 'paid' ? 'check' : 'clock') : 'plus',14)}${ticket ? status === 'paid' ? '退店待ち' : `<time data-ends="${ticket.endsAt}">${timer(ticket.endsAt)}</time>` : '来店登録'}</div>
+    <div class="seat-timer">${icon(ticket ? (status === 'paid' ? 'check' : 'clock') : 'plus',14)}${ticket ? status === 'paid' ? '退店待ち' : `<time data-ends="${ticket.endsAt}">${timer(ticket.endsAt)}</time>` : '来店登録'}${autoMode ? renderAutoExtensionBadge(autoMode,{icon}) : ''}</div>
     <div class="seat-bottom"><span class="seat-guests">${icon('users',13)}${ticket ? `${ticket.guests}名` : `定員${table.capacity}名`}</span>
     ${ticket ? `<span class="seat-price money">${yen(quote(state,ticket.id).total)}</span>` : `<span class="available-price">${icon('arrow-right',14)}</span>`}</div>
   </button>`;
 }
 
-function renderFloor() {
+function renderFloor(notices, now) {
+  const warnedTables = new Set(notices.flatMap(({tableIds}) => tableIds));
+  const renderSeat = (table) => renderTable(table,warnedTables.has(table.id));
   const isOpen = state.day.status === 'open';
   const showingPlan = floorView === 'plan';
   const areas = getLayoutAreas(state);
@@ -307,16 +338,16 @@ function renderFloor() {
   const emptyState = `<p class="empty-grid">${emptyFloor}</p>`;
   const planHint = visible.length ? `<p class="hall-plan-hint">${icon('move', 14)}図面を左右にスワイプできます</p>` : '';
   const floorContent = areas.length === 0 ? emptyState
-    : showingPlan ? planHint + floorLayoutStage(visible, planArea, { renderSeat: renderTable, escape })
-    : `<div class="table-grid">${visible.length ? visible.map(renderTable).join('') : emptyState}</div>`;
-  return `${!isOpen ? `<div class="notice"><span>${icon('info',17)}開店すると、空席から来店を登録できます。</span></div>` : ''}${renderMetrics()}
+    : showingPlan ? planHint + floorLayoutStage(visible, planArea, { renderSeat, escape })
+    : `<div class="table-grid">${visible.length ? visible.map(renderSeat).join('') : emptyState}</div>`;
+  return `${!isOpen ? `<div class="notice"><span>${icon('info',17)}開店すると、空席から来店を登録できます。</span></div>` : ''}${renderAutoExtensionWarnings(notices,now,{escape,icon,tableName})}${renderMetrics()}
     <div class="floor-layout">
       <section class="floor" aria-labelledby="floor-title"><div class="floor-heading">
       <div class="floor-heading-main"><h2 id="floor-title">${icon('grid',17)}${showingPlan ? '店内レイアウト' : '座席一覧'}</h2>${viewSwitch}</div>
       <div class="floor-heading-actions">${button('レイアウト編集', 'edit-layout', { glyph: 'move' })}${button('店舗設定', 'store-settings', { glyph: 'settings' })}${button('設定の移行', 'layout-transfer', { glyph: 'download' })}${button('延長・カード設定','billing-settings',{glyph:'settings'})}</div></div>
       ${areas.length ? `<div class="seating-toolbar glass${showingPlan ? ' seating-plan-toolbar' : ''}"><div class="seg" role="group" aria-label="卓の状態で絞り込む">${[['all','すべて'],['used','使用中'],['available','空席'],['urgent','要対応']].map(([key,text])=>`<button type="button" data-action="filter" data-id="${key}" aria-pressed="${key===filter}">${text}<small>${counts[key]}</small></button>`).join('')}</div>${areaPicker}</div>` : ''}
       ${floorContent}</section>
-      ${mobileDetails ? `<button type="button" class="detail-shade" data-action="hide-detail" aria-hidden="true" tabindex="-1"></button>` : ''}${renderDetail()}
+      ${mobileDetails ? `<button type="button" class="detail-shade" data-action="hide-detail" aria-hidden="true" tabindex="-1"></button>` : ''}${renderDetail(notices,now)}
     </div>`;
 }
 
@@ -375,11 +406,22 @@ function receiptActions(ticket, date) {
   return prints + `<div class="ops-actions">${button('会計を取り消す','cancel-settlement',{id:ticket.id,glyph:'x',tone:'danger'})}</div>`;
 }
 
-function renderDetail() {
+function tableAutoExtensionModel(tableId) {
+  const ticket = getTicketForTable(state,tableId);
+  const blockedBy = (ticket?.status === 'open' ? ticket.tableIds : [])
+    .filter((id) => id !== tableId && !getTableAutoExtensionEnabled(state,id));
+  return {tableId, enabled:getTableAutoExtensionEnabled(state,tableId),
+    storeEnabled:getAutoExtensionSettings(state).enabled, available:Boolean(getAutomaticExtensionPlan(state)), blockedBy};
+}
+
+function renderDetail(notices, now) {
   const ticket = selected && getTicketForTable(state, selected);
   const detailClose = `<button type="button" class="icon-btn detail-mobile-close" data-action="hide-detail" aria-label="伝票詳細を閉じる">${icon('x',18)}</button>`;
   if (!ticket) return `<aside class="detail ${mobileDetails ? 'mobile-visible' : ''}" aria-label="伝票詳細"><div class="detail-head"><h2>${icon('ticket',17)}伝票詳細</h2>${detailClose}</div><div class="detail-empty"><span class="metric-icon">${icon('table',23)}</span><h3>卓を選択</h3><p>利用中の卓を選ぶと、注文と会計の内訳を確認できます。</p>${state.day.status === 'closed' ? button('開店する','open',{glyph:'power',tone:'secondary'}) : ''}</div></aside>`;
   const q = quote(state,ticket.id);
+  const selectedTable = state.tables.find(({id}) => id === selected);
+  const warning = notices.find(({ticketId}) => ticketId === ticket.id);
+  const autoModel = tableAutoExtensionModel(selected);
   const status = tableStatus(state,selected);
   const settled = ticket.status === 'paid';
   const lines = ticket.lines.filter((line)=>!line.cancelledAt);
@@ -394,6 +436,10 @@ function renderDetail() {
     <div class="detail-inner"><div class="detail-title"><h3>${escape(tableName(selected))}</h3>${pill(status)}</div>
     <div class="detail-meta"><span>${icon('users',13)}${ticket.guests}名${ticket.customer ? ` · ${escape(ticket.customer)}` : ''}</span><span>${settled ? `${icon('check',13)}退店待ち` : `${icon('clock',13)}<time data-ends="${ticket.endsAt}">${timer(ticket.endsAt)}</time>`}</span></div>
     ${ticket.tableIds.length > 1 ? `<div class="detail-links" aria-label="同じ伝票の卓">${ticket.tableIds.map(id=>`<span class="detail-link">${escape(tableName(id))}</span>`).join('')}</div>` : ''}
+    ${warning ? `<div class="auto-extension-detail-warning" role="group" aria-label="自動延長まで1分以内">${renderAutoExtensionBadge('soon',{icon})}
+      <strong data-auto-extension-deadline="${warning.deadline}">${formatAutoExtensionCountdown(warning.deadline,now)}</strong></div>` : ''}
+    ${!settled && selectedTable && permittedAction('table-auto-extension')
+      ? renderTableAutoExtensionControl(selectedTable,autoModel,{escape,icon,tableName}) : ''}
     <div class="detail-aux"><h3>注文明細 <small>${lines.length}</small></h3>${settled ? '' : button('卓移動・連結','move',{glyph:'move',id:ticket.id})}</div>
     <ul class="ticket-lines">${lines.length ? lines.map((line) => `<li class="ticket-line"><span class="line-desc">${escape(line.name)} <em>×${line.quantity}</em>${line.castIds.length ? `<small>${lineStaffNames(line)}</small>` : ''}${line.autoExtension ? '<small>自動延長</small>' : ''}</span><span class="money">${yen(line.total)}</span>${!settled && permittedAction('cancel-line') && !['セット','延長'].includes(line.category) ? `<button class="line-remove" type="button" data-action="cancel-line" data-id="${escape(line.id)}" data-ticket="${escape(ticket.id)}" aria-label="${escape(line.name)}を取り消す">${icon('x',13)}</button>` : ''}</li>`).join('') : '<li class="lines-empty">注文明細はありません。</li>'}</ul>
     ${totalRows(q,{settlement:settled})}${pending}
@@ -418,10 +464,13 @@ function customerWorkspaceState() {
 }
 
 function renderOperationsNav() {
-  if (!canOpenPage('customers') || !['floor','reports','cash','customers','receivables'].includes(page)) return '';
-  return `<nav class="ops-tools customer-workspace-nav" aria-label="営業管理">${['cash','customers','receivables'].map((key) =>
-    button(pages[key].title, 'navigate', {id:key, glyph:pages[key].icon, tone:page === key ? 'secondary' : '',
-      data:page === key ? 'aria-current="page"' : ''})).join('')}</nav>`;
+  if (!['floor','reports','cash','customers','receivables'].includes(page)) return '';
+  const links = canOpenPage('customers') ? ['cash','customers','receivables'].map((key) =>
+    button(pages[key].title,'navigate',{id:key,glyph:pages[key].icon,tone:page === key ? 'secondary' : '',
+      data:page === key ? 'aria-current="page"' : ''})).join('') : '';
+  const tableSettings = page === 'floor' ? button('卓別の自動延長','table-auto-extension',
+    {glyph:'clock',disabled:state.tables.length === 0}) : '';
+  return links || tableSettings ? `<nav class="ops-tools customer-workspace-nav" aria-label="営業管理">${links}${tableSettings}</nav>` : '';
 }
 
 function render({ preserveFocus = false } = {}) {
@@ -434,6 +483,8 @@ function render({ preserveFocus = false } = {}) {
   lastMinute = dateTime.format(Date.now());
   const model = cloudModel();
   const banner = renderCloudBanner(model, {escape, icon});
+  const now = Date.now();
+  let floorNotices = [];
   let content;
   if (cloudState.store && (!cloudState.state || !cloudState.store.hasState)) {
     content = `<header class="page-head"><h1>クラウド店舗</h1>${renderCloudEntry(model,{escape,icon})}</header>${banner}
@@ -442,7 +493,10 @@ function render({ preserveFocus = false } = {}) {
     const tools = page === 'reports' && currentRole() === 'admin' ? `<div class="ops-tools">
       ${button('監査ログ','audit-log',{glyph:'history'})}${button('運用設定','ops-settings',{glyph:'settings'})}${button('印刷設定','print-settings',{glyph:'printer'})}</div>` : '';
     let view;
-    if (page === 'floor') view = renderFloor();
+    if (page === 'floor') {
+      floorNotices = getAutoExtensionNotices(state,now);
+      view = renderFloor(floorNotices,now);
+    }
     else if (page === 'customers') view = customerUI.renderCustomers(customerWorkspaceState(),{...customerUIApi(),query:customersQuery});
     else if (page === 'receivables') view = customerUI.renderReceivables(customerWorkspaceState(),{...customerUIApi(),query:receivableQuery,filter:receivableFilter});
     else view = renderReport(page,state,{yen,summary,quote,escape,icon,showHiddenStock,reportDate,commissionCast,reportInterval:currentReportInterval(),reportExportError});
@@ -450,6 +504,8 @@ function render({ preserveFocus = false } = {}) {
   }
   app.innerHTML = `<div class="shell">${renderSide()}<main class="workspace" id="workspace" tabindex="-1">${content}</main></div>`;
   document.title = `NP POS | ${pages[page].title}`;
+  lastAutoExtensionNotices = autoNoticesKey(floorNotices);
+  announceAutoExtensionNotices(floorNotices,now);
   if (focusAction) [...app.querySelectorAll('[data-action]')].find((el) => el.dataset.action === focusAction && el.dataset.id === focusId)?.focus({ preventScroll: true });
   if (searchFocus) {
     const control = app.querySelector(`[name=${searchFocus.name}]`);
@@ -487,6 +543,7 @@ function cloudUpdated(next) {
   else if (next.store && (contextChanged || before.state)) state = createDemo('closed');
   else if (before.store && !next.store) state = loadState();
   if (contextChanged) {
+    announcedAutoExtensions.clear();
     cloudMembers = {members: [], invites: []};
     customersQuery = ''; receivableQuery = ''; receivableFilter = 'all';
     if (next.store && !canOpenPage(page)) page = 'floor';
@@ -981,6 +1038,10 @@ function paintDialog(layoutFileInput) {
     case 'receivable-recover':
       present('売掛の回収を記録', customerUI.renderRecoveryForm(customerWorkspaceState(),modal.receivableId,customerUIApi()), '回収を確定', {style:'customer-dialog'});
       return;
+    case 'table-auto-extension':
+      present('卓別の自動延長',renderTableAutoExtensionSettings(state,tableAutoExtensionModel(modal.autoTableId),
+        {escape,icon,tableName}),'卓の設定を保存',{style:'ops-modal table-auto-extension-dialog'});
+      return;
     case 'billing-settings':
       present('延長・カード設定',renderBillingSettings(modal.billingTab),'設定を保存',{style:'ops-modal billing-dialog'});
       return;
@@ -1429,6 +1490,15 @@ function clickAction(target) {
   }
   if (action === 'audit-more') { void loadAuditPage(); return; }
   if (['ops-settings','print-settings'].includes(action)) { openDialog(action); return; }
+  if (action === 'table-auto-extension') {
+    const tableId = id ?? selected ?? state.tables[0]?.id;
+    if (state.tables.some((table) => table.id === tableId)) openDialog(action,{autoTableId:tableId});
+    return;
+  }
+  if (action === 'auto-extension-focus') {
+    if (state.tickets.some((ticket) => ticket.id === id && ticket.status === 'open')) openTicket(id);
+    return;
+  }
   if (action === 'billing-settings') { openDialog(action,{billingTab:'auto'}); return; }
   if (action === 'billing-settings-tab' && modal?.type === 'billing-settings' && ['auto','card'].includes(id)) {
     if (modal.billingTab !== id) {
@@ -1562,12 +1632,14 @@ function clickAction(target) {
       sample.archivedTables = structuredClone(state.archivedTables ?? []);
       if (state.controls) sample.controls = structuredClone(state.controls);
       if (state.autoExtensionSettings) sample.autoExtensionSettings = structuredClone(state.autoExtensionSettings);
+      if (state.tableAutoExtension) sample.tableAutoExtension = structuredClone(state.tableAutoExtension);
       if (state.cardFeeSettings) sample.cardFeeSettings = structuredClone(state.cardFeeSettings);
       const retainedStock = new Set(state.stock.map(({ id }) => id));
       sample.stock = sample.stock.filter(({ id }) => retainedStock.has(id));
       sample = apply(sample, { type: 'saveStoreSettings', settings: getStoreSettings(state) });
     }
     saveState(sample);
+    announcedAutoExtensions.clear();
     selected = fromOpening || cashSample || reportSample ? null : 'a1';
     area=null; filter='all'; showHiddenStock=false; mobileDetails=false;
     reportDate = ''; commissionCast = ''; customersQuery = ''; receivableQuery = ''; receivableFilter = 'all';
@@ -1578,7 +1650,7 @@ function clickAction(target) {
     if (fromOpening) openDialog('open');
     else {
       dialog.close();
-      toast(billingSample ? 'A-01が約30秒後に自動延長されます。カード会計加算は5%です。'
+      toast(billingSample ? 'A-01は約30秒後に自動延長。A-02の自動延長はオフです。'
         : reportSample ? '期間集計のサンプルを読み込みました。'
         : cashSample ? '入出金と日報のサンプルを読み込みました。' : '営業中のサンプルを読み込みました。');
     }
@@ -1738,6 +1810,10 @@ function submitDialog(form) {
       commit({type:modal.type==='discount-review'?'approveDiscount':'rejectDiscount',ticketId:id,
         requestId:modal.requestId,reason:value('reason')},modal.type==='discount-review'?'値引きを承認しました。':'値引き申請を却下しました。');
       break;
+    case 'table-auto-extension':
+      commit({type:'setTableAutoExtension',tableId:modal.autoTableId,enabled:data.has('tableAutoExtensionEnabled')},
+        '卓の自動延長設定を保存しました。');
+      break;
     case 'billing-settings':
       if (modal.billingTab === 'card') {
         commit({type:'saveCardFeeSettings',settings:{enabled:data.has('cardFeeEnabled'),rateBps:Math.round(numeric('cardFeeRate') * 100)}},
@@ -1847,6 +1923,13 @@ app.addEventListener('change',(event)=> {
   }
 });
 dialog.addEventListener('change', (event) => {
+  if (event.target.name === 'autoTableId' && modal?.type === 'table-auto-extension') {
+    if (!state.tables.some(({id}) => id === event.target.value)) return;
+    modal.autoTableId = event.target.value;
+    paintDialog();
+    dialog.querySelector('[name=autoTableId]')?.focus({preventScroll:true});
+    return;
+  }
   updatePrintPreview(event.target);
   if (event.target.name === 'cashKind') dialog.querySelector('[name=cashCategory]').innerHTML = cashCategoryOptions(event.target.value);
   if (event.target.name === 'paymentMethod') updatePaymentNote();
@@ -1927,10 +2010,14 @@ setInterval(()=> {
     lastMinute=minute;
   }
   if (page==='floor') {
-    if (!dialog.open && state.tables.map((table)=>tableStatus(state,table.id,now)).join('|')!==lastStatuses) {
+    const noticesChanged = autoNoticesKey(getAutoExtensionNotices(state,now)) !== lastAutoExtensionNotices;
+    if (noticesChanged || (!dialog.open && state.tables.map((table)=>tableStatus(state,table.id,now)).join('|')!==lastStatuses)) {
       render({preserveFocus:true});
       return;
     }
     for (const time of app.querySelectorAll('[data-ends]')) time.textContent=timer(Number(time.dataset.ends),now);
+    for (const countdown of app.querySelectorAll('[data-auto-extension-deadline]')) {
+      countdown.textContent = formatAutoExtensionCountdown(Number(countdown.dataset.autoExtensionDeadline),now);
+    }
   }
 },1000);

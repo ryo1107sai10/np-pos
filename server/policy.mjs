@@ -7,7 +7,8 @@ import { getRecoveryRows, isValidCashMovement } from '../docs/cash-ledger.mjs';
 import { isValidPrintDocument, normalizePrintSettings } from '../docs/print-domain.mjs';
 
 export const roles = new Set(['admin', 'manager', 'staff', 'cast', 'trainee']);
-const staffCommands = ['seat', 'move', 'order', 'extend', 'deposit', 'settle', 'depart', 'serve', 'issuePrintDocument', 'syncAutoExtensions'];
+const staffCommands = ['seat', 'move', 'order', 'extend', 'deposit', 'settle', 'depart', 'serve', 'issuePrintDocument',
+  'syncAutoExtensions', 'setTableAutoExtension'];
 const managerCommands = [...staffCommands, 'open', 'close', 'discount', 'stockAdjust', 'cancelDeposit', 'cancelLine', 'void',
   'saveCustomer', 'recoverReceivable', 'recordCashMovement'];
 const roleCommands = {
@@ -53,6 +54,11 @@ export function verifyCommand(role, command) {
   if (command.type === 'order') {
     requireCondition(Array.isArray(command.items) && command.items.length <= 100 && command.items.every(isRecord),
       400, 'invalid-command', '注文内容を確認してください。');
+  }
+  if (command.type === 'setTableAutoExtension') {
+    requireCondition(typeof command.tableId === 'string' && command.tableId.length > 0 && command.tableId.length <= 100
+      && command.tableId.trim() === command.tableId && typeof command.enabled === 'boolean',
+    400, 'invalid-command', '卓と自動延長の設定を確認してください。');
   }
   if (command.type === 'settle') {
     requireCondition(Array.isArray(command.payments) && command.payments.length <= 10 && command.payments.every(isRecord),
@@ -228,6 +234,13 @@ function validTicket(ticket) {
       && Array.isArray(ticket.settlement.commission) && Array.isArray(ticket.settlement.taxBreakdown)));
 }
 
+function validTableAutoExtension(state) {
+  if (state.tableAutoExtension === undefined) return true;
+  if (!isRecord(state.tableAutoExtension)) return false;
+  const tableIds = new Set(state.tables.map(({ id }) => id));
+  return Object.entries(state.tableAutoExtension).every(([id, enabled]) => tableIds.has(id) && enabled === false);
+}
+
 function validCancelledSettlement(entry) {
   return typeof entry.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(entry.date) && nonnegative(entry.at)
     && typeof entry.reason === 'string' && isRecord(entry.receipt) && validTicket(entry.receipt)
@@ -344,6 +357,7 @@ export function validateSnapshot(state) {
       && state.cancelledSettlements.every(validCancelledSettlement)))
     && validControls(state.controls)
     && (state.autoExtensionSettings === undefined || isValidAutoExtensionSettings(state.autoExtensionSettings))
+    && validTableAutoExtension(state)
     && Number.isSafeInteger(state.nextId) && state.nextId > 0
     && Number.isSafeInteger(state.nextTicket) && state.nextTicket > 0
     && state.tickets.every(validTicket)

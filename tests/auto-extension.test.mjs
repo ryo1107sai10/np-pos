@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { apply, createDemo, quote, summary } from '../docs/engine.mjs';
-import { getAutoExtensionPlans, getAutoExtensionSettings, getNextAutoExtensionAt, isValidAutoExtensionSettings } from '../docs/auto-extension.mjs';
+import { apply, createDemo, getLayoutAreas, getLayoutTables, quote, summary } from '../docs/engine.mjs';
+import { getAutoExtensionNotices, getAutoExtensionPlans, getAutoExtensionSettings, getNextAutoExtensionAt,
+  getTableAutoExtensionEnabled, getTicketAutoExtensionAt, isValidAutoExtensionSettings } from '../docs/auto-extension.mjs';
 
 const minute = 60_000;
 const base = Date.parse('2026-11-16T19:00:00+09:00');
@@ -16,6 +17,8 @@ const settings = (state,enabled,at = base,menuId = 'extend30',actor = admin) =>
   run(state,{type:'saveAutoExtensionSettings',enabled,menuId},at,actor);
 const sync = (state,at) => run(state,{type:'syncAutoExtensions',now:base + 600 * minute},at,staff);
 const automaticLines = (state,index = 0) => state.tickets[index].lines.filter(({autoExtension}) => autoExtension);
+const tableExtension = (state,tableId,enabled,at = base,actor = staff) =>
+  run(state,{type:'setTableAutoExtension',tableId,enabled},at,actor);
 
 test('default off, only the owner can change a valid auto extension plan, and no timer comes from the action payload', () => {
   const state = seat(open());
@@ -139,4 +142,69 @@ test('legacy stock recipes pause automatic billing and keep the settings and man
     assert.equal(line.stockUses[0].stockId,'beer');
     assert.equal(automaticLines(manuallyExtended).length,0);
   }
+});
+
+test('the table preference persists between visits, follows operator permissions and remains subordinate to the store setting', () => {
+  const state = open();
+  assert.equal(getTableAutoExtensionEnabled(state,'a1'),true);
+  assert.throws(() => tableExtension(state,'a1',false,base,cast),/権限/);
+  assert.throws(() => tableExtension(state,'missing',false),/見つかりません/);
+  assert.throws(() => tableExtension(state,'a1','false'),/自動延長の設定/);
+  const off = settings(seat(tableExtension(state,'a1',false)),true);
+  assert.deepEqual(off.tableAutoExtension,{a1:false});
+  assert.equal(getTableAutoExtensionEnabled(off,'a1'),false);
+  assert.equal(getNextAutoExtensionAt(off),null);
+  assert.deepEqual(getAutoExtensionNotices(off,base + 59 * minute),[]);
+  assert.deepEqual(sync(off,base + 60 * minute),off);
+
+  const ticketId = off.tickets[0].id;
+  const paid = run(off,{type:'settle',ticketId,payments:[{method:'cash',amount:quote(off,ticketId).total}]},base + 61 * minute);
+  const left = run(paid,{type:'depart',ticketId},base + 62 * minute);
+  const followingVisit = run(left,{type:'seat',tableIds:['a1'],guests:2,setId:'set60'},base + 63 * minute);
+  assert.equal(getTicketAutoExtensionAt(followingVisit,followingVisit.tickets[1]),null);
+  const masterOff = settings(followingVisit,false,base + 64 * minute);
+  const tableOn = tableExtension(masterOff,'a1',true,base + 65 * minute,manager);
+  assert.equal(getTableAutoExtensionEnabled(tableOn,'a1'),true);
+  assert.equal(getNextAutoExtensionAt(tableOn),null);
+});
+
+test('a shared ticket remains paused until all linked tables are on and reports just one notice before its deadline', () => {
+  let state = settings(open(),true);
+  state = run(state,{type:'seat',tableIds:['a1','a2'],guests:5,setId:'set60'});
+  const ticketId = state.tickets[0].id;
+  state = tableExtension(state,'a1',false,base + 30 * minute);
+  state = tableExtension(state,'a2',false,base + 31 * minute);
+  state = tableExtension(state,'a1',true,base + 75 * minute);
+  assert.equal(state.tickets[0].autoExtensionResumedAt,undefined);
+  assert.equal(getNextAutoExtensionAt(state),null);
+  const resumedAt = base + 80 * minute;
+  state = tableExtension(state,'a2',true,resumedAt);
+  assert.equal(state.tickets[0].autoExtensionResumedAt,resumedAt);
+  const deadline = resumedAt + 30 * minute;
+  assert.equal(getNextAutoExtensionAt(state),deadline);
+  assert.deepEqual(getAutoExtensionNotices(state,deadline - minute - 1),[]);
+  const expected = [{ticketId,tableIds:['a1','a2'],deadline}];
+  assert.deepEqual(getAutoExtensionNotices(state,deadline - minute),expected);
+  assert.deepEqual(getAutoExtensionNotices(state,deadline - 1),expected);
+  assert.deepEqual(getAutoExtensionNotices(state,deadline),[]);
+  assert.equal(tableExtension(state,'a2',true,resumedAt + minute).tickets[0].autoExtensionResumedAt,resumedAt);
+  assert.deepEqual(automaticLines(sync(state,deadline)).map(({createdAt}) => createdAt),[deadline]);
+});
+
+test('switching from an off table to an on table restarts overdue grace without affecting other tables', () => {
+  let state = settings(seat(open()),true);
+  const ticketId = state.tickets[0].id;
+  state = tableExtension(state,'a2',false,base + minute);
+  state = run(state,{type:'move',ticketId,tableIds:['a2']},base + 30 * minute);
+  assert.equal(getNextAutoExtensionAt(state),null);
+  const resume = base + 95 * minute;
+  state = run(state,{type:'move',ticketId,tableIds:['a3']},resume);
+  assert.equal(getAutoExtensionNotices(state,resume).length,0);
+  assert.equal(getNextAutoExtensionAt(state),resume + 30 * minute);
+  assert.equal(automaticLines(sync(state,resume + 29 * minute)).length,0);
+  assert.deepEqual(automaticLines(sync(state,resume + 30 * minute)).map(({createdAt}) => createdAt),[resume + 30 * minute]);
+
+  const tables = getLayoutTables(state).filter(({id}) => id !== 'a2');
+  const updated = run(state,{type:'saveLayout',areas:getLayoutAreas(state),tables},resume + minute);
+  assert.equal(updated.tableAutoExtension,undefined);
 });

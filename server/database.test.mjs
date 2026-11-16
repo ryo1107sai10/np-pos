@@ -564,6 +564,87 @@ test('cloud reconciles automatic extensions before a quote can be settled, once 
   assert.equal(events.find((event)=>event.action==='syncAutoExtensions').after.tickets[0].orders[0].quantity,1);
 });
 
+test('table auto-extension overrides persist and use the authoritative deadline across operators', async (t) => {
+  const db = database();
+  const tenant = await store(db);
+  await inviteMember(db, owner, tenant, helper.email, 'staff');
+  await inviteMember(db, owner, tenant, outsider.email, 'cast');
+  await Promise.all([listStores(db, helper), listStores(db, outsider)]);
+
+  const minute = 60_000;
+  let now = Date.parse('2026-11-16T20:00:00+09:00');
+  t.mock.method(Date, 'now', () => now);
+  const tableSetting = (tableId, enabled) => ({type:'setTableAutoExtension',tableId,enabled});
+  await command(db, owner, tenant, 0, 'table-auto-open-day', {type:'open',openingCash:0});
+  await command(db, owner, tenant, 1, 'table-auto-store-on',
+    {type:'saveAutoExtensionSettings',enabled:true,menuId:'extend30'});
+  await assert.rejects(command(db, outsider, tenant, 2, 'table-setting-forbidden', tableSetting('a2',false)),
+    {code:'forbidden'});
+  await assert.rejects(command(db, helper, tenant, 2, 'table-setting-invalid', tableSetting('a2','false')),
+    {code:'invalid-command'});
+  await assert.rejects(command(db, helper, tenant, 2, 'table-setting-unknown', tableSetting('missing',false)),
+    {code:'rejected-command'});
+  const seat = (tableIds) => ({type:'seat',tableIds,setId:'set60',guests:1});
+  await command(db, helper, tenant, 2, 'table-auto-linked-seat', seat(['a1','a2']));
+  const seated = await command(db, helper, tenant, 3, 'table-auto-single-seat', seat(['a3']));
+  const [linked, single] = seated.state.tickets;
+
+  now = linked.endsAt - 1;
+  const disable = tableSetting('a2',false);
+  const off = await command(db, helper, tenant, 4, 'linked-table-auto-off', disable);
+  assert.deepEqual(off.state.tableAutoExtension,{a2:false});
+  assert.equal((await command(db, helper, tenant, 4, 'linked-table-auto-off', disable)).revision,5);
+  await assert.rejects(command(db, owner, tenant, 4, 'stale-linked-table-on', tableSetting('a2',true)),
+    {code:'revision-conflict'});
+
+  now = linked.endsAt;
+  const readings = await Promise.all([readState(db, owner, tenant), readState(db, helper, tenant)]);
+  for (const view of readings) {
+    assert.equal(view.revision,6);
+    assert.deepEqual(view.state.tableAutoExtension,{a2:false});
+    assert.equal(view.state.tickets.find(({id}) => id === linked.id).endsAt,linked.endsAt);
+    assert.equal(view.state.tickets.find(({id}) => id === single.id).lines.filter(({autoExtension}) => autoExtension).length,1);
+  }
+  now += minute;
+  await command(db, owner, tenant, 6, 'single-table-auto-off', tableSetting('a3',false));
+  const on = await command(db, helper, tenant, 7, 'linked-table-auto-back-on', tableSetting('a2',true));
+  assert.deepEqual(on.state.tableAutoExtension,{a3:false});
+  assert.equal(on.state.tickets.find(({id}) => id === linked.id).autoExtensionResumedAt,now);
+  const resumedDeadline = now + 30 * minute;
+  now = resumedDeadline - 1;
+  assert.equal((await readState(db, helper, tenant)).revision,8);
+
+  now = resumedDeadline;
+  await assert.rejects(command(db, helper, tenant, 8, 'auto-off-at-exact-deadline',disable),
+    {code:'auto-extension-updated',status:409});
+  const retry = await command(db, helper, tenant, 9, 'auto-off-after-deadline',disable);
+  assert.deepEqual(retry.state.tableAutoExtension,{a3:false,a2:false});
+  assert.equal(retry.state.tickets.find(({id}) => id === linked.id).lines.filter(({autoExtension})=>autoExtension).length,1);
+  const events = (await listAudit(db, owner, tenant)).events;
+  assert.equal(events.filter((event)=>event.action==='syncAutoExtensions').length,2);
+  const toggles = events.filter((event)=>event.action==='setTableAutoExtension');
+  assert.equal(toggles.length,4);
+  assert.deepEqual(toggles[0].target,{kind:'table',id:'a2',label:retry.state.tables.find(({id})=>id==='a2').name});
+  assert.deepEqual(toggles[0].before,{enabled:true});
+  assert.deepEqual(toggles[0].after,{enabled:false});
+  assert.equal(toggles[0].actor.id,helper.uid);
+});
+
+test('browser migration validates known table auto-extension overrides and keeps an off table disabled', async () => {
+  const db = database();
+  const tenant = await store(db);
+  const original = createDemo('closed',Date.parse('2026-11-16T20:00:00+09:00'));
+  for (const override of [null, [], {a1:true}, {a1:'false'}, {missing:false}, JSON.parse('{"__proto__":false}')]) {
+    await assert.rejects(migrateState(db, owner, tenant, {operationId:'bad-table-extension',snapshot:{
+      ...original,tableAutoExtension:override,
+    }}),{code:'invalid-snapshot'});
+  }
+  const migrated = await migrateState(db, owner, tenant, {operationId:'valid-table-extension',snapshot:{
+    ...original,tableAutoExtension:{a1:false},
+  }});
+  assert.deepEqual(migrated.state.tableAutoExtension,{a1:false});
+});
+
 test('cloud honors card surcharge settings only for owners and freezes exact card receipts', async () => {
   const db = database();
   const tenant = await store(db);
