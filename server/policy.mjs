@@ -1,10 +1,11 @@
 import { exportStoreConfiguration, parseStoreConfiguration, quote, summary } from '../docs/engine.mjs';
 import { isAssignedCustomer } from '../docs/customers.mjs';
+import { getRecoveryRows, isValidCashMovement } from '../docs/cash-ledger.mjs';
 
 export const roles = new Set(['admin', 'manager', 'staff', 'cast', 'trainee']);
 const staffCommands = ['seat', 'move', 'order', 'extend', 'deposit', 'settle', 'depart', 'serve'];
 const managerCommands = [...staffCommands, 'open', 'close', 'discount', 'stockAdjust', 'cancelDeposit', 'cancelLine', 'void',
-  'saveCustomer', 'recoverReceivable'];
+  'saveCustomer', 'recoverReceivable', 'recordCashMovement'];
 const roleCommands = {
   staff: new Set(staffCommands),
   manager: new Set(managerCommands),
@@ -12,7 +13,7 @@ const roleCommands = {
     'approveDiscount', 'rejectDiscount', 'saveControls', 'cancelSettlement', 'reopenTicket',
     'mergeCustomers', 'linkCustomer', 'importCustomers']),
 };
-const reasonCommands = new Set(['discount', 'cancelSettlement', 'reopenTicket', 'cancelLine']);
+const reasonCommands = new Set(['discount', 'cancelSettlement', 'reopenTicket', 'cancelLine', 'recordCashMovement']);
 const paymentMethods = new Set(['cash', 'card', 'qr']);
 const ticketStatuses = new Set(['open', 'paid', 'departed', 'void', 'cancelled']);
 const emptyCommission = { fixed: 0, rate: 0, points: 0 };
@@ -67,6 +68,19 @@ function allSnapshotTickets(state) {
     ...(state.cancelledSettlements ?? []).map(({ receipt }) => receipt)];
 }
 
+function recoveryRowsByDate(state) {
+  const byDate = new Map();
+  for (const row of getRecoveryRows(state)) {
+    if (!byDate.has(row.date)) byDate.set(row.date, []);
+    byDate.get(row.date).push(row);
+  }
+  return byDate;
+}
+
+function snapshotCashMovements(state) {
+  return new Set([...(state.cashMovements ?? []), ...state.closedDays.flatMap((day) => day.cashMovements ?? [])]);
+}
+
 export function projectState(state, role, actorUid) {
   if (role === 'admin') return state;
   if (role !== 'manager' && role !== 'staff') return null;
@@ -81,7 +95,15 @@ export function projectState(state, role, actorUid) {
     return customer;
   });
   if (role === 'manager') {
+    const recoveriesByDate = recoveryRowsByDate(state);
     next.recoveryTotalsForDay = summary(state).recoveries;
+    next.recoveryRowsForDay = recoveriesByDate.get(state.day.date) ?? [];
+    for (const day of next.closedDays) {
+      day.recoveryRows ??= recoveriesByDate.get(day.date) ?? [];
+    }
+    for (const movement of snapshotCashMovements(next)) {
+      if (movement.actor?.id !== actorUid) delete movement.actor?.id;
+    }
     next.receivables = (next.receivables ?? []).filter((entry) => assigned.has(entry.customerId));
     for (const ticket of allSnapshotTickets(next)) {
       if (!assigned.has(ticket.customerId) && (!actorUid || ticket.seatedByUid !== actorUid)) {
@@ -98,10 +120,15 @@ export function projectState(state, role, actorUid) {
     return next;
   }
   next.closedDays = [];
+  next.day.openingCash = 0;
+  next.day.closingCash = null;
   next.movements = [];
   delete next.cancelledSettlements;
   delete next.receivables;
   delete next.recoveryTotalsForDay;
+  delete next.recoveryRowsForDay;
+  delete next.cashRecoveryRows;
+  delete next.cashMovements;
   for (const ticket of next.tickets) {
     ticket.customer = '';
     delete ticket.customerId;
@@ -232,6 +259,20 @@ function validReceivableLinks(state, receivables) {
   return matching && active.every(({ticketId}) => visitById.has(ticketId));
 }
 
+function validCashMovements(records, dates) {
+  return uniqueRecords(records) && records.every((entry) => dates.has(entry.date) && isValidCashMovement(entry));
+}
+
+function validArchivedCash(day) {
+  const totals = ['cashIn', 'cashOut', 'expenses', 'depositsApplied'];
+  const methods = ['tenderPayments', 'depositsReceived'];
+  const validTotal = (amount) => Number.isSafeInteger(amount) && amount >= 0;
+  return (day.cashMovements === undefined || validCashMovements(day.cashMovements, new Set([day.date])))
+    && totals.every((key) => day[key] === undefined || validTotal(day[key]))
+    && methods.every((key) => day[key] === undefined || (isRecord(day[key])
+      && ['cash', 'card', 'qr'].every((name) => validTotal(day[key][name]))));
+}
+
 export function validateSnapshot(state) {
   const message = 'このブラウザーの営業データを読み取れません。';
   requireCondition(isRecord(state) && isRecord(state.day) && ['open', 'closed'].includes(state.day.status)
@@ -239,6 +280,7 @@ export function validateSnapshot(state) {
     && nonnegative(state.day.openingCash)
     && ['tables', 'tickets', 'stock', 'menu', 'cast', 'movements'].every((key) => uniqueRecords(state[key]))
     && Array.isArray(state.closedDays) && state.closedDays.every((day) => isRecord(day) && typeof day.date === 'string'
+      && validArchivedCash(day)
       && (day.ticketSnapshots === undefined || (uniqueRecords(day.ticketSnapshots) && day.ticketSnapshots.every(validTicket))))
     && (state.cancelledSettlements === undefined || (uniqueRecords(state.cancelledSettlements)
       && state.cancelledSettlements.every(validCancelledSettlement)))
@@ -252,6 +294,9 @@ export function validateSnapshot(state) {
   const receivables = state.receivables ?? [];
   requireCondition(uniqueRecords(customers) && customers.every(validCustomer) && uniqueRecords(receivables),
     400, 'invalid-snapshot', message);
+  const operatingDates = new Set([state.day.date, ...state.closedDays.map(({ date }) => date)]);
+  requireCondition(state.cashMovements === undefined || validCashMovements(state.cashMovements, operatingDates),
+    400, 'invalid-snapshot', message);
   const customerIds = new Set(customers.map(({ id }) => id));
   requireCondition(receivables.every((entry) => validReceivable(entry, customerIds))
     && validReceivableLinks(state, receivables)
@@ -261,13 +306,24 @@ export function validateSnapshot(state) {
   try {
     parseStoreConfiguration(JSON.stringify(exportStoreConfiguration(state)));
     for (const ticket of state.tickets) quote(state, ticket.id);
-    summary(state);
+    summary({ ...state, recoveryTotalsForDay: undefined, recoveryRowsForDay: undefined });
   } catch {
     throw new ApiError(400, 'invalid-snapshot', message);
   }
   const migrated = structuredClone(state);
   delete migrated.auditLog;
   delete migrated.recoveryTotalsForDay;
+  delete migrated.recoveryRowsForDay;
+  delete migrated.cashRecoveryRows;
+  const recoveriesByDate = recoveryRowsByDate(migrated);
+  for (const day of migrated.closedDays) {
+    if (day.recoveryRows !== undefined) day.recoveryRows = recoveriesByDate.get(day.date) ?? [];
+  }
+  for (const movement of snapshotCashMovements(migrated)) {
+    const { label, role } = movement.actor;
+    const source = 'ブラウザー移行 · ';
+    movement.actor = { id: 'imported-browser', label: (label.startsWith(source) ? label : source + label).slice(0, 320), role };
+  }
   for (const customer of migrated.customers ?? []) delete customer.createdByUid;
   for (const ticket of allSnapshotTickets(migrated)) {
     delete ticket.seatedByUid;

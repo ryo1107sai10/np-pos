@@ -28,3 +28,18 @@
   .ops-modal .field textarea, .modal .field textarea[name=reason] { font-size: 16px; }
   .ops-modal .modal-foot .btn { min-height: 44px; }
 }
+
+.cash-close-breakdown { margin: 0; padding: 0; display: grid; gap: 1px; }
+.cash-close-breakdown > div {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  padding: 7px 2px;
+  border-bottom: 1px solid #e7e9f4;
+  color: #46567a;
+  font-size: 13px;
+}
+.cash-close-breakdown dd { margin: 0; white-space: nowrap; font-weight: 650; font-variant-numeric: tabular-nums; }
+.cash-dialog .field-help { margin: 0; }
+.cash-dialog .result-bar { padding-inline: 11px; }

@@ -1,5 +1,6 @@
 import { getStoreSettings } from './store-settings.mjs';
 import { getReceivableBalance } from './receivables.mjs';
+import { cashMovementCategories, cashMovementKinds } from './cash-ledger.mjs';
 
 const ticketActions = new Set([
   'discount', 'approveDiscount', 'rejectDiscount', 'settle', 'cancelSettlement', 'reopenTicket',
@@ -200,6 +201,23 @@ export function buildOperationAudit(before, after, action, at, actor) {
         reason: 'マネージャーの値引き上限を更新',
       };
     }
+  } else if (action.type === 'recordCashMovement') {
+    const { id, kind, category, amount, reason, destination } = after.cashMovements.at(-1);
+    const label = cashMovementKinds[kind];
+    details = {
+      target: target('cashMovement', id, label),
+      before: null,
+      after: { kind: label, category: cashMovementCategories[kind][category], amount, destination },
+      reason,
+    };
+  } else if (action.type === 'close') {
+    const { date, expectedCash, actualCash, discrepancy, reason } = after.closedDays[0];
+    details = {
+      target: target('day', date, date),
+      before: null,
+      after: { expectedCash, actualCash, discrepancy },
+      reason,
+    };
   } else if (action.type === 'recoverReceivable') {
     const previous = before.receivables.find(({ id }) => id === action.receivableId);
     const current = after.receivables.find(({ id }) => id === action.receivableId);

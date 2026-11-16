@@ -3,7 +3,7 @@ const timestamp = new Intl.DateTimeFormat('ja-JP', {
   hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
 });
 const japaneseNumber = new Intl.NumberFormat('ja-JP', { maximumFractionDigits: 6 });
-const moneyFields = new Set(['amount', 'total', 'subtotal', 'discount', 'price', 'value', 'cost', 'balance', 'creditLimit', 'balanceBefore']);
+const moneyFields = new Set(['amount', 'total', 'subtotal', 'discount', 'price', 'value', 'cost', 'balance', 'creditLimit', 'balanceBefore', 'expectedCash', 'actualCash', 'discrepancy']);
 const roles = { admin: '店舗管理者', manager: 'マネージャー', staff: 'スタッフ' };
 
 const auditLabels = {
@@ -13,6 +13,7 @@ const auditLabels = {
   saveStoreSettings: '店舗設定の変更', saveLayout: '卓レイアウトの変更', importStoreConfiguration: '店舗設定の読み込み',
   saveCustomer: '顧客情報の登録・変更', mergeCustomers: '顧客の統合', linkCustomer: '来店と顧客の関連づけ',
   importCustomers: '顧客の一括登録', recoverReceivable: '売掛の回収',
+  recordCashMovement: '入出金の記録', close: '閉店・レジ締め',
   importLayout: '卓レイアウトの読み込み', saveControls: '運用設定の変更', migrate: '営業データの移行',
 };
 
@@ -23,6 +24,8 @@ const valueLabels = {
   menu: 'メニュー・プラン', cast: 'キャスト', stock: '在庫品目', tables: '卓', areas: 'エリア', tableIds: '使用卓',
   balance: '売掛残高', creditLimit: '売掛上限', balanceBefore: '計上前の残高', dueDate: '支払期日',
   creditOverride: '上限超過の承認', collection: '回収', changedFields: '変更項目', creditEnabled: '売掛利用',
+  kind: '種類', category: '理由区分', destination: '相手先・移動先',
+  expectedCash: 'レジ理論残高', actualCash: 'レジ実残高', discrepancy: 'レジ差額',
   method: '決済方法', reason: '理由', points: 'ポイント', cost: '原価', value: '評価額',
   request: '承認申請', approved: '承認', rejected: '却下', pending: '承認待ち', paid: '会計済み',
   cancelled: '取消済み', departed: '退店済み', open: '利用中', cash: '現金', card: 'カード', qr: 'QR決済', bank: '振込', receivable: '売掛',

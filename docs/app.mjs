@@ -10,7 +10,8 @@ import { createCloudClient } from './cloud-client.mjs';
 import { renderCloudBanner, renderCloudEntry, renderCloudMigration, renderCloudPanel, renderCloudRestricted } from './cloud-ui.mjs';
 import { findCustomer, getCustomerDetail, isAssignedCustomer, parseCustomersCsv } from './customers.mjs';
 import { getCustomerReceivableBalance } from './receivables.mjs';
-import { createPhaseTwoDemo } from './phase-two-demo.mjs';
+import { cashMovementCategories, cashMovementKinds } from './cash-ledger.mjs';
+import { createCashDemo, createPhaseTwoDemo } from './phase-two-demo.mjs';
 import * as customerUI from './customer-ui.mjs';
 import { operationReason, renderAuditLog, renderDiscountForm } from './operations-ui.mjs';
 
@@ -25,7 +26,8 @@ const pages = {
   floor: { title: 'ホール', icon: 'grid', help: '席を選んで、来店・注文・延長・会計を操作できます。' },
   commission: { title: '歩合・成績', icon: 'users', help: 'キャストごとの歩合を、確定額と見込額で確認できます。' },
   stock: { title: '在庫', icon: 'box', help: 'メニューの注文に連動した在庫と、品目の増減履歴。' },
-  reports: { title: '営業レポート', icon: 'chart', help: '営業日ごとの売上、支払い、レジ締めを確認できます。' },
+  reports: { title: '日報', icon: 'chart', help: '営業日ごとの売上、入出金、レジ締めを確認できます。' },
+  cash: { title: '入出金管理', icon: 'cash', help: '営業中に出し入れした現金と売掛の回収を確認できます。' },
   customers: { title: '顧客管理', icon: 'users', help: '登録情報、来店・指名履歴、顧客ごとの売掛を確認できます。' },
   receivables: { title: '売掛管理', icon: 'wallet', help: '支払期日と残高を確認し、回収を記録できます。' },
 };
@@ -41,7 +43,7 @@ const number = new Intl.NumberFormat('ja-JP', { maximumFractionDigits: 6 });
 const ownerActions = new Set(['store-settings', 'stock-settings', 'edit-layout', 'layout-transfer', 'layout-export',
   'discount-review', 'discount-reject', 'cancel-settlement', 'reopen-ticket', 'audit-log', 'audit-more', 'ops-settings', 'customer-merge', 'customer-link', 'customer-import']);
 const managerActions = new Set(['open', 'close', 'stock-adjust', 'discount', 'cancel-line', 'cancel-deposit', 'customer-detail', 'customer-new', 'customer-edit', 'customer-visit',
-  'receivable-detail', 'receivable-recover']);
+  'receivable-detail', 'receivable-recover', 'record-cash']);
 const cloudLabels = { admin: '店舗管理者', manager: 'マネージャー', staff: 'スタッフ', cast: 'キャスト', trainee: '体入' };
 
 let cloudState;
@@ -176,7 +178,7 @@ function permittedAction(action) {
   const store = cloudState.store;
   if (store && (!cloudState.state || !store.hasState)) return action === 'dismiss' || action.startsWith('cloud-');
   const role = currentRole();
-  if (store && ['demo', 'demo-start', 'demo-live', 'demo-role'].includes(action)) return false;
+  if (store && ['demo', 'demo-start', 'demo-live', 'demo-cash', 'demo-role'].includes(action)) return false;
   if (ownerActions.has(action) || action.startsWith('store-editor-') || action.startsWith('layout-editor-')) return role === 'admin';
   if (managerActions.has(action)) return role === 'admin' || role === 'manager';
   return true;
@@ -220,7 +222,7 @@ function renderSide() {
     <div class="brand" aria-label="NP POS"><img src="np-pos.svg" alt="" width="38" height="38"><span class="brand-word">NP <small>POS</small></span></div>
     <div class="store"><span class="store-icon">${icon('store', 16)}</span><span class="store-name">${escape(workspaceName)}<small>${store ? 'クラウド店舗' : 'デモ店舗'}</small></span></div>
     <nav class="side-nav" aria-label="メインメニュー">
-      ${(!store || (store.hasState && cloudState.state)) ? Object.entries(pages).filter(([key]) => canOpenPage(key) && !['customers','receivables'].includes(key)).map(([key, value]) => `<button type="button" class="nav-link" data-action="navigate" data-id="${key}" ${page === key ? 'aria-current="page"' : ''}>${icon(value.icon, 18)}<span>${value.title}</span></button>`).join('') : ''}
+      ${(!store || (store.hasState && cloudState.state)) ? Object.entries(pages).filter(([key]) => canOpenPage(key) && !['customers','receivables','cash'].includes(key)).map(([key, value]) => `<button type="button" class="nav-link" data-action="navigate" data-id="${key}" ${page === key ? 'aria-current="page"' : ''}>${icon(value.icon, 18)}<span>${value.title}</span></button>`).join('') : ''}
     </nav>
     <div class="side-bottom">
       ${store ? '' : `<button type="button" class="demo-button" data-action="demo" aria-label="サンプル操作" title="サンプル操作">${icon('refresh', 16)}<span>サンプル操作</span>${icon('chevron-right', 14)}</button>`}
@@ -231,10 +233,12 @@ function renderSide() {
 
 function renderTop() {
   const isOpen = state.day.status === 'open';
+  const activeReport = ['cash','reports'].includes(page) && (!reportDate || reportDate === state.day.date);
   const date = prettyDate.format(new Date(`${state.day.date}T12:00:00+09:00`));
   return `<div class="workspace-top"><div class="open-meta"><span class="workspace-store">${icon('store',15)}<span class="store-label">${escape(cloudState.store?.name ?? '銀座店')}</span><span class="mobile-wordmark"><img src="np-pos.svg" width="20" height="20" alt="">NP POS</span></span><span class="meta-sep"></span>${icon('calendar',16)}<span>${date} 営業日</span></div><div class="workspace-time"><span class="live ${isOpen ? '' : 'closed'}"><span class="dot"></span>${isOpen ? '営業中' : '営業時間外'}</span><span class="meta-sep"></span><time id="workspace-time">${dateTime.format(Date.now())}</time><span>JST</span></div></div>
     <header class="page-head"><div><h1>${pages[page].title}</h1><p>${pages[page].help}</p></div><div class="actions">
     ${page === 'floor' ? (isOpen ? button('閉店処理','close',{ glyph: 'checkout' }) + button('来店登録','seat',{ glyph: 'plus', tone: 'primary', disabled: state.tables.length === 0 }) : button('開店する','open',{ glyph: 'power', tone: 'primary' })) : ''}
+    ${isOpen && activeReport ? button('閉店処理','close',{glyph:'checkout'}) : ''}
     ${page === 'stock' ? button('品目設定', 'stock-settings', { glyph: 'settings' }) : ''}${renderCloudEntry(cloudModel(), {escape, icon})}</div></header>`;
 }
 
@@ -387,9 +391,9 @@ function customerWorkspaceState() {
   return {...state,customers};
 }
 
-function renderCustomerNav() {
-  if (!canOpenPage('customers') || !['floor','reports','customers','receivables'].includes(page)) return '';
-  return `<nav class="ops-tools customer-workspace-nav" aria-label="顧客と売掛">${['customers','receivables'].map((key) =>
+function renderOperationsNav() {
+  if (!canOpenPage('customers') || !['floor','reports','cash','customers','receivables'].includes(page)) return '';
+  return `<nav class="ops-tools customer-workspace-nav" aria-label="営業管理">${['cash','customers','receivables'].map((key) =>
     button(pages[key].title, 'navigate', {id:key, glyph:pages[key].icon, tone:page === key ? 'secondary' : '',
       data:page === key ? 'aria-current="page"' : ''})).join('')}</nav>`;
 }
@@ -416,7 +420,7 @@ function render({ preserveFocus = false } = {}) {
     else if (page === 'customers') view = customerUI.renderCustomers(customerWorkspaceState(),{...customerUIApi(),query:customersQuery});
     else if (page === 'receivables') view = customerUI.renderReceivables(customerWorkspaceState(),{...customerUIApi(),query:receivableQuery,filter:receivableFilter});
     else view = renderReport(page,state,{yen,summary,quote,escape,icon,showHiddenStock,reportDate,commissionCast});
-    content = renderTop() + banner + tools + renderCustomerNav() + view;
+    content = renderTop() + banner + tools + renderOperationsNav() + view;
   }
   app.innerHTML = `<div class="shell">${renderSide()}<main class="workspace" id="workspace" tabindex="-1">${content}</main></div>`;
   document.title = `NP POS | ${pages[page].title}`;
@@ -883,7 +887,7 @@ function paintDialog(layoutFileInput) {
         ${label('マネージャーの値引き上限（%）',`<input name="managerDiscountLimit" type="number" min="0" max="100" step="0.01" inputmode="decimal" value="${getManagerDiscountLimit(state) / 100}" required>`)}`,'運用設定を保存',{style:'ops-modal'});
       return;
     case 'demo':
-      present('サンプル操作',`<p class="form-copy">開店から試すと、現在の卓配置と店舗設定で営業をやり直せます。営業中のサンプルを読み込むと、店舗設定・卓配置・操作履歴がサンプルの初期状態に戻ります。</p><div class="demo-options">${button('開店から試す','demo-start',{glyph:'power',tone:'primary'})}${button('営業中のサンプルを読み込む','demo-live',{glyph:'refresh'})}</div>
+      present('サンプル操作',`<p class="form-copy">開店から試すと、現在の卓配置と店舗設定で営業をやり直せます。ほかのサンプルを選ぶと、店舗設定・卓配置・操作履歴がサンプルの初期状態に戻ります。</p><div class="demo-options">${button('開店から試す','demo-start',{glyph:'power',tone:'primary'})}${button('営業中のサンプルを読み込む','demo-live',{glyph:'refresh'})}${button('入出金と日報を試す','demo-cash',{glyph:'cash'})}</div>
         <section aria-labelledby="demo-role-label"><h3 id="demo-role-label">デモの権限</h3><p class="form-copy">現在の権限は${cloudLabels[demoRole]}です。同じ伝票のまま役割を切り替えて確認できます。</p><div class="ops-actions">${['admin','manager','staff'].map((role) =>
           button(`${cloudLabels[role]}で試す`,'demo-role',{id:role,tone:role===demoRole?'primary':'secondary'})).join('')}</div></section>`,null,{style:'ops-modal'});
       return;
@@ -997,9 +1001,14 @@ function paintDialog(layoutFileInput) {
         present('閉店処理',`<p class="form-copy">会計または退店が完了していない伝票があります。卓を開いて処理を完了してください。</p><ul class="outstanding">${outstanding.map((row)=>`<li>${button(`${escape(titles(row))} · ${row.status==='paid'?'退店待ち':'未会計'}`,'open-ticket',{glyph:'chevron-right',id:row.id,cls:'btn-block'})}</li>`).join('')}</ul>`,null);
         return;
       }
-      present('閉店処理',`<div class="result-bar"><span>理論レジ残高</span><strong>${yen(totals.expectedCash)}</strong></div><div class="form-grid">${label('実際のレジ残高（円）',`<input name="actualCash" type="number" min="0" step="1" required value="${totals.expectedCash}">`)}${label('差額の理由','<input name="reason" maxlength="120" placeholder="差額がある場合に入力">')}</div><p class="form-copy">閉店すると、この営業日の売上と現金差額が営業レポートに保存されます。</p>`,'閉店を確定');
+      modal.expectedCash = totals.expectedCash;
+      present('閉店処理',renderRegisterClose(totals),'閉店を確定',{style:'ops-modal cash-dialog'});
       return;
     }
+    case 'record-cash':
+      if (state.day.status !== 'open') { present('入出金を記録','<p class="form-copy">開店後に入出金を記録できます。</p>',null); return; }
+      present('入出金を記録',renderCashMovementForm(),'入出金を保存',{style:'ops-modal cash-dialog'});
+      return;
     case 'stock-adjust': {
       const stock = state.stock.find((item)=>item.id===modal.stockId);
       const cost = number.format(stock.defaultUnitCost ?? stock.unitCost);
@@ -1007,6 +1016,49 @@ function paintDialog(layoutFileInput) {
       return;
     }
   }
+}
+
+function cashCategoryOptions(kind) {
+  return Object.entries(cashMovementCategories[kind] ?? {}).map(([value,text]) =>
+    `<option value="${value}">${text}</option>`).join('');
+}
+
+function renderCashMovementForm() {
+  const kinds = Object.entries(cashMovementKinds).map(([value,text]) =>
+    `<option value="${value}"${value === 'expense' ? ' selected' : ''}>${text}</option>`).join('');
+  return `<div class="modal-context">${icon('calendar',16)}<strong>${escape(state.day.date)}</strong><span>営業日</span></div>
+    <div class="form-grid">
+    ${label('入出金の種類',`<select name="cashKind">${kinds}</select>`)}
+    ${label('理由区分',`<select name="cashCategory">${cashCategoryOptions('expense')}</select>`)}
+    ${label('金額（円）','<input name="cashAmount" type="number" min="1" max="100000000" step="1" inputmode="numeric" required>')}
+    ${label('相手先・移動先（任意）','<input name="cashDestination" type="text" maxlength="80" placeholder="例　金庫、仕入先">')}
+    </div>${operationReason({title:'具体的な理由'})}
+    <p class="field-help">レジで実際に出し入れした現金を記録します。売掛回収は売掛管理から登録すると、自動で日報に反映されます。</p>`;
+}
+
+function renderRegisterClose(totals) {
+  const rows = [
+    ['釣銭準備金',state.day.openingCash], ['会計・前受金の現金入金',totals.payments.cash],
+    ['売掛の現金回収',totals.recoveries.cash], ['その他の現金入金',totals.cashIn],
+    ['出金・経費',-totals.cashOut],
+  ];
+  return `<dl class="cash-close-breakdown">${rows.map(([name,amount]) => `<div><dt>${name}</dt><dd>${yen(amount)}</dd></div>`).join('')}</dl>
+    <div class="result-bar"><span>レジの理論残高</span><strong>${yen(totals.expectedCash)}</strong></div>
+    ${label('実際のレジ残高（円）','<input name="actualCash" type="number" min="0" max="100000000" step="1" required inputmode="numeric" placeholder="数えた現金を入力">')}
+    <div id="cash-close-difference" class="result-bar" role="status"><span>差額（実残高 − 理論残高）</span><strong>—</strong></div>
+    ${operationReason({title:'差額の理由（差額がある場合は必須）',required:false})}
+    <p class="field-help">閉店を確定すると、内訳と差額が営業日の日報に保存されます。</p>`;
+}
+
+function updateCashCloseDifference(input) {
+  const row = dialog.querySelector('#cash-close-difference');
+  if (!row) return;
+  const actual = input.valueAsNumber;
+  const difference = actual - modal.expectedCash;
+  const valid = input.validity.valid && Number.isFinite(difference);
+  row.querySelector('strong').textContent = valid ? `${difference > 0 ? '+' : ''}${yen(difference)}` : '—';
+  row.classList.toggle('result-warn',valid && difference !== 0);
+  dialog.querySelector('[name=reason]').required = valid && difference !== 0;
 }
 
 function renderProducts() {
@@ -1247,10 +1299,12 @@ function clickAction(target) {
     if (matchMedia('(max-width: 1050px)').matches) app.querySelector('.detail-mobile-close')?.focus();
     return;
   }
-  if (['demo','open','seat','close'].includes(action)) {openDialog(action); return;}
-  if (action === 'demo-start' || action === 'demo-live') {
+  if (['demo','open','seat','close','record-cash'].includes(action)) {openDialog(action); return;}
+  if (['demo-start','demo-live','demo-cash'].includes(action)) {
     const fromOpening = action === 'demo-start';
-    let sample = createPhaseTwoDemo(fromOpening ? 'closed' : 'live');
+    const cashSample = action === 'demo-cash';
+    let sample = cashSample ? createCashDemo() : createPhaseTwoDemo(fromOpening ? 'closed' : 'live');
+    if (cashSample) demoRole = 'admin';
     if (fromOpening) {
       sample.tables = structuredClone(state.tables);
       sample.layoutAreas = getLayoutAreas(state);
@@ -1261,13 +1315,13 @@ function clickAction(target) {
       sample = apply(sample, { type: 'saveStoreSettings', settings: getStoreSettings(state) });
     }
     saveState(sample);
-    selected = fromOpening ? null : 'a1';
+    selected = fromOpening || cashSample ? null : 'a1';
     area=null; filter='all'; showHiddenStock=false; mobileDetails=false;
     reportDate = ''; commissionCast = ''; customersQuery = ''; receivableQuery = ''; receivableFilter = 'all';
     if (!fromOpening) setFloorView('list', getLayoutAreas(state)[0]);
-    go('floor');
-    if (action==='demo-start') openDialog('open');
-    else { dialog.close(); toast('営業中のサンプルを読み込みました。'); }
+    go(cashSample ? 'cash' : 'floor');
+    if (fromOpening) openDialog('open');
+    else { dialog.close(); toast(cashSample ? '入出金と日報のサンプルを読み込みました。' : '営業中のサンプルを読み込みました。'); }
     return;
   }
   if (action==='category') {
@@ -1448,8 +1502,13 @@ function submitDialog(form) {
     case 'cancel-line':
       commit({type:'cancelLine',ticketId:id,lineId:modal.lineId,returnStock:data.has('returnStock'),reason:value('reason')},'注文を取り消しました。');
       break;
+    case 'record-cash':
+      commit({type:'recordCashMovement',kind:value('cashKind'),category:value('cashCategory'),
+        amount:numeric('cashAmount'),destination:value('cashDestination'),reason:value('reason')},
+        '入出金を記録し、レジの理論残高を更新しました。');
+      break;
     case 'close':
-      commit({type:'close',actualCash:numeric('actualCash'),reason:value('reason')},'閉店しました。営業レポートに締めを保存しました。',()=>{
+      commit({type:'close',actualCash:numeric('actualCash'),reason:value('reason')},'閉店しました。締め結果を日報に保存しました。',()=>{
         selected = null; mobileDetails = false; reportDate = ''; commissionCast = '';
         page = 'reports'; history.replaceState(null, '', '#reports');
       });
@@ -1495,6 +1554,7 @@ app.addEventListener('change',(event)=> {
   }
 });
 dialog.addEventListener('change', (event) => {
+  if (event.target.name === 'cashKind') dialog.querySelector('[name=cashCategory]').innerHTML = cashCategoryOptions(event.target.value);
   if (event.target.name === 'paymentMethod') updatePaymentNote();
   if (event.target.name === 'customerId' && modal?.type === 'seat') {
     modal.seatCustomerId = event.target.value;
@@ -1523,6 +1583,7 @@ dialog.addEventListener('input',(event)=> {
   updateSeatCustomerSearch(event);
   if (event.target.id==='menu-search') {modal.search=event.target.value;reviseProduct();}
   if (event.target.name==='paymentAmount') updatePaymentNote();
+  if (event.target.name==='actualCash') updateCashCloseDifference(event.target);
   for (const error of dialog.querySelectorAll('.form-error')) error.hidden = true;
 });
 dialog.addEventListener('submit',(event)=> {

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
-import { createDemo, quote, summary } from '../docs/engine.mjs';
+import { apply, createDemo, quote, summary } from '../docs/engine.mjs';
 import worker from './index.mjs';
 import {
   applyCommand, changeMember, createStore, inviteMember, listAudit, listMembers, listStores, migrateState, readState, revokeInvite,
@@ -302,4 +302,98 @@ test('server reversals and reopen are atomic, auditable, and retain the original
   assert.equal(events[0].action, 'reopenTicket');
   assert.equal(events.filter((event) => event.action === 'cancelSettlement').length, 1);
   assert.equal(events.find((event) => event.action === 'cancelSettlement').before.total, total);
+});
+
+test('cash records reconcile with AR recoveries once, persist in a closed day, and respect cloud roles', async () => {
+  const db = database();
+  const tenant = await store(db);
+  await inviteMember(db, owner, tenant, helper.email, 'manager');
+  await inviteMember(db, owner, tenant, outsider.email, 'staff');
+  await listStores(db, helper);
+  await listStores(db, outsider);
+  const opened = await command(db, owner, tenant, 0, 'cash-test-opening01', { type: 'open', openingCash: 10_000 });
+  const date = opened.state.day.date;
+  const deposit = { type: 'recordCashMovement', kind: 'deposit', amount: 1_500, category: 'float', reason: '釣銭を補充' };
+  await assert.rejects(command(db, outsider, tenant, 1, 'cash-test-staff0001', deposit), { code: 'forbidden' });
+  await assert.rejects(command(db, helper, tenant, 1, 'cash-test-invalid01', { ...deposit, reason: '  ' }), { code: 'reason-required' });
+  const deposited = await command(db, helper, tenant, 1, 'cash-test-deposit01', deposit);
+  const repeated = await command(db, helper, tenant, 1, 'cash-test-deposit01', deposit);
+  assert.equal(deposited.state.cashMovements.length, 1);
+  assert.deepEqual(repeated, deposited);
+  await assert.rejects(command(db, owner, tenant, 1, 'cash-test-stale0001', deposit), { code: 'revision-conflict' });
+
+  const expense = { type: 'recordCashMovement', kind: 'expense', amount: 2_000, category: 'purchase', reason: '当日商品の仕入れ', destination: '仕入先' };
+  await command(db, owner, tenant, 2, 'cash-test-expense01', expense);
+  const customer = await command(db, owner, tenant, 3, 'cash-test-customer1', {
+    type: 'saveCustomer', customer: { name: '顧客情報は非共有', creditEnabled: true, creditLimit: 10_000 },
+  });
+  const { id: customerId } = customer.state.customers[0];
+  const visit = await command(db, owner, tenant, 4, 'cash-test-seating01', { type: 'seat', tableIds: ['a1'], setId: 'set60', guests: 1, customerId });
+  const { id: ticketId } = visit.state.tickets[0];
+  const settled = await command(db, owner, tenant, 5, 'cash-test-settle001', { type: 'settle', ticketId, creditDueDate: date,
+    payments: [{ method: 'receivable', amount: 6_600 }] });
+  const { id: receivableId } = settled.state.receivables[0];
+  await command(db, owner, tenant, 6, 'cash-test-depart001', { type: 'depart', ticketId });
+  await command(db, owner, tenant, 7, 'cash-test-recover01', { type: 'recoverReceivable', receivableId, date, method: 'cash', amount: 1_000 });
+
+  const manager = (await readState(db, helper, tenant, null)).state;
+  assert.equal(manager.cashMovements[0].actor.id, helper.uid);
+  assert.equal(manager.cashMovements[1].actor.id, undefined);
+  assert.equal(manager.cashMovements[1].actor.label, owner.email);
+  assert.deepEqual(manager.receivables, []);
+  assert.equal(manager.recoveryRowsForDay.length, 1);
+  assert.deepEqual(Object.keys(manager.recoveryRowsForDay[0]), ['id', 'date', 'at', 'amount', 'method']);
+  assert.deepEqual(summary(manager).recoveries, { cash: 1_000, card: 0, bank: 0 });
+  assert.equal(summary(manager).expectedCash, 10_500);
+
+  await assert.rejects(command(db, helper, tenant, 8, 'cash-test-counting1', { type: 'close', actualCash: 10_480 }), { code: 'rejected-command' });
+  const closed = await command(db, helper, tenant, 8, 'cash-test-counting2', { type: 'close', actualCash: 10_480, reason: 'レジ再集計で現金不足' });
+  const report = closed.state.closedDays[0];
+  assert.equal(report.expectedCash, 10_500);
+  assert.equal(report.actualCash, 10_480);
+  assert.equal(report.discrepancy, -20);
+  assert.equal(report.sales, 6_600);
+  assert.equal(report.cashMovements.length, 2);
+  assert.equal(report.recoveryRows[0].amount, 1_000);
+  const staff = (await readState(db, outsider, tenant, null)).state;
+  assert.equal(staff.cashMovements, undefined);
+  assert.equal(staff.recoveryRowsForDay, undefined);
+  assert.equal(staff.day.openingCash, 0);
+  assert.equal(staff.day.closingCash, null);
+  assert.deepEqual(staff.closedDays, []);
+  await assert.rejects(command(db, helper, tenant, 9, 'cash-test-nowclosed', expense), { code: 'rejected-command' });
+
+  const [{ after, reason, actor, action }, ...events] = (await listAudit(db, owner, tenant)).events;
+  assert.deepEqual({ after, reason, actor, action }, { after: { expectedCash: 10_500, actualCash: 10_480, discrepancy: -20 },
+    reason: 'レジ再集計で現金不足', actor: { id: helper.uid, label: helper.email, role: 'manager' }, action: 'close' });
+  const records = events.filter(({ action }) => action === 'recordCashMovement');
+  assert.equal(records.length, 2);
+  assert.equal(records[0].after.category, '仕入れ');
+  assert.equal(records[0].after.destination, '仕入先');
+  assert.equal(records[1].reason, '釣銭を補充');
+});
+
+test('browser cash migration keeps archival movement detail with verified import provenance and removes projected recoveries', async () => {
+  const db = database();
+  const tenant = await store(db);
+  let browser = apply(createDemo('closed'), { type: 'open', openingCash: 10_000 });
+  browser = apply(browser, { type: 'recordCashMovement', kind: 'withdrawal', amount: 1_000, category: 'safe', reason: '現金を金庫へ' },
+    Date.now(), { id: owner.uid, label: owner.email, role: 'admin' });
+  browser = apply(browser, { type: 'close', actualCash: 9_000 });
+  browser.recoveryTotalsForDay = { cash: 100_000 };
+  browser.recoveryRowsForDay = [{ amount: 100_000, customerId: 'bogus' }];
+  browser.cashRecoveryRows = [{ amount: 100_000, customerId: 'bogus' }];
+  browser.closedDays[0].recoveryRows = [{ amount: 100_000, customerId: 'bogus' }];
+  const invalid = structuredClone(browser);
+  invalid.cashMovements[0].category = 'transport';
+  await assert.rejects(migrateState(db, owner, tenant, { operationId: 'cash-migrate-invalid', snapshot: invalid }), { code: 'invalid-snapshot' });
+  const result = (await migrateState(db, owner, tenant, { operationId: 'cash-migrate-valid01', snapshot: browser })).state;
+  assert.equal(result.cashMovements[0].actor.id, 'imported-browser');
+  assert.match(result.cashMovements[0].actor.label, /^ブラウザー移行/);
+  assert.deepEqual(result.closedDays[0].cashMovements, result.cashMovements);
+  assert.deepEqual(result.closedDays[0].recoveryRows, []);
+  assert.equal(result.recoveryRowsForDay, undefined);
+  assert.equal(result.recoveryTotalsForDay, undefined);
+  assert.equal(result.cashRecoveryRows, undefined);
+  assert.equal(result.closedDays[0].expectedCash, 9_000);
 });

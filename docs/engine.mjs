@@ -3,6 +3,7 @@ import { buildOperationAudit } from './operational-audit.mjs';
 import { applyCustomerCommand, customerForSeat, findCustomer, isAssignedCustomer } from './customers.mjs';
 import { getCustomerReceivableBalance, getReceivableBalance, getReceivableRecoveryTotals,
   receivableCollectionMethods } from './receivables.mjs';
+import { createCashMovement, getCashMovements, getDailyRecoveryRows, totalCashMovements } from './cash-ledger.mjs';
 
 const movementScale = 1_000_000;
 const pointsScale = 1_000;
@@ -454,13 +455,16 @@ function doClose(state, action, now) {
   const actualCash = money(action.actualCash, '実残高');
   const totals = summary(state);
   const discrepancy = actualCash - totals.expectedCash;
-  const reason = String(action.reason ?? '').trim().slice(0, 120);
-  assert(!discrepancy || reason.length > 0, 'レジ差額の理由を入力してください。');
+  const reason = discrepancy ? operationalReason(action.reason, 'レジ差額の理由')
+    : (typeof action.reason === 'string' ? action.reason.trim().slice(0, 120) : '');
   state.day = { ...state.day, status: 'closed', closedAt: now, closingCash: actualCash };
   state.closedDays.unshift({ date: state.day.date, openedAt: state.day.openedAt, closedAt: now,
     openingCash: state.day.openingCash, actualCash, expectedCash: totals.expectedCash, discrepancy, reason,
     sales: totals.sales, guests: totals.guests, tickets: totals.tickets, commission: totals.commission, payments: totals.payments,
-    receivableSales: totals.receivableSales, recoveries: totals.recoveries, ticketSnapshots: snapshotClosedTickets(state) });
+    receivableSales: totals.receivableSales, recoveries: totals.recoveries, recoveryRows: structuredClone(totals.recoveryRows),
+    tenderPayments: totals.tenderPayments, depositsReceived: totals.depositsReceived, depositsApplied: totals.depositsApplied,
+    cashIn: totals.cashIn, cashOut: totals.cashOut, expenses: totals.expenses, cashMovements: structuredClone(totals.cashMovements),
+    ticketSnapshots: snapshotClosedTickets(state) });
 }
 
 function castNamesById(state) {
@@ -814,6 +818,11 @@ function reduce(state, action, now, actor) {
     doStockAdjust(next, action, now);
     return next;
   }
+  if (action.type === 'recordCashMovement') {
+    const movement = createCashMovement(next, action, now, actor, () => createId(next, 'cash'));
+    (next.cashMovements ??= []).push(movement);
+    return next;
+  }
   if (action.type === 'recoverReceivable') {
     recoverReceivable(next, action, now, actor);
     return next;
@@ -956,11 +965,16 @@ function reduce(state, action, now, actor) {
 }
 
 export function summary(state) {
-  const payments = { cash: 0, card: 0, qr: 0 };
+  const tenderPayments = { cash: 0, card: 0, qr: 0 };
+  const depositsReceived = { ...tenderPayments };
   const recoveries = state.recoveryTotalsForDay ?? getReceivableRecoveryTotals(state, state.day.date);
+  const recoveryRows = state.recoveryRowsForDay ?? getDailyRecoveryRows(state, state.day.date);
+  const cashMovements = getCashMovements(state, state.day.date);
+  const cashTotals = totalCashMovements(cashMovements);
   const earned = new Map();
   const pending = new Map();
   let sales = 0;
+  let depositsApplied = 0;
   let receivableSales = 0;
   let guests = 0;
   let tickets = 0;
@@ -970,8 +984,11 @@ export function summary(state) {
   for (const ticket of state.tickets) {
     if (ticket.status === 'void' || ticket.status === 'cancelled') continue;
     if (occupiedStatuses.has(ticket.status)) occupied += ticket.tableIds.length;
-    for (const payment of [...ticket.deposits, ...ticket.payments]) {
-      if (Object.hasOwn(payments, payment.method)) payments[payment.method] += payment.amount;
+    for (const payment of ticket.deposits) {
+      if (Object.hasOwn(depositsReceived, payment.method)) depositsReceived[payment.method] += payment.amount;
+    }
+    for (const payment of ticket.payments) {
+      if (Object.hasOwn(tenderPayments, payment.method)) tenderPayments[payment.method] += payment.amount;
     }
     const totals = quote(state, ticket.id);
     if (ticket.status === 'open') {
@@ -986,13 +1003,16 @@ export function summary(state) {
       tickets++;
       guests += ticket.guests;
       sales += totals.total;
+      depositsApplied += totalOf(ticket.deposits);
       receivableSales += totals.receivable ?? 0;
       totals.commission.forEach((entry) => addCommission(earned, entry.castId, entry.sales, entry.amount,
         Math.round(entry.points * pointsScale)));
     }
   }
-  return { sales, receivableSales, recoveries, guests, tickets, occupied, totalTables: state.tables.length,
-    expectedCash: state.day.openingCash + payments.cash + recoveries.cash,
+  const payments = Object.fromEntries(methods.map((method) => [method, tenderPayments[method] + depositsReceived[method]]));
+  return { sales, receivableSales, recoveries, recoveryRows, guests, tickets, occupied, totalTables: state.tables.length,
+    expectedCash: state.day.openingCash + payments.cash + recoveries.cash + cashTotals.cashIn - cashTotals.cashOut,
+    tenderPayments, depositsReceived, depositsApplied, cashMovements, ...cashTotals,
     commission: outputCommission(earned), pendingCommission: outputCommission(pending), stockMovements: state.movements.length,
     payments, openTickets, paidTickets };
 }

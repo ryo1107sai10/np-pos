@@ -1,12 +1,13 @@
 import { apply, createDemo, quote } from './engine.mjs';
 
 const demoAdmin = { id: 'demo-admin', label: 'デモの店舗管理者', role: 'admin' };
+const demoCustomer = {name:'山本 花子', kana:'やまもと はなこ',
+  castId:'cast1', creditEnabled:true, creditLimit:30_000};
 
 export function createPhaseTwoDemo(mode = 'live', now = Date.now()) {
   let state = createDemo(mode, now);
   const step = (command, at = now) => { state = apply(state, command, at, demoAdmin); };
-  step({ type:'saveCustomer', customer:{name:'山本 花子', kana:'やまもと はなこ',
-    castId:'cast1', creditEnabled:true, creditLimit:30_000} }, now - 180 * 60_000);
+  step({ type:'saveCustomer', customer:demoCustomer }, now - 180 * 60_000);
   if (mode === 'closed') return state;
 
   const customerId = state.customers[0].id;
@@ -21,5 +22,29 @@ export function createPhaseTwoDemo(mode = 'live', now = Date.now()) {
   step({ type:'depart', ticketId }, now - 19 * 60_000);
   step({ type:'recoverReceivable', receivableId:state.receivables[0].id, amount:4_000,
     method:'bank', date:state.day.date }, now - 5 * 60_000);
+  return state;
+}
+
+export function createCashDemo(now = Date.now()) {
+  const minute = 60_000;
+  let state = createDemo('closed', now);
+  const step = (command, minutesAgo) => { state = apply(state, command, now - minutesAgo * minute, demoAdmin); };
+  step({type:'open',date:state.day.date,openingCash:20_000},100);
+  step({type:'saveCustomer',customer:demoCustomer},85);
+  step({type:'seat',tableIds:['a3'],guests:2,setId:'set60',customerId:state.customers[0].id},80);
+  const ticketId = state.tickets[0].id;
+  const creditAmount = 10_000;
+  const tenderAmount = quote(state,ticketId).remaining - creditAmount;
+  step({type:'settle',ticketId,creditDueDate:state.day.date,
+    payments:[{method:'cash',amount:tenderAmount},{method:'receivable',amount:creditAmount}]},34);
+  step({type:'depart',ticketId},32);
+  step({type:'recordCashMovement',kind:'deposit',category:'float',amount:5_000,
+    reason:'釣銭が不足したため補充',destination:'店内金庫'},30);
+  step({type:'recordCashMovement',kind:'withdrawal',category:'safe',amount:2_000,
+    reason:'レジの現金を金庫へ移動',destination:'店内金庫'},20);
+  step({type:'recordCashMovement',kind:'expense',category:'supplies',amount:1_200,
+    reason:'レジロールを購入',destination:'文具店'},14);
+  step({type:'recoverReceivable',receivableId:state.receivables[0].id,amount:4_000,
+    method:'cash',date:state.day.date},9);
   return state;
 }

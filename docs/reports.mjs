@@ -1,3 +1,4 @@
+import { cashMovementCategories, cashMovementKinds, getDailyRecoveryRows } from './cash-ledger.mjs';
 import { receivableCollectionMethods } from './receivables.mjs';
 import { getTicketCommissionDetails, getTicketTableLabels } from './engine.mjs';
 
@@ -6,6 +7,9 @@ const formatDay = new Intl.DateTimeFormat('ja-JP', {
 });
 const formatTime = new Intl.DateTimeFormat('ja-JP', {
   hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'Asia/Tokyo',
+});
+const movementTime = new Intl.DateTimeFormat('ja-JP', {
+  month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'Asia/Tokyo',
 });
 const number = new Intl.NumberFormat('ja-JP', {maximumFractionDigits: 3});
 const stockNumber = new Intl.NumberFormat('ja-JP', {maximumFractionDigits: 6});
@@ -206,26 +210,127 @@ function renderStock(state, api) {
       : empty(api, 'history', '入出庫の記録はまだありません', '在庫連動のメニューを注文すると、出庫がここに表示されます。'), panelCount(movementRows.length, '件'))}</div>`;
 }
 
+function signedYen(amount, yen, showPlus = false) {
+  const prefix = amount < 0 ? '−' : showPlus && amount > 0 ? '+' : '';
+  return prefix + yen(Math.abs(amount));
+}
+
 function moneyRows(values, {yen}) {
   return `<dl class="lr-money-list">${values.map(([label, amount]) =>
-    `<div><dt>${label}</dt><dd>${yen(asNumber(amount))}</dd></div>`).join('')}</dl>`;
+    `<div><dt>${label}</dt><dd>${amount == null ? '—' : signedYen(asNumber(amount),yen)}</dd></div>`).join('')}</dl>`;
+}
+
+function describeClosing(period, current, api) {
+  const {icon, yen, escape} = api;
+  const close = period.closed;
+  const discrepancy = close?.discrepancy;
+  const status = close ? '<span class="lr-badge lr-badge-active">締め済み</span>' : '';
+  const variance = discrepancy == null ? '—' : signedYen(discrepancy,yen,true);
+  return `<section class="lr-panel lr-register" aria-label="レジ照合"><div class="lr-panel-head">
+    <h2>${icon('wallet',18)} レジ照合</h2>${status}</div>
+    <dl class="lr-register-values">
+      <div><dt>理論残高</dt><dd>${yen(asNumber(current.expectedCash))}</dd></div>
+      <div><dt>実残高</dt><dd>${close?.actualCash == null ? '—' : yen(asNumber(close.actualCash))}</dd></div>
+      <div${discrepancy ? ' class="lr-variance"' : ''}><dt>差額</dt><dd>${variance}</dd></div>
+    </dl>${close?.reason ? `<p class="lr-report-note"><strong>差額理由</strong> ${escape(close.reason)}</p>` : ''}</section>`;
+}
+
+function registerBreakdown(state, period, current, api) {
+  return panel('レジの内訳', moneyRows([
+    ['釣銭準備金', period.closed?.openingCash ?? state.day.openingCash],
+    ['会計・前受金の現金受取', current.payments?.cash ?? 0],
+    ['売掛の現金回収', current.recoveries?.cash ?? 0],
+    ['その他の入金', current.cashIn ?? 0],
+    ['出金・経費', -asNumber(current.cashOut)],
+  ], api));
+}
+
+function recoveryPanel(current, api) {
+  return panel('売掛と回収', moneyRows([['当日の売掛売上', current.receivableSales ?? 0],
+    ...Object.entries(receivableCollectionMethods).map(([method,label]) => [`回収（${label}）`, current.recoveries?.[method] ?? 0])], api),
+  '<span class="lr-muted">現金回収はレジ残高に反映</span>');
+}
+
+function tenderBreakdown(period, current, api) {
+  const {yen} = api;
+  const legacy = current.tenderPayments == null && period.closed;
+  const totals = legacy && period.state.tickets.length ? api.summary(period.state) : current;
+  const combinedOnly = !totals.tenderPayments && !totals.depositsReceived;
+  const rows = cashMethods.map(([method,label]) => `<tr><th scope="row">${label}</th>
+    <td>${yen(asNumber((totals.tenderPayments ?? totals.payments)?.[method]))}</td>
+    ${combinedOnly ? '' : `<td>${yen(asNumber(totals.depositsReceived?.[method]))}</td>`}</tr>`);
+  const columns = combinedOnly ? ['方法','受取合計'] : ['方法','会計時の受取','前受金の受取'];
+  const breakdown = table(api,columns,rows,'lr-tender-table');
+  const applied = combinedOnly ? '' : moneyRows([['会計に充当した前受金', totals.depositsApplied ?? 0]], api);
+  const note = combinedOnly ? 'この営業日は、前受金を含む受取額が保存されています。'
+    : '売上には、会計時の受取・会計に充当した前受金・当日の売掛が含まれます。';
+  return panel('支払方法別の入金', `${breakdown}${applied}<p class="lr-report-note">${note}</p>`);
+}
+
+function cashLedgerHistory(state, period, current, api) {
+  const {escape, icon, yen} = api;
+  const manual = current.cashMovements ?? [];
+  const recovered = current.recoveryRows ?? getDailyRecoveryRows(state, period.date);
+  const amounts = {};
+  for (const item of recovered) amounts[item.method] = (amounts[item.method] ?? 0) + item.amount;
+  const archived = Object.keys(receivableCollectionMethods).flatMap((method) => {
+    const missing = (current.recoveries?.[method] ?? 0) - (amounts[method] ?? 0);
+    return missing > 0 ? [{ method, amount:missing, at:null }] : [];
+  });
+  const ledger = [
+    ...manual.map((row) => ({ ...row, automatic:false })),
+    ...[...recovered, ...archived].map((row) => ({ ...row, automatic:true })),
+  ].sort((left, right) => (right.at ?? 0) - (left.at ?? 0));
+  const rows = ledger.map((item) => {
+    const {automatic, kind, actor} = item;
+    const inflow = automatic || kind === 'deposit';
+    const title = automatic ? `売掛回収（${receivableCollectionMethods[item.method] ?? 'その他'}）`
+      : cashMovementCategories[kind]?.[item.category] ?? 'その他';
+    const type = automatic ? (item.method === 'cash' ? '自動記録 · 現金' : '自動記録 · レジ対象外')
+      : cashMovementKinds[kind] ?? '入出金';
+    const when = item.at != null && Number.isFinite(item.at) && Number.isFinite(new Date(item.at).valueOf())
+      ? `<time datetime="${new Date(item.at).toISOString()}">${movementTime.format(item.at)}</time>` : '<span>当日合計</span>';
+    return `<li class="lr-cash-entry">
+      <div class="lr-cash-entry-label"><span class="lr-day-icon ${inflow ? 'lr-cash-in' : 'lr-cash-out'}" aria-hidden="true">${icon(inflow ? 'plus' : 'minus', 16)}</span>
+        <div><strong>${escape(title)}</strong><small>${escape(type)} · ${when}</small></div></div>
+      <strong class="lr-cash-entry-amount ${inflow ? 'lr-positive' : ''}">${signedYen(inflow ? item.amount : -item.amount,yen,true)}</strong>
+      ${automatic ? '' : `<div class="lr-cash-entry-extra">${item.reason ? `<p>${escape(item.reason)}</p>` : ''}
+        <small>${[item.destination ? `相手先 ${item.destination}` : '', actor?.label ? `担当 ${actor.label}` : ''].filter(Boolean).map(escape).join(' · ')}</small></div>`}
+    </li>`;
+  });
+  return panel('入出金履歴', rows.length ? `<ul class="lr-cash-entries">${rows.join('')}</ul>`
+    : empty(api, 'wallet', '入出金の記録はありません', '手動の入出金と、売掛回収の記録がここに表示されます。'), panelCount(rows.length, '件'));
+}
+
+function cashTotals(current, api) {
+  return panel('手動の入出金', moneyRows([
+    ['入金', current.cashIn ?? 0],
+    ['出金', asNumber(current.cashOut) - asNumber(current.expenses)],
+    ['経費', current.expenses ?? 0],
+  ], api));
+}
+
+function renderCash(state, api, period, current) {
+  const {icon} = api;
+  const canRecord = period.date === state.day.date && state.day.status === 'open' && !period.closed;
+  return `<div class="lr-view">
+    <div class="lr-report-toolbar">${dayPicker(state, period.date, api)}
+      ${canRecord ? `<button type="button" class="btn btn-primary" data-action="record-cash">${icon('plus',16)}入出金を記録</button>` : ''}</div>
+    ${describeClosing(period, current, api)}
+    <div class="lr-split">${registerBreakdown(state, period, current, api)}${cashTotals(current, api)}</div>
+    ${cashLedgerHistory(state, period, current, api)}</div>`;
 }
 
 function renderDaily(state, api, period, current) {
   const {yen, icon, escape} = api;
-  const currentClose = period.closed;
-  const openingCash = currentClose ? currentClose.openingCash : state.day.openingCash;
   const settled = period.state.tickets.filter(({status}) => status === 'paid' || status === 'departed');
   const cancelled = (state.cancelledSettlements ?? []).filter((entry) => entry.date === period.date);
-  const payment = current.payments || {};
   const history = [...state.closedDays].reverse().map((entry) =>
     `<details class="lr-day"><summary><span class="lr-day-icon" aria-hidden="true">${icon('calendar', 18)}</span>
        <strong>${dateLabel(entry.date)}</strong><span class="lr-muted lr-day-time">${timeLabel(entry.openedAt)} – ${timeLabel(entry.closedAt)}</span>
        <strong class="lr-day-sales">${yen(entry.sales)}</strong><span class="lr-day-chevron" aria-hidden="true">${icon('chevron-down', 17)}</span></summary>
        <div class="lr-day-details">${moneyRows([['釣銭準備金', entry.openingCash], ['理論残高', entry.expectedCash], ['実残高', entry.actualCash], ['差額', entry.discrepancy]], api)}
        ${entry.reason ? `<p class="lr-day-note">差額理由　${escape(entry.reason)}</p>` : ''}</div></details>`).join('');
-  const cashRows = [['釣銭準備金', openingCash], ['レジ理論残高', current.expectedCash]];
-  if (currentClose) cashRows.push(['レジ実残高', currentClose.actualCash], ['差額', currentClose.discrepancy]);
   const receiptRows = settled.slice().sort((a, b) => asNumber(b.settledAt) - asNumber(a.settledAt)).map((ticket) => {
     const amount = typeof api.quote === 'function' ? api.quote(period.state, ticket.id).total : 0;
     const seats = getTicketTableLabels(state, ticket).join('・');
@@ -237,15 +342,17 @@ function renderDaily(state, api, period, current) {
     <td class="lr-muted">${timeLabel(entry.at)}</td>
     <td class="lr-numeric">${yen(entry.receipt.settlement.total)}</td>
     <td>${escape(entry.reason)}</td></tr>`);
-  return `<div class="lr-view">${dayPicker(state, period.date, api)}<div class="lr-stats">
+  const guests = asNumber(current.guests);
+  return `<div class="lr-view">
+    ${dayPicker(state, period.date, api)}
+    <div class="lr-stats lr-stats-daily">
     ${stat(api, 'chart', '確定売上', yen(asNumber(current.sales)), 'accent')}
-    ${stat(api, 'users', '会計済みのお客様', `${asNumber(current.guests)}<small> 名</small>`)}
-    ${stat(api, 'ticket', '会計済み伝票', `${asNumber(current.tickets)}<small> 件</small>`)}</div>
-    <div class="lr-split">${panel('支払方法別の入金', moneyRows(cashMethods.map(([key, label]) => [label, payment[key]]), api), '<span class="lr-muted">前受金を含む</span>')}
-    ${panel('レジ残高', moneyRows(cashRows, api), currentClose ? '<span class="lr-badge lr-badge-active">締め済み</span>' : '')}</div>
-    ${panel('売掛と回収', moneyRows([['当日の売掛売上', current.receivableSales],
-      ...Object.entries(receivableCollectionMethods).map(([method,label]) => [`回収（${label}）`, current.recoveries?.[method]])], api),
-      '<span class="lr-muted">現金回収はレジ残高に反映</span>')}
+    ${stat(api, 'ticket', '会計済みの組数', `${asNumber(current.tickets)}<small> 組</small>`)}
+    ${stat(api, 'users', '会計済みの客数', `${guests}<small> 名</small>`)}
+    ${stat(api, 'wallet', '客単価', guests ? yen(Math.round(asNumber(current.sales) / guests)) : '—')}</div>
+    ${describeClosing(period, current, api)}
+    <div class="lr-split">${tenderBreakdown(period, current, api)}${recoveryPanel(current, api)}</div>
+    <div class="lr-split">${registerBreakdown(state, period, current, api)}${cashTotals(current, api)}</div>
     ${panel('会計履歴', receiptRows.length ? table(api, ['伝票', '卓', '会計時刻', '税込金額'], receiptRows, 'lr-payment-table')
       : empty(api, 'ticket', period.legacy ? '集計の保存がある営業日です' : '会計履歴はまだありません',
         period.legacy ? 'この営業日の会計件数と売上を上の集計で確認できます。' : '会計を確定した伝票がここに表示されます。'), panelCount(receiptRows.length, '件'))}
@@ -258,5 +365,6 @@ export function renderReport(page, state, api) {
   const period = reportPeriod(state, api);
   const result = period.closed ?? api.summary(state);
   if (page === 'commission') return renderCommission(state, api, period, result);
+  if (page === 'cash') return renderCash(state, api, period, result);
   return renderDaily(state, api, period, result);
 }
