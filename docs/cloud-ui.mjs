@@ -52,8 +52,9 @@ export function renderCloudBanner(cloud, api) {
     <span class="np-cloud-symbol">${icon('store', 18)}</span>
     <div class="np-cloud-banner-store"><strong>${escape(name)}</strong>${store?.role ? `<span>${escape(roleName(store.role,cloud))}</span>` : ''}</div>
     <span class="np-cloud-state${connected ? ' np-cloud-state-connected' : ''}" role="status"><span class="dot" aria-hidden="true"></span>${caption}</span>
-    ${status === 'conflict' ? button('送信待ちを取り消す', 'cloud-sync-discard', api, { tone: 'quiet' })
-      : failed || offline ? button('再接続', 'cloud-sync-retry', api, { glyph: 'refresh', tone: 'quiet' }) : ''}
+    ${waiting ? button('送信待ちを確認', 'cloud-sync-review', api, {glyph:'history',tone:'quiet'}) : ''}
+    ${status !== 'conflict' && (failed || offline)
+      ? button('再接続', 'cloud-sync-retry', api, {glyph:'refresh',tone:'quiet'}) : ''}
   </section>`;
 }
 
@@ -120,6 +121,8 @@ function storePreparation(cloud, api) {
 function memberControls(member, api, cloud) {
   const { escape } = api;
   if (member.primary || member.uid === cloud.user?.uid) return `<span class="np-cloud-role">${member.primary ? '店舗の作成者' : escape(roleName(member.role,cloud))}</span>`;
+  if (member.source === 'group') return button('アクセスを解除', 'cloud-member-revoke', api,
+    {id:member.uid,tone:'danger',disabled:cloud.busy});
   const link = cloud.castAccounts?.find(({uid}) => uid === member.uid);
   const choices = cloud.castAccountChoices ?? [];
   const castControls = member.role === 'cast' && cloud.store?.hasState ? `<div class="np-cloud-cast-link">
@@ -138,12 +141,22 @@ function membersPanel(cloud, api) {
   const { escape } = api;
   const members = Array.isArray(cloud.members) ? cloud.members : [];
   const invites = Array.isArray(cloud.invites) ? cloud.invites : [];
+  const blocks = Array.isArray(cloud.blocks) ? cloud.blocks : [];
   return `<section class="np-cloud-card">
     ${heading('users', 'メンバーと権限', api)}
     ${cloud.membersLoading ? '<p class="np-cloud-copy" role="status">メンバーを読み込んでいます。</p>' : ''}
     ${members.length ? `<ul class="np-cloud-people">${members.map((member) => `<li class="np-cloud-person">
-      <span class="np-cloud-identity"><strong>${escape(member.email || member.uid)}</strong><small>${escape(roleName(member.role,cloud))}${member.uid === cloud.user?.uid ? ' · あなた' : ''}</small></span>
+      <span class="np-cloud-identity"><strong>${escape(member.email || member.uid)}</strong><small>${escape(roleName(member.role,cloud))}
+      ${member.source === 'group' ? ' · グループ経由' : ' · 店舗で設定'}${member.uid === cloud.user?.uid ? ' · あなた' : ''}</small></span>
       ${memberControls(member, api, cloud)}</li>`).join('')}</ul>` : ''}
+    ${blocks.length ? `<div><h4 class="np-cloud-subheading">アクセス解除済み</h4>
+      <ul class="np-cloud-people">${blocks.map((member) => `<li class="np-cloud-person">
+        <span class="np-cloud-identity"><strong>${escape(member.email)}</strong><small>${member.groupRole
+          ? `グループ経由の${escape(roleName(member.groupRole,cloud))}権限も停止中` : '店舗へのアクセス停止中'}</small></span>
+        ${cloud.canRestore && member.groupRole ? button('グループ経由のアクセスを再開','cloud-member-restore',api,
+          {id:member.uid,disabled:cloud.busy}) : ''}</li>`).join('')}</ul>
+      <p class="np-cloud-copy">${cloud.canRestore ? '直接付与する権限を選ぶ場合は、同じアカウントのメールアドレスで再招待してください。' : 'アクセスの再付与は店舗の作成者が行えます。'}</p>
+    </div>` : ''}
     ${invites.length ? `<div><h4 class="np-cloud-subheading">招待中</h4><ul class="np-cloud-people">${invites.map((invite) => `<li class="np-cloud-person">
       <span class="np-cloud-identity"><strong>${escape(invite.email)}</strong><small>${escape(roleName(invite.role,cloud))}</small></span>
       ${button('招待を取り消す', 'cloud-invite-revoke', api, { id: invite.id, tone: 'quiet', disabled: cloud.busy })}</li>`).join('')}</ul></div>` : ''}

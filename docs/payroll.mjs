@@ -216,6 +216,7 @@ function confirmedCommission(tickets, castId) {
     rawCommission += entry.amount;
     pointUnits += Math.round(entry.points * 1000);
     const details = (settlement.commissionDetails ?? []).filter((row) => row.castId === castId);
+    if (!details.length && Array.isArray(settlement.commissionDetails) && entry.amount === 0 && entry.points === 0) continue;
     const hasCompleteDetail = details.length && details.reduce((sum, row) => sum + row.amount, 0) === entry.amount
       && details.reduce((sum, row) => sum + Math.round(row.points * 1000), 0) === Math.round(entry.points * 1000);
     for (const { name, amount, points } of hasCompleteDetail ? details : [{ name:'確定歩合（旧伝票）', ...entry }]) {
@@ -353,6 +354,10 @@ export function previewPayrollRange(state, {start,end,castId}) {
   const rows = people.map(({id,name}) => {
     const work = [];
     const missingDates = [];
+    const commissionDetails = [];
+    const attendanceDetails = [];
+    const pendingDates = [...new Set([...(state.castAttendance ?? []),...(state.attendances ?? [])].filter(({castId,date,status}) =>
+      castId === id && includes(date) && ['open','pending'].includes(status)).map(({date}) => date))].sort();
     let hasActivity = false;
     const totals = Object.fromEntries(fields.map((key) => [key,0]));
     for (const month of months) {
@@ -368,18 +373,36 @@ export function previewPayrollRange(state, {start,end,castId}) {
       for (const key of fields) totals[key] += pay[key];
       work.push(...part.work);
       missingDates.push(...part.missingDates);
+      commissionDetails.push(...commissionData.commissionDetails.map((row) => ({...row,month})));
+      attendanceDetails.push(...attendanceItems.map((row) => ({...row,month})));
     }
     const advances = payouts.filter((row) => row.castId === id).sort((a,b) => a.paidDate.localeCompare(b.paidDate) || a.paidAt - b.paidAt);
     const advance = advances.reduce((sum,{amount}) => sum + amount,0);
     const {hourlyPay,commission,pointPay,allowanceTotal,deductionTotal} = totals;
     const net = missingDates.length || unavailableDates.length ? null
       : netPay(hourlyPay,commission,pointPay,allowanceTotal,deductionTotal,advance);
-    return {castId:id,castName:name,work,missingDates,...totals,advances,advance,net,hasActivity:hasActivity || Boolean(advances.length)};
+    return {castId:id,castName:name,work,missingDates,pendingDates,commissionDetails,attendanceDetails,...totals,advances,advance,net,
+      hasActivity:hasActivity || Boolean(advances.length || pendingDates.length)};
   });
   const summed = [...fields,'advance','net'];
   const totals = Object.fromEntries(summed.map((key) => [key,rows.reduce((sum,row) => sum + (row[key] ?? 0),0)]));
   if (rows.some(({net}) => net === null)) totals.net = null;
   return {start,end,unavailableDates,totals,rows:rows.filter((row) => castId || row.hasActivity)};
+}
+
+export function getPayrollRangeStatements(state,range,castIds) {
+  check(Array.isArray(castIds) && castIds.length && castIds.length === new Set(castIds).size,
+    '出力するキャストを選択してください。');
+  const result = previewPayrollRange(state,range);
+  check(!result.unavailableDates.length,'指定期間の歩合データが不足しているため、参考明細を出力できません。');
+  const byId = new Map(result.rows.map((row) => [row.castId,row]));
+  return castIds.map((castId) => {
+    const snapshot = byId.get(castId);
+    check(snapshot?.hasActivity,'この期間に集計データのあるキャストを選択してください。');
+    check(!snapshot.missingDates.length,`${snapshot.castName}の時給を登録してから参考明細を出力してください。`);
+    check(!snapshot.pendingDates.length,`${snapshot.castName}の勤怠を確認してから参考明細を出力してください。`);
+    return {start:result.start,end:result.end,snapshot};
+  });
 }
 
 export function getDailyPayLimit(state, month, castId) {

@@ -7,6 +7,20 @@ import { getStoreSettings } from '../docs/store-settings.mjs';
 const now = Date.parse('2026-11-16T14:41:00Z');
 const soda = (state) => state.stock.find((item) => item.id === 'soda');
 
+test('stock movements and their audit use the store cutoff when closed and the assigned business day when open', () => {
+  const instant = Date.parse('2026-11-17T03:01:00+09:00');
+  const stockAction = {type:'stockAdjust',stockId:'soda',quantity:1,reason:'営業前に補充'};
+  const legacy = createDemo('closed',instant);
+  assert.equal(apply(legacy,stockAction,instant).movements[0].date,'2026-11-16');
+  const configured = apply(legacy,{type:'saveControls',managerDiscountRateBps:1000,
+    register:{cutoff:'03:00',hoursStart:'20:00',hoursEnd:'05:00',openingMode:'fixed',openingCash:20000}},instant);
+  const adjusted = apply(configured,stockAction,instant);
+  assert.equal(adjusted.movements[0].date,'2026-11-17');
+  assert.equal(adjusted.auditLog[0].businessDate,'2026-11-17');
+  const opened = apply(configured,{type:'open',date:'2026-11-16',openingCash:20000},instant);
+  assert.equal(apply(opened,stockAction,instant).movements[0].date,'2026-11-16');
+});
+
 function adjust(state, quantity) {
   return apply(state, { type: 'stockAdjust', stockId: 'soda', quantity, reason: '数量調整' }, now);
 }

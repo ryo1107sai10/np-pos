@@ -6,13 +6,14 @@ import { apply, createDemo, quote, summary } from '../docs/engine.mjs';
 import { getTeamPerformance } from '../docs/team-performance.mjs';
 import worker from './index.mjs';
 import {
-  applyCommand, changeMember, createStore, getStoreOverview, inviteMember, listAudit, listMembers, listStores, migrateState, readState, revokeInvite,
+  applyCommand, changeMember, createStore, getStoreOverview, inviteMember, listAudit, listMembers, listStores, migrateState, readState, restoreGroupStoreMember, revokeInvite,
 } from './database.mjs';
 import { changeGroupMember, createStoreGroup, inviteGroupMember, listStoreGroups, renameStoreGroup, revokeGroupInvite, setGroupStore } from './store-groups.mjs';
 import { answerGuideTopic, getGuideAccess } from './guide-assistant.mjs';
 
 const schema = readFileSync(new URL('schema.sql', import.meta.url), 'utf8');
 const groupMigration = readFileSync(new URL('migrations/20261117-store-groups.sql', import.meta.url), 'utf8');
+const accessMigration = readFileSync(new URL('migrations/20261117-store-access-blocks.sql', import.meta.url), 'utf8');
 const owner = { uid: 'owner-1', email: 'owner@example.test' };
 const helper = { uid: 'helper-1', email: 'helper@example.test' };
 const outsider = { uid: 'outsider-1', email: 'outsider@example.test' };
@@ -87,15 +88,61 @@ test('optional AI guide scopes access, sends only fixed manual content and enfor
   assert.equal(next.answer,'伝票の会計内訳を開きます。');
 });
 
-test('the group schema applies twice to existing stores without changing their direct access', async () => {
+test('group and access-block migrations apply twice to existing stores without changing their direct access', async () => {
   const db = database(schema.slice(0,schema.indexOf(groupMigration.trimEnd())));
   const tenant = await store(db);
   await db.prepare("INSERT INTO np_invites (id, store_id, email, role, created_at) VALUES (?, ?, ?, 'staff', ?) RETURNING id")
     .bind('legacy-invite',tenant,helper.email,Date.now()).first();
   db.migrate(groupMigration);
   db.migrate(groupMigration);
+  db.migrate(accessMigration);
+  db.migrate(accessMigration);
   assert.deepEqual(await listStores(db,helper),{stores:[{id:tenant,name:'NP POS テスト店',role:'staff',hasState:false}]});
   assert.equal((await listStoreGroups(db,owner)).attachable[0].id,tenant);
+});
+
+test('store revocation denies inherited access only at that store and requires the owner to restore it', async () => {
+  const db = database();
+  const main = await store(db);
+  const branch = await store(db);
+  const group = (await createStoreGroup(db,owner,'本部')).group.id;
+  await setGroupStore(db,owner,group,main,true);
+  await setGroupStore(db,owner,group,branch,true);
+  await inviteMember(db,owner,main,helper.email,'staff');
+  await inviteMember(db,owner,main,outsider.email,'admin');
+  await inviteGroupMember(db,owner,group,helper.email,'manager');
+  await listStores(db,helper);
+  await listStores(db,outsider);
+  const mainList = await listMembers(db,owner,main);
+  const branchList = await listMembers(db,owner,branch);
+  assert.equal(mainList.members.find(({uid}) => uid === helper.uid).source,'direct');
+  assert.equal(branchList.members.find(({uid}) => uid === helper.uid).source,'group');
+  await assert.rejects(changeMember(db,owner,branch,helper.uid,'staff'),{code:'group-role'});
+  await changeMember(db,outsider,main,helper.uid);
+  await assert.rejects(readState(db,helper,main),{code:'store-access'});
+  await assert.rejects(command(db,helper,main,0,'revoked-manager-command',{type:'open',openingCash:0}),{code:'store-access'});
+  assert.equal((await readState(db,helper,branch)).role,'manager');
+  assert.deepEqual((await listStores(db,helper)).stores.map(({id})=>id),[branch]);
+  assert.deepEqual((await listStoreGroups(db,helper)).groups[0].stores.map(({id})=>id),[branch]);
+  assert.deepEqual((await listMembers(db,owner,main)).blocks,[{uid:helper.uid,email:helper.email,groupRole:'manager'}]);
+  await assert.rejects(inviteMember(db,outsider,main,helper.email,'admin'),{code:'regrant-forbidden'});
+  await assert.rejects(restoreGroupStoreMember(db,outsider,main,helper.uid),{code:'regrant-forbidden'});
+  await inviteMember(db,owner,main,helper.email,'staff');
+  await assert.rejects(readState(db,helper,main),{code:'store-access'});
+  await listStores(db,{uid:'different-uid',email:helper.email});
+  await assert.rejects(readState(db,{uid:'different-uid',email:helper.email},main),{code:'store-access'});
+  await listStores(db,helper);
+  assert.equal((await readState(db,helper,main)).role,'staff');
+  assert.equal((await listMembers(db,owner,main)).blocks.length,0);
+
+  await changeMember(db,owner,branch,helper.uid);
+  await changeGroupMember(db,owner,group,helper.uid,'staff');
+  await assert.rejects(readState(db,helper,branch),{code:'store-access'});
+  await inviteMember(db,owner,branch,helper.email,'cast');
+  await restoreGroupStoreMember(db,owner,branch,helper.uid);
+  await listStores(db,helper);
+  assert.equal((await readState(db,helper,branch)).role,'staff');
+  assert.equal((await listMembers(db,owner,branch)).invites.length,0);
 });
 
 test('group access is limited to attached stores and obeys direct roles, live revisions and revocation', async () => {

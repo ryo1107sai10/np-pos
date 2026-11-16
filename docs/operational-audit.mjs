@@ -213,6 +213,12 @@ function auditTicketDetails(before, after, action) {
   const previous = before.tickets.find(({ id }) => id === action.ticketId);
   const current = after.tickets.find(({ id }) => id === action.ticketId);
   if (!previous || !current) return null;
+  if (action.type === 'adjustPersonalSales') {
+    const { id, castName, salesBefore, salesAfter, amount, reason } = current.personalSalesAdjustments.at(-1);
+    return { target:target('ticket',current.id,`伝票 No. ${current.number}`),
+      before:{castName,personalSales:salesBefore},
+      after:{castName,personalSales:salesAfter,adjustmentAmount:amount,adjustmentId:id}, reason };
+  }
   if (action.type === 'adjustTicketGuests') {
     return { target:target('ticket',current.id,`伝票 No. ${current.number}`),
       before:{guests:previous.guests,admittedGuests:previous.admittedGuests ?? previous.guests},
@@ -409,7 +415,7 @@ export function buildOperationAudit(before, after, action, at, actor) {
   let details;
   if (ticketActions.has(action.type)) {
     details = auditTicket(before, after, action);
-  } else if (['saveTicketNote','adjustTicketEnd','adjustTicketGuests'].includes(action.type)) {
+  } else if (['saveTicketNote','adjustTicketEnd','adjustTicketGuests','adjustPersonalSales'].includes(action.type)) {
     details = auditTicketDetails(before, after, action);
   } else if (settingActions.has(action.type)) {
     details = auditSettings(before, after, action);
@@ -499,6 +505,7 @@ export function buildOperationAudit(before, after, action, at, actor) {
     const previous = before.stock.find(({ id }) => id === action.stockId);
     const current = after.stock.find(({ id }) => id === action.stockId);
     details = {
+      businessDate: after.movements[0]?.date ?? after.day.date,
       target: target('stock', current.id, current.name),
       before: { quantity: previous.quantity, value: previous.value },
       after: { quantity: current.quantity, value: current.value, stockMovements: auditMovements(before, after),

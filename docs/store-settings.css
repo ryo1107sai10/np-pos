@@ -2,6 +2,12 @@
   width: min(880px, calc(100% - 28px));
 }
 
+.np-barcode-dialog { width: min(480px, calc(100% - 28px)); }
+.np-barcode-dialog .modal-body { display: grid; gap: 12px; }
+.np-barcode-dialog video { display: block; width: 100%; min-height: 160px; max-height: 52dvh; border-radius: 12px; background: #14182a; object-fit: cover; }
+.np-barcode-dialog video[hidden] { display: none; }
+.np-barcode-dialog .btn { min-height: 44px; }
+
 .store-settings-dialog .modal-head,
 .store-settings-dialog .modal-foot { flex: none; }
 

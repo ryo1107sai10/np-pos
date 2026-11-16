@@ -316,6 +316,29 @@ export function payrollRangeDefaults(month) {
   return {start:firstDay,end:lastDay.toISOString().slice(0,10),castId:''};
 }
 
+function payrollRangeExport(result,api) {
+  const {escape,icon} = api;
+  if (result.unavailableDates.length) return '';
+  const active = result.rows.filter(({hasActivity}) => hasActivity);
+  if (!active.length) return '';
+  const canExport = ({missingDates,pendingDates}) => !missingDates.length && !pendingDates.length;
+  const eligible = active.filter(canExport);
+  return `<fieldset class="choices payroll-range-export"><legend>参考明細を出力するキャスト</legend>
+    <div class="choice-grid">${active.map((row) => {
+      const available = canExport(row);
+      return `<label class="choice"><input type="checkbox" name="rangeExportCast" value="${escape(row.castId)}"${available ? ' checked' : ' disabled'}>
+        <span><strong>${escape(row.castName)}</strong>${available ? '' : '<small>集計データの確認が必要</small>'}</span></label>`;
+    }).join('')}</div>
+    ${eligible.length ? `<div class="ops-actions">${eligible.length > 1
+      ? button('すべて選択','payroll-range-select-all',icon,'check') + button('選択を解除','payroll-range-select-none',icon,'x') : ''}
+      ${button('期間参考明細PDFをZIP保存','payroll-range-export',icon,'download','btn-secondary')}</div>` : ''}
+    <p class="field-help">営業日と支給日で集計した参考明細を、選んだキャストごとにPDFで保存します。確定明細は給与月を選んで出力できます。</p></fieldset>`;
+}
+
+export function readPayrollRange(data) {
+  return {start:data.get('rangeStart'),end:data.get('rangeEnd'),castId:data.get('rangeCast')};
+}
+
 export function renderPayrollRange(state,{range,result},api) {
   const {escape,yen} = api;
   const filters = `<div class="form-grid payroll-period-fields">${input('開始営業日',`<input type="date" name="rangeStart" value="${escape(range.start)}" required>`)}
@@ -339,10 +362,13 @@ export function renderPayrollRange(state,{range,result},api) {
     </table></div>`;
   return `${filters}<h3>集計結果　${escape(result.start)} 〜 ${escape(result.end)}</h3>
     <p class="field-help">選択期間分の時給・歩合・ポイントは給与月ごとに丸めてから合算します。差引額は期間内の参考額です。</p>
-    ${result.unavailableDates.length ? `<p class="ops-highlight">歩合の元データが不足しています。${result.unavailableDates.map(escape).join('・')}</p>` : ''}
+    ${result.unavailableDates.length ? `<p class="ops-highlight">歩合の元データが不足しているため、参考明細は出力できません。${result.unavailableDates.map(escape).join('・')}</p>` : ''}
     ${result.rows.some((row) => row.hasActivity) ? table : '<p class="field-help">この期間に集計できる勤怠・確定歩合・支給済みの日払いはありません。</p>'}
     ${result.rows.filter((row) => row.missingDates.length).map((row) =>
       `<p class="ops-highlight">${escape(row.castName)}の時給未登録日　${row.missingDates.map(escape).join('・')}</p>`).join('')}
+    ${result.rows.filter((row) => row.pendingDates.length).map((row) =>
+      `<p class="ops-highlight">${escape(row.castName)}は勤怠を確認してから参考明細を出力できます。${row.pendingDates.map(escape).join('・')}</p>`).join('')}
+    ${payrollRangeExport(result,api)}
     ${result.rows.filter((row) => row.work.length || row.advances.length).map((row) =>
       `<details class="payroll-rate-history"><summary>${escape(row.castName)}の勤怠・日払いの内訳</summary>
       ${row.work.length ? workDetails(row,api) : ''}

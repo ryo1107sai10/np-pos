@@ -44,10 +44,10 @@ const groups = {
     pages:['stock'],
   },
   reports:{
-    title:'レポート・入出金', detail:'日報・過去伝票・分析の閲覧、レジ入出金',
-    commands:['recordCashMovement','editCashMovement','voidCashMovement','recoverReceivable'],
+    title:'レポート・入出金', detail:'日報・過去伝票・分析の閲覧、個人売上の調整、レジ入出金',
+    commands:['recordCashMovement','editCashMovement','voidCashMovement','recoverReceivable','adjustPersonalSales'],
     actions:['record-cash','edit-cash-movement','void-cash-movement','report-mode','report-day','report-export',
-      'analytics-csv','analytics-print','history-receipt'],
+      'analytics-csv','analytics-print','history-receipt','personal-sales-adjustment'],
     pages:['commission','reports','tickets','analytics','product-sales','cash','team-performance'],
   },
   staffing:{

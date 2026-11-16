@@ -15,6 +15,7 @@ import { getCastWorkspace, isCastSelfCommand, listCastAttendance, validateCastAt
 import { isValidCalculationSettings, normalizeCalculationSettings, roundCalculationRate } from '../docs/calculation-settings.mjs';
 import { normalizeAttendanceItems } from '../docs/payroll-records.mjs';
 import { normalizeRolePolicy, roleAllowsCommand, roleGroupAllowed } from '../docs/role-policy.mjs';
+import { isPersonalSalesAmount, isPersonalSalesDiscountMode, isValidPersonalSalesHistory } from '../docs/personal-sales.mjs';
 import { normalizeCashAccounts, validCashAccountHistory } from '../docs/cash-accounts.mjs';
 
 export const roles = new Set(['admin', 'manager', 'staff', 'cast', 'trainee']);
@@ -22,7 +23,7 @@ const staffCommands = ['seat', 'move', 'order', 'extend', 'extendOverdue', 'depo
   'syncAutoExtensions', 'setTableAutoExtension', 'pauseVisitAutoExtension', 'resumeVisitAutoExtension', 'setTicketCustomer','setTicketCompanion'];
 const managerCommands = [...staffCommands, 'open', 'close', 'discount', 'stockAdjust', 'recordStockOperation', 'cancelDeposit', 'cancelLine', 'void', 'adjustTicketEnd',
   'saveCustomer', 'recoverReceivable', 'recordCashMovement', 'saveShift', 'removeShift', 'reviewCastAttendance', 'saveManagedAttendance', 'adjustTicketGuests',
-  'editTicketLine', 'cancelTicketExtension', 'editCashMovement','voidCashMovement','editDeposit'];
+  'editTicketLine', 'cancelTicketExtension', 'editCashMovement','voidCashMovement','editDeposit','adjustPersonalSales'];
 const roleCommands = {
   cast: new Set(['castClockIn','castClockOut','castRequestShift','castRequestDailyPay']),
   staff: new Set(staffCommands),
@@ -36,7 +37,7 @@ const roleCommands = {
 };
 const reasonCommands = new Set(['discount', 'cancelSettlement', 'reopenTicket', 'cancelLine', 'recordCashMovement', 'recordStockOperation',
   'correctSettledTicketCustomer', 'correctSettledTicketCompanion', 'correctSettledTicketPayments', 'adjustTicketEnd', 'adjustTicketGuests', 'editTicketLine', 'cancelTicketExtension',
-  'editDeposit','correctRegisterCount','correctSettledContents']);
+  'editDeposit','correctRegisterCount','correctSettledContents','adjustPersonalSales']);
 const paymentMethods = new Set(['cash', 'card', 'qr']);
 const ticketStatuses = new Set(['open', 'paid', 'departed', 'void', 'cancelled']);
 const emptyCommission = { fixed: 0, rate: 0, points: 0 };
@@ -76,6 +77,15 @@ export function verifyCommand(role, command, state) {
   if (reasonCommands.has(command.type)) {
     requireCondition(typeof command.reason === 'string' && command.reason.trim().length > 0,
       400, 'reason-required', '操作の理由を入力してください。');
+  }
+  if (command.type === 'adjustPersonalSales') {
+    requireCondition([command.ticketId,command.castId].every((id) => typeof id === 'string' && id.length > 0 && id.length <= 128)
+      && isPersonalSalesAmount(command.amount) && command.reason.trim().length <= 120,
+    400,'invalid-command','個人売上を調整する伝票、キャスト、金額、理由を確認してください。');
+  }
+  if (command.type === 'discount') {
+    requireCondition(command.personalSalesMode === undefined || isPersonalSalesDiscountMode(command.personalSalesMode),
+      400,'invalid-command','個人売上への反映方法を選択してください。');
   }
   if (command.type === 'bindCastAccount') {
     const {memberUid,castId} = command;
@@ -267,6 +277,7 @@ function snapshotCashMovements(state) {
 
 function clearCommissionDetails(state) {
   for (const ticket of allSnapshotTickets(state)) {
+    delete ticket.personalSalesAdjustments;
     for (const line of ticket.lines) {
       delete line.castCommissions;
       line.commission = emptyCommission;
@@ -395,6 +406,9 @@ export function projectState(state, role, actorUid) {
           if (entry?.[field] && entry[field].id !== actorUid) delete entry[field];
         }
       }
+      for (const row of ticket.personalSalesAdjustments ?? []) {
+        if (row.actor.id !== actorUid) delete row.actor.id;
+      }
     }
     return restrictRoleData(next,role);
   }
@@ -415,6 +429,7 @@ export function projectState(state, role, actorUid) {
     delete ticket.customerId;
     delete ticket.companionCustomerIds;
     delete ticket.seatedByUid;
+    delete ticket.personalSalesAdjustments;
     delete ticket.discountDetails;
     if (ticket.discountRequest) ticket.discountRequest = { id: ticket.discountRequest.id };
     for (const line of ticket.lines) {
@@ -531,6 +546,7 @@ function validPaymentCorrection(ticket) {
 
 function validTicket(ticket) {
   return ticketStatuses.has(ticket.status) && Array.isArray(ticket.tableIds)
+    && isValidPersonalSalesHistory(ticket)
     && (ticket.admittedGuests === undefined || (Number.isInteger(ticket.guests) && ticket.guests > 0 && ticket.guests <= 100
       && Number.isSafeInteger(ticket.admittedGuests) && ticket.admittedGuests >= ticket.guests))
     && (ticket.calculationSettings === undefined || isValidCalculationSettings(ticket.calculationSettings))
@@ -773,6 +789,11 @@ export function validateSnapshot(state) {
   for (const customer of migrated.customers ?? []) delete customer.createdByUid;
   for (const ticket of allSnapshotTickets(migrated)) {
     if (ticket.calculationSettings !== undefined) ticket.calculationSettings = normalizeCalculationSettings(ticket.calculationSettings);
+    for (const entry of ticket.personalSalesAdjustments ?? []) {
+      const { label, role } = entry.actor;
+      const source = 'ブラウザー移行 · ';
+      entry.actor = { id: 'imported-browser', label: (label.startsWith(source) ? label : source + label).slice(0, 320), role };
+    }
     delete ticket.seatedByUid;
     delete ticket.activeCustomerLink;
     delete ticket.activeCompanionLinks;

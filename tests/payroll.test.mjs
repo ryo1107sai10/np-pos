@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { apply, createDemo, quote, summary } from '../docs/engine.mjs';
-import { getDailyPayLimit, getDailyPayTotals, getPayrollDailyPays, getPayrollDraft, getPayrollSettings, getPayrollTemplates,
+import { getDailyPayLimit, getDailyPayTotals, getPayrollDailyPays, getPayrollDraft, getPayrollRangeStatements, getPayrollSettings, getPayrollTemplates,
   previewPayroll, previewPayrollRange } from '../docs/payroll.mjs';
 import { makeImagePdf, makeStoredZip } from '../docs/payroll-pdf.mjs';
 import { renderPayroll, renderPayrollRange } from '../docs/payroll-ui.mjs';
@@ -85,12 +85,57 @@ test('date range uses dated work, confirmed historical commissions, attendance i
   assert.equal(previewPayrollRange(state,{start:date,end:date,castId}).rows[0].advance,1_000);
   assert.throws(() => previewPayrollRange(state,{start:'2026-02-29',end:date}),/日付の順/);
   assert.throws(() => previewPayrollRange(state,{start:date,end:previousDate}),/日付の順/);
+  assert.throws(() => getPayrollRangeStatements(state,{start:previousDate,end:date},[castId]),/勤怠を確認/);
+  state.attendances = state.attendances.filter(({status}) => status !== 'pending');
+  const [exported] = getPayrollRangeStatements(state,{start:previousDate,end:date},[castId]);
+  assert.equal(exported.snapshot.net,14_910);
+  assert.equal(exported.snapshot.advances[0].paidDate,date);
+  assert.deepEqual(exported.snapshot.attendanceDetails.map(({kind,amount}) => [kind,amount]),
+    [['allowance',600],['deduction',200],['points',1]]);
 
   delete state.closedDays[0].commission;
   const incomplete = previewPayrollRange(state,{start:previousDate,end:date,castId});
   assert.deepEqual(incomplete.unavailableDates,[previousDate]);
   assert.equal(incomplete.rows[0].net,null);
+  assert.throws(() => getPayrollRangeStatements(state,{start:previousDate,end:date},[castId]),/歩合データが不足/);
   assert.match(renderPayrollRange(state,{range:{...incomplete,castId},result:incomplete},{escape:String,yen:String}),/歩合の元データが不足/);
+});
+
+test('period reference statements include only selected casts and dated amounts without changing payroll records', () => {
+  const demo = createPayrollDemo(now);
+  const range = {start:'2026-10-31',end:date,castId:''};
+  const before = structuredClone(demo.payroll);
+  const references = getPayrollRangeStatements(demo,range,['cast2','cast1']);
+  assert.deepEqual(references.map(({snapshot}) => snapshot.castId),['cast2','cast1']);
+  assert.ok(references.every(({start,end}) => start === '2026-10-31' && end === date));
+  const [first,second] = references.map(({snapshot}) => snapshot);
+  assert.equal(first.net,12_600);
+  assert.equal(second.net,23_200);
+  assert.equal(second.allowanceTotal,0);
+  assert.deepEqual(second.work.map(({date}) => date),['2026-10-31','2026-11-16']);
+  assert.deepEqual(second.commissionDetails.map(({month,name}) => [month,name]),[['2026-11','本指名']]);
+  assert.deepEqual(demo.payroll,before);
+  assert.deepEqual(getPayrollRangeStatements(demo,range,['cast1']).map(({snapshot}) => snapshot.castId),['cast1']);
+  assert.throws(() => getPayrollRangeStatements(demo,range,[]),/キャストを選択/);
+  assert.throws(() => getPayrollRangeStatements(demo,range,['cast1','cast1']),/キャストを選択/);
+  assert.throws(() => getPayrollRangeStatements(demo,range,['cast5']),/集計データのある/);
+  assert.throws(() => getPayrollRangeStatements(demo,{...range,castId:'cast2'},['cast1']),/集計データのある/);
+});
+
+test('reference export excludes unchecked people and prevents incomplete payroll statements', () => {
+  const state = createPayrollDemo(now);
+  state.attendances = [{date,castId:'cast4',status:'approved',minutes:60}];
+  state.castAttendance = [{date,castId:'cast2',status:'pending'},{date,castId:'cast2',status:'open'}];
+  const range = {start:date,end:date,castId:''};
+  assert.throws(() => getPayrollRangeStatements(state,range,['cast4']),/時給を登録/);
+  assert.throws(() => getPayrollRangeStatements(state,range,['cast1','cast2']),/凛の勤怠を確認/);
+  assert.equal(getPayrollRangeStatements(state,range,['cast1']).length,1);
+  const result = previewPayrollRange(state,range);
+  assert.deepEqual(result.rows.find(({castId})=>castId === 'cast2').pendingDates,[date]);
+  const html = renderPayrollRange(state,{range,result},{escape:String,yen:String,icon:()=>''});
+  assert.match(html,/name="rangeExportCast" value="cast1" checked/);
+  assert.match(html,/name="rangeExportCast" value="cast2" disabled/);
+  assert.match(html,/name="rangeExportCast" value="cast4" disabled/);
 });
 
 test('payroll range surfaces missing rates and the demo includes immediately exportable finalized months', () => {

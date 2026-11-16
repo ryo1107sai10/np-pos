@@ -9,7 +9,7 @@ function money(label,amount) {
   return [label,yen.format(amount || 0)];
 }
 
-function statementSections(pay) {
+function baseSections(pay) {
   return [
     ['支給内訳',[
       money('時給分',pay.hourlyPay),money('確定歩合',pay.commission),money('ポイント換金',pay.pointPay),
@@ -18,6 +18,12 @@ function statementSections(pay) {
     ['勤務の内訳',pay.work.map(({date,minutes,hourlyRate,source}) =>
       [`${date}   ${source === 'attendance' ? '勤怠' : '手入力'}`,
         `${Math.floor(minutes / 60)}時間 ${minutes % 60}分   ${yen.format(hourlyRate)}/時`])],
+  ];
+}
+
+function monthlyStatement({month,snapshot:pay}) {
+  const sections = [
+    ...baseSections(pay),
     ['確定歩合の内訳',pay.commissionDetails.map(({name,amount}) => money(name,amount))],
     ['手当',pay.allowances.map(({label,amount}) => money(label,amount))],
     ['控除',pay.deductions.map(({label,amount}) => money(label,-amount))],
@@ -26,6 +32,22 @@ function statementSections(pay) {
     ['勤怠項目の内訳',(pay.attendanceItems ?? []).map(({label,amount,kind}) => kind === 'points'
       ? [label,`${amount} pt`] : money(label,kind === 'deduction' ? -amount : amount))],
   ];
+  return {title:'支給明細',period:month,filenamePeriod:month,castName:pay.castName,totalLabel:'支給合計',total:pay.net,sections,
+    note:'店舗で登録した手当・控除を記載しています。源泉徴収・社会保険料の自動計算は対象外です。'};
+}
+
+function rangeStatement({start,end,snapshot:pay}) {
+  const sections = [
+    ...baseSections(pay),
+    ['確定歩合の内訳（丸め前）',pay.commissionDetails.map(({month,name,amount}) => money(`${month} ／ ${name}`,amount))],
+    ['勤怠項目の内訳',pay.attendanceDetails.map(({month,label,amount,kind}) => kind === 'points'
+      ? [`${month} ／ ${label}`,`${amount} pt`] : money(`${month} ／ ${label}`,kind === 'deduction' ? -amount : amount))],
+    ['日払いの内訳（支給日）',pay.advances.map(({paidDate,month,amount,method}) =>
+      money(`${paidDate} ／ ${method === 'cash' ? '現金' : '振込'} ／ ${month}分`,-amount))],
+  ];
+  return {title:'給与期間参考明細',period:start === end ? start : `${start} 〜 ${end}`,
+    filenamePeriod:start === end ? start : `${start}_${end}`,castName:pay.castName,totalLabel:'差引参考額',total:pay.net,sections,
+    note:'勤怠・確定歩合は営業日、日払いは支給日を基準にしています。対象期間内の時給・歩合・ポイントの換金額を給与月ごとに丸めています。月次テンプレートと日付のない手当・控除・日払い調整は月次の確定明細で確認できます。'};
 }
 
 function wrapText(context,value,width) {
@@ -51,8 +73,7 @@ function canvasJpeg(canvas) {
   },'image/jpeg',0.9));
 }
 
-async function renderStatementPages(record,storeName) {
-  const {month,snapshot} = record;
+async function renderStatementPages({title,period,castName,totalLabel,total,sections,note},storeName) {
   const canvas = document.createElement('canvas');
   const scale = 2.5;
   canvas.width = Math.ceil(pageWidth * scale);
@@ -79,11 +100,11 @@ async function renderStatementPages(record,storeName) {
   function beginPage() {
     context.fillStyle = '#fff';
     context.fillRect(0,0,pageWidth,pageHeight);
-    text('支給明細',margin,66,{size:24,weight:'bold'});
-    text(month,pageWidth - margin,66,{size:13,weight:'bold',align:'right'});
+    text(title,margin,66,{size:24,weight:'bold'});
+    text(period,pageWidth - margin,66,{size:13,weight:'bold',align:'right'});
     font(11);
     top = 90;
-    for (const line of wrapText(context,`${storeName} ／ ${snapshot.castName}`,pageWidth - 2 * margin)) {
+    for (const line of wrapText(context,`${storeName} ／ ${castName}`,pageWidth - 2 * margin)) {
       text(line,margin,top);
       top += lineHeight;
     }
@@ -106,10 +127,10 @@ async function renderStatementPages(record,storeName) {
     top += 20;
   }
   beginPage();
-  text('支給合計',margin,top + 3,{size:13,weight:'bold'});
-  text(yen.format(snapshot.net),pageWidth - margin,top + 3,{size:20,weight:'bold',align:'right'});
+  text(totalLabel,margin,top + 3,{size:13,weight:'bold'});
+  text(yen.format(total),pageWidth - margin,top + 3,{size:20,weight:'bold',align:'right'});
   top += 32;
-  for (const [title,rows] of statementSections(snapshot)) {
+  for (const [title,rows] of sections) {
     if (!rows.length) continue;
     await ensureSpace(42);
     sectionTitle(title);
@@ -127,7 +148,6 @@ async function renderStatementPages(record,storeName) {
     }
     top += 13;
   }
-  const note = '店舗で登録した手当・控除を記載しています。源泉徴収・社会保険料の自動計算は対象外です。';
   font(9);
   const notes = wrapText(context,note,pageWidth - 2 * margin);
   await ensureSpace(notes.length * lineHeight);
@@ -230,16 +250,25 @@ export async function makeStoredZip(entries) {
   return new Blob([...chunks,...central,end.buffer],{type:'application/zip'});
 }
 
-export async function createPayrollZip(records,storeName) {
+async function createStatementZip(statements,storeName) {
   const entries = [];
   const names = new Set();
-  for (const [index,record] of records.entries()) {
-    const base = `支給明細_${record.month}_${fileLabel(record.snapshot.castName)}`;
+  for (const [index,statement] of statements.entries()) {
+    const {title,filenamePeriod,castName} = statement;
+    const base = `${title}_${filenamePeriod}_${fileLabel(castName)}`;
     let name = `${base}.pdf`;
     let suffix = index + 1;
     while (names.has(name)) name = `${base}_${suffix++}.pdf`;
     names.add(name);
-    entries.push({name,blob:await renderStatementPages(record,storeName)});
+    entries.push({name,blob:await renderStatementPages(statement,storeName)});
   }
   return makeStoredZip(entries);
+}
+
+export function createPayrollZip(records,storeName) {
+  return createStatementZip(records.map(monthlyStatement),storeName);
+}
+
+export function createPayrollRangeZip(records,storeName) {
+  return createStatementZip(records.map(rangeStatement),storeName);
 }

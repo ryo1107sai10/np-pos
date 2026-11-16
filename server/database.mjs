@@ -28,7 +28,14 @@ export async function listStores(db, actor) {
     prepared(db, `INSERT INTO np_members (store_id, uid, email, role)
       SELECT invite.store_id, ?, invite.email, invite.role FROM np_invites invite
       WHERE invite.email = ?
-      ON CONFLICT DO NOTHING`, actor.uid, actor.email),
+      AND NOT EXISTS (SELECT 1 FROM np_store_access_blocks b WHERE b.store_id = invite.store_id
+        AND (b.uid = ? OR b.email = invite.email) AND (b.uid <> ? OR b.invite_id IS NOT invite.id))
+      ON CONFLICT DO NOTHING`, actor.uid, actor.email, actor.uid, actor.uid),
+    prepared(db, `DELETE FROM np_store_access_blocks
+      WHERE uid = ? AND EXISTS (
+        SELECT 1 FROM np_invites i JOIN np_members m ON m.store_id = i.store_id AND m.uid = ? AND m.email = i.email
+        WHERE i.store_id = np_store_access_blocks.store_id AND i.id = np_store_access_blocks.invite_id AND i.email = ?
+      )`, actor.uid, actor.uid, actor.email),
     prepared(db, `DELETE FROM np_invites
       WHERE email = ? AND EXISTS (SELECT 1 FROM np_members m
         WHERE m.store_id = np_invites.store_id AND m.uid = ? AND m.email = ?)`, actor.email, actor.uid, actor.email),
@@ -81,20 +88,27 @@ function findMembership(db, actor, storeId) {
 }
 
 export async function listMembers(db, actor, storeId) {
-  adminRequired(memberRequired(await findMembership(db, actor, storeId)));
-  const [members, invites] = await db.batch([
-    prepared(db, `SELECT m.uid, m.email, m.role, (m.uid = s.owner_uid) AS is_primary
-      FROM np_members m JOIN np_stores s ON s.id = m.store_id
-      WHERE m.store_id = ? AND EXISTS (SELECT 1 FROM np_members a WHERE a.store_id = m.store_id AND a.uid = ? AND a.role = 'admin')
+  const store = adminRequired(memberRequired(await findMembership(db, actor, storeId)));
+  const [members, invites, blocks] = await db.batch([
+    prepared(db, `SELECT m.uid, m.email, m.role, m.source, (m.uid = s.owner_uid) AS is_primary
+      FROM np_store_access m JOIN np_stores s ON s.id = m.store_id
+      WHERE m.store_id = ? AND EXISTS (SELECT 1 FROM np_store_access a WHERE a.store_id = m.store_id AND a.uid = ? AND a.role = 'admin')
       ORDER BY is_primary DESC, m.email`, storeId, actor.uid),
     prepared(db, `SELECT i.id, i.email, i.role FROM np_invites i WHERE i.store_id = ?
-      AND EXISTS (SELECT 1 FROM np_members a WHERE a.store_id = i.store_id AND a.uid = ? AND a.role = 'admin')
+      AND EXISTS (SELECT 1 FROM np_store_access a WHERE a.store_id = i.store_id AND a.uid = ? AND a.role = 'admin')
       ORDER BY i.created_at, i.id`, storeId, actor.uid),
+    prepared(db, `SELECT b.uid, b.email, gm.role AS group_role FROM np_store_access_blocks b
+      LEFT JOIN np_group_stores gs ON gs.store_id = b.store_id
+      LEFT JOIN np_group_members gm ON gm.group_id = gs.group_id AND gm.uid = b.uid
+      WHERE b.store_id = ? AND EXISTS (SELECT 1 FROM np_store_access a WHERE a.store_id = b.store_id AND a.uid = ? AND a.role = 'admin')
+      ORDER BY b.email`, storeId, actor.uid),
   ]);
   requireCondition(members.results?.length, 403, 'forbidden', '店舗管理者の権限が必要です。');
   return {
     members: members.results.map(({ is_primary, ...member }) => ({ ...member, primary: Boolean(is_primary) })),
     invites: invites.results ?? [],
+    blocks: (blocks.results ?? []).map(({group_role, ...block}) => ({...block, groupRole:group_role})),
+    canRestore: store.owner_uid === actor.uid,
   };
 }
 
@@ -102,14 +116,26 @@ export async function inviteMember(db, actor, storeId, emailInput, role) {
   adminRequired(memberRequired(await findMembership(db, actor, storeId)));
   const email = emailAddress(emailInput);
   requireCondition(roles.has(role), 400, 'invalid-role', '権限を選択してください。');
-  const invite = await resultRow(db, `INSERT INTO np_invites (id, store_id, email, role, created_at)
+  const [created] = await db.batch([
+    prepared(db, `INSERT INTO np_invites (id, store_id, email, role, created_at)
     SELECT ?, ?, ?, ?, ?
-    WHERE EXISTS (SELECT 1 FROM np_members a WHERE a.store_id = ? AND a.uid = ? AND a.role = 'admin')
+    WHERE EXISTS (SELECT 1 FROM np_store_access a WHERE a.store_id = ? AND a.uid = ? AND a.role = 'admin')
     AND NOT EXISTS (SELECT 1 FROM np_members m WHERE m.store_id = ? AND m.email = ?)
+    AND (EXISTS (SELECT 1 FROM np_stores s WHERE s.id = ? AND s.owner_uid = ?)
+      OR NOT EXISTS (SELECT 1 FROM np_store_access_blocks b WHERE b.store_id = ? AND b.email = ?))
     ON CONFLICT (store_id, email) DO UPDATE SET role = excluded.role
-    RETURNING id, email, role`, crypto.randomUUID(), storeId, email, role, Date.now(), storeId, actor.uid, storeId, email);
+    RETURNING id, email, role`, crypto.randomUUID(), storeId, email, role, Date.now(), storeId, actor.uid, storeId, email,
+    storeId, actor.uid, storeId, email),
+    prepared(db, `UPDATE np_store_access_blocks SET invite_id = (
+      SELECT i.id FROM np_invites i WHERE i.store_id = ? AND i.email = ?
+    ) WHERE store_id = ? AND email = ?
+    AND EXISTS (SELECT 1 FROM np_stores s WHERE s.id = ? AND s.owner_uid = ?)`, storeId,email,storeId,email,storeId,actor.uid),
+  ]);
+  const invite = created.results?.[0];
   if (!invite) {
-    adminRequired(memberRequired(await findMembership(db, actor, storeId)));
+    const store = adminRequired(memberRequired(await findMembership(db, actor, storeId)));
+    const blocked = await resultRow(db,'SELECT uid FROM np_store_access_blocks WHERE store_id = ? AND email = ?',storeId,email);
+    requireCondition(!blocked || store.owner_uid === actor.uid,403,'regrant-forbidden','アクセスを再付与できるのは店舗の作成者です。');
     throw new ApiError(409, 'already-member', 'このメールアドレスは既に店舗に所属しています。');
   }
   return { invite };
@@ -119,27 +145,48 @@ export async function changeMember(db, actor, storeId, uid, role) {
   const member = adminRequired(memberRequired(await findMembership(db, actor, storeId)));
   requireCondition(uid !== member.owner_uid, 409, 'primary-member', '最初の管理者の所属と権限は変更できません。');
   if (role !== undefined) requireCondition(roles.has(role), 400, 'invalid-role', '権限を選択してください。');
-  const target = await resultRow(db,'SELECT role FROM np_members WHERE store_id = ? AND uid = ?',storeId,uid);
+  const target = await resultRow(db,'SELECT role, source FROM np_store_access WHERE store_id = ? AND uid = ?',storeId,uid);
   requireCondition(target,404,'member-not-found','所属メンバーが見つかりません。');
+  requireCondition(role === undefined || target.source === 'direct',409,'group-role','グループ経由の権限は店舗グループで変更してください。');
   if (target.role === 'cast' && role !== 'cast') return revokeCastMembership(db,actor,storeId,uid,role);
-  const guards = `WHERE store_id = ? AND uid = ? AND uid <> (SELECT owner_uid FROM np_stores WHERE id = ?)
-    AND role = ? AND EXISTS (SELECT 1 FROM np_members a WHERE a.store_id = ? AND a.uid = ? AND a.role = 'admin') RETURNING uid`;
+  const selector = `SELECT t.store_id, t.uid, t.email FROM np_store_access t JOIN np_stores s ON s.id = t.store_id
+    WHERE t.store_id = ? AND t.uid = ? AND t.uid <> s.owner_uid AND t.role = ? AND t.source = ?
+    AND EXISTS (SELECT 1 FROM np_store_access a WHERE a.store_id = t.store_id AND a.uid = ? AND a.role = 'admin')`;
+  const args = [storeId,uid,target.role,target.source,actor.uid];
   const row = role === undefined
-    ? await resultRow(db, `DELETE FROM np_members ${guards}`, storeId, uid, storeId, target.role, storeId, actor.uid)
-    : await resultRow(db, `UPDATE np_members SET role = ? ${guards}`, role, storeId, uid, storeId, target.role, storeId, actor.uid);
+    ? await resultRow(db, `INSERT INTO np_store_access_blocks (store_id, uid, email) ${selector}
+      ON CONFLICT DO NOTHING RETURNING uid`, ...args)
+    : await resultRow(db, `UPDATE np_members SET role = ? WHERE (store_id, uid, email) IN (${selector}) RETURNING uid`, role, ...args);
   if (!row) {
     adminRequired(memberRequired(await findMembership(db, actor, storeId)));
-    const fresh = await resultRow(db,'SELECT role FROM np_members WHERE store_id = ? AND uid = ?',storeId,uid);
+    const fresh = await resultRow(db,'SELECT role FROM np_store_access WHERE store_id = ? AND uid = ?',storeId,uid);
     requireCondition(fresh,404,'member-not-found','所属メンバーが見つかりません。');
     throw new ApiError(409,'membership-conflict','メンバーの権限が更新されました。最新の内容を確認してください。');
   }
   return { ok: true };
 }
 
+export async function restoreGroupStoreMember(db, actor, storeId, uid) {
+  const store = adminRequired(memberRequired(await findMembership(db, actor, storeId)));
+  requireCondition(store.owner_uid === actor.uid,403,'regrant-forbidden','アクセスを再付与できるのは店舗の作成者です。');
+  const eligible = `b.store_id = ? AND b.uid = ?
+    AND EXISTS (SELECT 1 FROM np_stores s WHERE s.id = b.store_id AND s.owner_uid = ?)
+    AND EXISTS (SELECT 1 FROM np_group_stores gs JOIN np_group_members gm ON gm.group_id = gs.group_id
+      WHERE gs.store_id = b.store_id AND gm.uid = b.uid)`;
+  const [, removed] = await db.batch([
+    prepared(db,`DELETE FROM np_invites WHERE store_id = ? AND id IN (
+      SELECT b.invite_id FROM np_store_access_blocks b WHERE ${eligible}
+    )`,storeId,storeId,uid,actor.uid),
+    prepared(db,`DELETE FROM np_store_access_blocks AS b WHERE ${eligible} RETURNING uid`,storeId,uid,actor.uid),
+  ]);
+  requireCondition(removed.results?.length,409,'group-access-unavailable','現在のグループ所属を確認してください。');
+  return {ok:true};
+}
+
 export async function revokeInvite(db, actor, storeId, inviteId) {
   adminRequired(memberRequired(await findMembership(db, actor, storeId)));
   const row = await resultRow(db, `DELETE FROM np_invites WHERE store_id = ? AND id = ?
-    AND EXISTS (SELECT 1 FROM np_members a WHERE a.store_id = ? AND a.uid = ? AND a.role = 'admin')
+    AND EXISTS (SELECT 1 FROM np_store_access a WHERE a.store_id = ? AND a.uid = ? AND a.role = 'admin')
     RETURNING id`, storeId, inviteId, storeId, actor.uid);
   if (!row) {
     adminRequired(memberRequired(await findMembership(db, actor, storeId)));
@@ -270,10 +317,12 @@ async function revokeCastMembership(db,actor,storeId,memberUid,role) {
   if (current.revision === 0) {
     const filter = `WHERE store_id = ? AND uid = ? AND role = 'cast'
       AND EXISTS (SELECT 1 FROM np_stores s WHERE s.id = ? AND s.revision = 0)
-      AND EXISTS (SELECT 1 FROM np_members m WHERE m.store_id = ? AND m.uid = ? AND m.role = 'admin') RETURNING uid`;
+      AND EXISTS (SELECT 1 FROM np_store_access m WHERE m.store_id = ? AND m.uid = ? AND m.role = 'admin')`;
     const values = [storeId,memberUid,storeId,storeId,actor.uid];
-    const row = role === undefined ? await resultRow(db,`DELETE FROM np_members ${filter}`,...values)
-      : await resultRow(db,`UPDATE np_members SET role = ? ${filter}`,role,...values);
+    const row = role === undefined
+      ? await resultRow(db,`INSERT INTO np_store_access_blocks (store_id, uid, email)
+        SELECT store_id, uid, email FROM np_members ${filter} ON CONFLICT DO NOTHING RETURNING uid`,...values)
+      : await resultRow(db,`UPDATE np_members SET role = ? ${filter} RETURNING uid`,role,...values);
     requireCondition(row,409,'membership-conflict','メンバーの権限が更新されました。最新の内容を確認してください。');
     return {ok:true};
   }
@@ -286,7 +335,7 @@ async function revokeCastMembership(db,actor,storeId,memberUid,role) {
   const args = [storeId,operationId,actor.uid,revision,current.revision];
   const statements = [prepared(db, `INSERT INTO np_operations (store_id, operation_id, actor_uid, operation, fingerprint, revision, recorded_at)
     SELECT s.id, ?, ?, 'revokeCastMembership', ?, ?, ? FROM np_stores s WHERE s.id = ? AND s.revision = ?
-    AND EXISTS (SELECT 1 FROM np_members m WHERE m.store_id = s.id AND m.uid = ? AND m.role = 'admin')
+    AND EXISTS (SELECT 1 FROM np_store_access m WHERE m.store_id = s.id AND m.uid = ? AND m.role = 'admin')
     AND EXISTS (SELECT 1 FROM np_members t WHERE t.store_id = s.id AND t.uid = ? AND t.role = 'cast') ON CONFLICT DO NOTHING`,
   operationId,actor.uid,fingerprint,revision,now,storeId,current.revision,actor.uid,memberUid)];
   if (oldLink) {
@@ -297,7 +346,8 @@ async function revokeCastMembership(db,actor,storeId,memberUid,role) {
       SELECT ?, ?, ?, ? WHERE ${currentOperation}`,storeId,operationId,revision,payload,...args));
   }
   const memberFilter = `WHERE store_id = ? AND uid = ? AND role = 'cast' AND ${currentOperation}`;
-  if (role === undefined) statements.push(prepared(db,`DELETE FROM np_members ${memberFilter}`,storeId,memberUid,...args));
+  if (role === undefined) statements.push(prepared(db,`INSERT INTO np_store_access_blocks (store_id, uid, email)
+    SELECT store_id, uid, email FROM np_members ${memberFilter}`,storeId,memberUid,...args));
   else statements.push(prepared(db,`UPDATE np_members SET role = ? ${memberFilter}`,role,storeId,memberUid,...args));
   // Advance the revision even when there was no link, so in-flight binds cannot target a membership that has been revoked and renewed.
   const chunks = oldLink ? snapshotChunks(state) : current.chunks;

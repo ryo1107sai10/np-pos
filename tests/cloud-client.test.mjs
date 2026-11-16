@@ -11,14 +11,26 @@ const account = {
 const cloudConfig = { firebase: { apiKey: 'test-key', projectId: 'test-project' }, apiBase: 'https://api.example.test' };
 const failure = (code, status) => Response.json({ error: { code, message: code } }, { status });
 
-function service(t, { verified = true, role = 'admin', command, readState, project = (value) => value } = {}) {
+function testQueue() {
+  const records = new Map();
+  return {async update(key,change) {
+    const before = structuredClone(records.get(key) ?? []);
+    if (!change) return before;
+    const after = change(before);
+    records.set(key,structuredClone(after));
+    return after;
+  }};
+}
+
+function service(t, { verified = true, role = 'admin', command, readState, project = (value) => value,
+  queue = testQueue(), identity = account } = {}) {
   let online = true;
   let revision = 0;
   let state = { revision: 0 };
   const calls = [];
   const snapshots = [];
   let watch;
-  const auth = { currentUser: { ...account, emailVerified: verified } };
+  const auth = { currentUser: { ...identity, emailVerified: verified } };
   const sdk = {
     getApps: () => [],
     initializeApp: () => ({}),
@@ -37,6 +49,7 @@ function service(t, { verified = true, role = 'admin', command, readState, proje
     pollMs: 60_000,
     firebaseLoader: async () => sdk,
     isOnline: () => online,
+    operationQueue:queue,
     onChange: (snapshot) => snapshots.push(snapshot),
     fetchImpl: async (url, options) => {
       const path = new URL(url).pathname;
@@ -89,13 +102,78 @@ test('verified membership and cloud state remain separate from an offline pendin
   assert.equal(client.snapshot.pending, 1);
   assert.equal(client.snapshot.state.revision, 0);
   assert.equal(calls.filter(({ path }) => path.endsWith('/commands')).length, 0);
-  await assert.rejects(client.submit({ type: 'order', ticketId: 'tab' }, 0), { code: 'sync-pending' });
-  assert.throws(() => client.leaveStore(), { code: 'sync-pending' });
+  await assert.rejects(client.submit({ type: 'settle', ticketId: 'tab', payments:[] }, 0), { code: 'sync-pending' });
+  await assert.rejects(client.leaveStore(), { code: 'sync-pending' });
   setOnline(true);
   await client.retrySync();
   assert.equal(client.snapshot.revision, 1);
   assert.equal(client.snapshot.pending, 0);
   assert.equal(calls.at(-1).payload.operationId, outcome.operationId);
+});
+
+test('multiple queued orders survive a client restart and replay in the original order at successive revisions', async (t) => {
+  const queue = testQueue();
+  const one = service(t,{queue});
+  await one.client.start();
+  await one.client.enterStore('shop');
+  one.setOnline(false);
+  const firstOrder = {type:'order',ticketId:'tab',items:[{menuId:'highball',quantity:1}]};
+  const secondOrder = {type:'order',ticketId:'tab',items:[{menuId:'cola',quantity:2}]};
+  const first = await one.client.submit(firstOrder);
+  const second = await one.client.submit(secondOrder);
+  assert.equal(one.client.snapshot.pending,2);
+  assert.deepEqual(one.client.snapshot.waiting.map(({type})=>type),['order','order']);
+  assert.equal(one.calls.filter(({path})=>path.endsWith('/commands')).length,0);
+  one.client.dispose();
+  const other = service(t,{queue,identity:{...account,uid:'different-uid'}});
+  await other.client.start();
+  await other.client.enterStore('shop');
+  assert.equal(other.client.snapshot.pending,0);
+  other.client.dispose();
+  const resumed = service(t,{queue});
+  await resumed.client.start();
+  resumed.setOnline(false);
+  await resumed.client.enterStore('shop');
+  assert.equal(resumed.client.snapshot.state,null);
+  assert.equal(resumed.client.snapshot.pending,2);
+  resumed.setOnline(true);
+  await resumed.client.retrySync();
+  await resumed.client.retrySync();
+  const commands = resumed.calls.filter(({path})=>path.endsWith('/commands')).map(({payload})=>payload);
+  assert.deepEqual(commands,[{command:firstOrder,operationId:first.operationId,expectedRevision:0},
+    {command:secondOrder,operationId:second.operationId,expectedRevision:1}]);
+  assert.equal(resumed.client.snapshot.pending,0);
+  assert.equal(resumed.client.snapshot.revision,2);
+});
+
+test('recovery preserves unsent operations after the first definitive rejection and does not rebase other payment amounts', async (t) => {
+  const {client,calls,setOnline} = service(t,{command:()=>failure('rejected-command',422)});
+  await client.start();
+  await client.enterStore('shop');
+  setOnline(false);
+  await client.submit({type:'order',ticketId:'tab',items:[{menuId:'cola',quantity:2}]});
+  await client.submit({type:'settle',ticketId:'other',payments:[{method:'cash',amount:1500}]});
+  setOnline(true);
+  await assert.rejects(client.retrySync(),{code:'rejected-command'});
+  assert.equal(client.snapshot.pending,2);
+  assert.equal(client.snapshot.status,'conflict');
+  await client.retrySync();
+  assert.equal(calls.filter(({path})=>path.endsWith('/commands')).length,1);
+  await client.clearQueue();
+  assert.equal(client.snapshot.pending,0);
+});
+
+test('when device storage cannot be used, offline actions do not falsely report a saved order', async (t) => {
+  const queue = {async update() { throw new Error('storage disabled'); }};
+  const {client,setOnline} = service(t,{queue});
+  await client.start();
+  await client.enterStore('shop');
+  setOnline(false);
+  await assert.rejects(client.submit({type:'order',ticketId:'tab'}),{code:'queue-unavailable'});
+  assert.equal(client.snapshot.pending,0);
+  setOnline(true);
+  await client.submit({type:'order',ticketId:'tab'});
+  assert.equal(client.snapshot.revision,1);
 });
 
 test('an uncertain response retries the exact operation identifier and original revision', async (t) => {
@@ -134,7 +212,7 @@ test('server revision conflict refreshes the view without rebasing the queued op
   await client.retrySync();
   assert.equal(client.snapshot.state.revision, 2);
   assert.equal(calls.filter(({ path }) => path.endsWith('/commands')).length, 1);
-  client.clearQueue();
+  await client.clearQueue();
   assert.equal(client.snapshot.pending, 0);
   assert.equal(client.snapshot.conflict, '');
   assert.throws(() => client.submit({ type: 'seat' }, 0), { code: 'revision-conflict' });

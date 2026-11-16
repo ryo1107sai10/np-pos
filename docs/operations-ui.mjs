@@ -1,15 +1,18 @@
+import { getPersonalSalesDiscountMode, maxPersonalSalesAdjustment, personalSalesDiscountModes } from './personal-sales.mjs';
+
 const timestamp = new Intl.DateTimeFormat('ja-JP', {
   timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit',
   hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
 });
 const japaneseNumber = new Intl.NumberFormat('ja-JP', { maximumFractionDigits: 6 });
 const moneyFields = new Set(['amount', 'total', 'subtotal', 'discount', 'price', 'value', 'cost', 'unitCost', 'expectedCash', 'actualCash', 'discrepancy',
-  'received', 'change', 'cardFee', 'grossAmount', 'net', 'manualAdvance', 'hourlyRate', 'pointRate']);
+  'received', 'change', 'cardFee', 'grossAmount', 'net', 'manualAdvance', 'hourlyRate', 'pointRate', 'personalSales', 'adjustmentAmount']);
 const omittedAuditFields = new Set(['receivable', 'receivableSales', 'recoveries', 'recoveryRows', 'creditLimit', 'creditEnabled', 'creditOverride']);
 const roles = { admin: '店舗管理者', manager: 'マネージャー', staff: 'スタッフ', cast:'キャスト' };
 
 const auditLabels = {
   discount: '値引き', discountRequest: '値引き申請', approveDiscount: '値引き承認', rejectDiscount: '値引き却下',
+  adjustPersonalSales: '個人売上の調整',
   cancelLine: '注文取消', void: '伝票取消', settle: '会計確定', cancelSettlement: '会計取消', reopenTicket: '伝票の再オープン',
   correctSettledTicketPayments: '会計済み伝票の支払方法訂正',
   correctSettledContents:'会計済み伝票の注文・値引き訂正',
@@ -43,6 +46,8 @@ const auditLabels = {
 };
 
 const valueLabels = {
+  personalSales:'個人売上', adjustmentAmount:'調整額', adjustmentId:'調整記録ID',
+  personalSalesMode:'値引きの個人売上への反映', ...personalSalesDiscountModes,
   calculationSettings:'会計の計算設定', serviceRateBps:'サービス料率', serviceRounding:'サービス料の端数',
   taxRounding:'消費税の端数', serviceBase:'サービス料の計算基準', priceMode:'メニュー価格',
   beforeDiscount:'値引き前',afterDiscount:'値引き後',exclusive:'税抜価格',inclusive:'税込価格',
@@ -84,6 +89,7 @@ export function operationReason({ title = '理由', required = true } = {}) {
 export function renderDiscountForm({ticket, subtotal, limit, role, reasonCodes, priceMode}, {escape, yen}) {
   const existing = ticket.discountRequest;
   const mode = existing?.mode ?? 'amount';
+  const personalSales = existing?.personalSalesMode ?? getPersonalSalesDiscountMode(ticket);
   const subtotalLabel = priceMode === 'inclusive' ? '税込小計' : '税抜小計';
   return `<p class="form-copy">${subtotalLabel} ${yen(subtotal)} · 適用中の値引き ${yen(ticket.discount)}</p>
     ${existing ? `<p class="ops-highlight" role="status">${yen(existing.amount)}の承認待ちです。新しい申請で差し替えられます。</p>` : ''}
@@ -91,9 +97,25 @@ export function renderDiscountForm({ticket, subtotal, limit, role, reasonCodes, 
       ${inputLabel('指定方法', `<select name="discountMode"><option value="amount"${mode === 'amount' ? ' selected' : ''}>金額（円）</option><option value="percent"${mode === 'percent' ? ' selected' : ''}>率（%）</option></select>`)}
       ${inputLabel(mode === 'percent' ? '値引き率（%）' : '値引き額（円）', `<input name="discountValue" type="number" min="0" max="${mode === 'percent' ? 100 : subtotal}" step="${mode === 'percent' ? '0.01' : '1'}" value="${existing?.value ?? ticket.discount}" inputmode="decimal" required>`)}
     </div>
+    ${inputLabel('値引きの個人売上への反映', `<select name="personalSalesMode">${Object.entries(personalSalesDiscountModes).map(([key,text]) =>
+      `<option value="${key}"${personalSales === key ? ' selected' : ''}>${text}</option>`).join('')}</select>`)}
     ${inputLabel('理由区分', `<select name="reasonCode" required><option value="">選択してください</option>${Object.entries(reasonCodes).map(([key,value]) => `<option value="${escape(key)}"${existing?.reasonCode === key ? ' selected' : ''}>${escape(value)}</option>`).join('')}</select>`)}
     ${inputLabel('理由の詳細', `<textarea name="reason" rows="2" maxlength="120" required placeholder="例　クーポンを受領したため">${escape(existing?.reason ?? '')}</textarea>`)}
     <p class="field-help" id="discount-preview" aria-live="polite">${role === 'manager' ? `小計の${limit / 100}%を超える場合は管理者の承認が必要です。` : `値引きは${subtotalLabel}に適用します。`}</p>`;
+}
+
+export function renderPersonalSalesAdjustment(ticket, people, commission, { escape, yen }) {
+  const byCast = new Map(commission.map(({ castId, sales }) => [castId, sales]));
+  const options = people.map(({ id, name }) => `<option value="${escape(id)}">${escape(name)} · ${yen(byCast.get(id) ?? 0)}</option>`).join('');
+  const rows = (ticket.personalSalesAdjustments ?? []).slice().reverse().map((row) =>
+    `<li><span><strong>${escape(row.castName)}</strong><br><small>${escape(row.reason)} · ${escape(row.actor.label)} · ${timestamp.format(row.at)}</small></span>
+      <strong class="money">${row.amount > 0 ? '+' : '−'}${yen(Math.abs(row.amount))}</strong></li>`).join('');
+  return `<p class="form-copy">キャスト別の個人売上だけを調整します。歩合・ポイントは注文に基づいて計算します。</p>
+    ${people.length ? `${inputLabel('キャストと現在の個人売上', `<select name="personalSalesCast" required><option value="">選択してください</option>${options}</select>`)}
+      <div class="form-grid">${inputLabel('増減', '<select name="personalSalesDirection"><option value="add">加算</option><option value="subtract">減算</option></select>')}
+      ${inputLabel('金額（円）', `<input type="number" name="personalSalesAmount" min="1" max="${maxPersonalSalesAdjustment}" step="1" inputmode="numeric" required>`)}</div>
+      ${operationReason({ title:'個人売上を調整する理由' })}` : '<p class="field-help">対象にできるキャストがいません。</p>'}
+    ${rows ? `<section><h3>この伝票の調整履歴</h3><ul class="deposit-list">${rows}</ul></section>` : ''}`;
 }
 
 function visibleAuditFields(value) {

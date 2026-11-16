@@ -1,4 +1,5 @@
 import { defaultItemTaxRateBps } from './calculation-settings.mjs';
+import { barcodeScannerAvailable } from './barcode-scanner.mjs';
 
 const tabs = [
   { id: 'menu', label: 'メニュー', glyph: 'store' },
@@ -188,6 +189,7 @@ function stockInspector(item, api) {
       ${numberInput('仕入原価（円 / 単位）', 'unit-cost', item.defaultUnitCost, { max: priceMax, step: stockPrecision, required: true })}
       <label class="field"><span>品目コード</span><input name="store-item-code" maxlength="64" value="${escape(item.itemCode ?? '')}" autocomplete="off"></label>
       <label class="field"><span>バーコード</span><input name="store-barcode" maxlength="64" value="${escape(item.barcode ?? '')}" autocomplete="off"></label>
+      ${barcodeScannerAvailable() ? '<button type="button" class="btn btn-secondary" data-action="stock-barcode-register">カメラでバーコードを読む</button>' : ''}
     </div>
     <p class="field-help">補充時は、設定した1単位あたりの原価を使います。単位の変更後も在庫数量やメニューの使用量は同じ数値を引き継ぎます。</p>
     <div class="store-editor-toggles">${toggle('在庫一覧に表示する', 'stock-visible', item.hidden !== true)}</div>`;

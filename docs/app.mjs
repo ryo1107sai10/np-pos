@@ -17,6 +17,7 @@ import { bindLayoutEditor, commitLayoutFields, floorLayoutStage, handleLayoutEdi
 import { renderLayoutTransfer } from './layout-transfer.mjs';
 import { catalogDeletionBlocker, getOrderCategories, getStoreSettings, stockDeletionBlocker } from './store-settings.mjs';
 import { commitStoreSettingsEditor, handleStoreSettingsEditorAction, renderStoreSettingsEditor } from './store-settings-editor.mjs';
+import { openBarcodeScanner } from './barcode-scanner.mjs';
 import { cloudConfig } from './cloud-config.mjs';
 import { createCloudClient } from './cloud-client.mjs';
 import { renderCloudBanner, renderCloudEntry, renderCloudMigration, renderCloudPanel, renderCloudRestricted, renderStoreOverview } from './cloud-ui.mjs';
@@ -31,15 +32,16 @@ import { findPrintableTicket, getPrintAutoKind, getPrintDocuments, getPrintSetti
 import { printDocumentTitles, renderExtensionQuote, renderPrintOptions, renderPrintPreview, renderPrintSettings } from './print-ui.mjs';
 import { createBillingDemo, createCashDemo, createPayrollDemo, createPhaseTwoDemo, createPeriodReportDemo } from './phase-two-demo.mjs';
 import * as customerUI from './customer-ui.mjs';
-import { operationReason, renderAuditLog, renderDiscountForm } from './operations-ui.mjs';
+import { operationReason, renderAuditLog, renderDiscountForm, renderPersonalSalesAdjustment } from './operations-ui.mjs';
+import { getAdjustablePersonalSalesPeople, personalSalesDiscountModes } from './personal-sales.mjs';
 import { getOperationsGuideTopic, getPracticeStatus, renderGuideResults, renderPracticeProgress } from './practice-guide.mjs';
 import { paymentCorrectionModel, readPaymentCorrection, renderPaymentCorrection, updatePaymentCorrection } from './payment-correction-ui.mjs';
 import { calculateCashTender, cashDenominations, cashEntryMaximum, getCashCountTotal, getCashPaymentAmount } from './register-cash.mjs';
-import { getRegisterSettings, openingCashSuggestion, registerCutoff } from './register-config.mjs';
+import { getRegisterSettings, openingCashSuggestion, operationBusinessDate, registerCutoff } from './register-config.mjs';
 import { renderWorkspaceMenu } from './workspace-menu.mjs';
 import { readRolePolicy, renderRolePolicy, roleAllowsAction, roleAllowsPage, roleGroupAllowed, roleLabel } from './role-policy.mjs';
 import { renderAnalytics, buildAnalyticsCsv } from './analytics.mjs';
-import { getDailyPayLimit, getPayrollDailyPays, getPayrollDraft, getPayrollTemplates, isPayrollMonth, MissingPayrollRateError,
+import { getDailyPayLimit, getPayrollDailyPays, getPayrollDraft, getPayrollRangeStatements, getPayrollTemplates, isPayrollMonth, MissingPayrollRateError,
   previewPayroll, previewPayrollRange } from './payroll.mjs';
 import * as payrollUI from './payroll-ui.mjs';
 import { getPayrollVariables } from './payroll-formula.mjs';
@@ -93,7 +95,7 @@ const ownerActions = new Set(['store-settings', 'stock-settings', 'edit-layout',
   'cash-accounts','cash-account-add','cash-account-remove-new','settled-ticket-companions']);
 const managerActions = new Set(['open', 'close', 'stock-adjust', 'stocktake', 'discount', 'cancel-line', 'cancel-deposit', 'customer-detail', 'customer-new', 'customer-edit', 'customer-visit',
   'record-cash', 'report-mode', 'report-day', 'report-export', 'ticket-end', 'ticket-set-time', 'ticket-guests',
-  'edit-ticket-line', 'cancel-ticket-extension', 'ops-notices','edit-cash-movement','void-cash-movement','edit-deposit']);
+  'edit-ticket-line', 'cancel-ticket-extension', 'ops-notices','edit-cash-movement','void-cash-movement','edit-deposit','personal-sales-adjustment']);
 const cloudLabels = { admin: '店舗管理者', manager: 'マネージャー', staff: 'スタッフ', cast: 'キャスト', trainee: '体入' };
 
 let cloudState;
@@ -102,6 +104,8 @@ let demoPractice = null;
 const castNoticesSeen = new Map();
 let state = loadState();
 let stockSearch = '';
+let stockBarcodeExact = false;
+let activeBarcodeScan;
 let stockLowOnly = false;
 let stockHistoryId = '';
 let page = readPage();
@@ -628,12 +632,12 @@ function renderDetail(notices, now) {
     <div class="detail-aux"><h3>注文明細 <small>${lines.length}</small></h3>${settled ? '' : button('卓移動・連結','move',{glyph:'move',id:ticket.id})}</div>
     <ul class="ticket-lines">${lines.length ? lines.map((line) => `<li class="ticket-line"><span class="line-desc">${escape(line.name)} <em>×${line.quantity}</em>${line.castIds.length ? `<small>${lineStaffNames(line)}</small>` : ''}${line.autoExtension ? '<small>自動延長</small>' : ''}</span><span class="money">${yen(line.total)}</span>${renderTicketLineControls(ticket,line)}</li>`).join('') : '<li class="lines-empty">注文明細はありません。</li>'}</ul>
     ${totalRows(q,{settlement:settled})}${pending}
-    <div class="mini-tools">${!settled ? `${button('前受金','deposit',{glyph:'wallet',tone:'quiet',id:ticket.id})}${button('値引き','discount',{glyph:'minus',tone:'quiet',id:ticket.id})}${quickItem ? button(escape(quickItem.name),'order',{glyph:'plus',tone:'quiet',id:ticket.id,data:'data-product="highball"'}) : ''}${button('卓履歴','seat-history',{glyph:'history',tone:'quiet',id:ticket.id})}${printButton(ticket,state.day.date,'check','確認伝票を印刷',{tone:'quiet'})}` : ''}${ticketAuditButton(ticket,state.day.date)}</div>
+    <div class="mini-tools">${!settled ? `${button('前受金','deposit',{glyph:'wallet',tone:'quiet',id:ticket.id})}${button('値引き','discount',{glyph:'minus',tone:'quiet',id:ticket.id})}${button('個人売上を調整','personal-sales-adjustment',{glyph:'users',tone:'quiet',id:ticket.id})}${quickItem ? button(escape(quickItem.name),'order',{glyph:'plus',tone:'quiet',id:ticket.id,data:'data-product="highball"'}) : ''}${button('卓履歴','seat-history',{glyph:'history',tone:'quiet',id:ticket.id})}${printButton(ticket,state.day.date,'check','確認伝票を印刷',{tone:'quiet'})}` : ''}${ticketAuditButton(ticket,state.day.date)}</div>
     <div class="detail-actions">${!settled ? `${button('注文','order',{glyph:'plus',tone:'secondary',id:ticket.id})}${button('延長','extend',{glyph:'clock',id:ticket.id,disabled:!extensionPlans().length})}${button('会計へ進む','settle',{glyph:'arrow-right',tone:'primary',id:ticket.id,cls:'btn-block',disabled:Boolean(requested)})}` : `${button('会計内訳','receipt',{glyph:'ticket',id:ticket.id,cls:'btn-block'})}${button('退店・卓を解放','depart',{glyph:'checkout',tone:'primary',id:ticket.id,cls:'btn-block'})}`}</div></div></aside>`;
 }
 
 function customerUIApi() {
-  const today = businessDate();
+  const today = operationBusinessDate(state);
   return {escape, icon, yen, role:currentRole(),
     businessDate:state.day.status === 'closed' && today > state.day.date ? today : state.day.date};
 
@@ -707,7 +711,7 @@ function render({ preserveFocus = false } = {}) {
       canCorrectRegister:currentRole() === 'admin',
       canEditCash:(item) => permittedAction('edit-cash-movement') && Boolean(editableCashMovement(state,item.id))
         && (currentRole() === 'admin' || (state.day.date === item.date && state.day.status === 'open')),
-      reportDate,commissionCast,reportInterval:currentReportInterval(),reportExportError,stockSearch,stockLowOnly,stockHistoryId});
+      reportDate,commissionCast,reportInterval:currentReportInterval(),reportExportError,stockSearch,stockBarcodeExact,stockLowOnly,stockHistoryId});
     const practice = demoPractice ? renderPracticeProgress(getPracticeStatus(state),{button,escape,icon}) : '';
     content = renderTop() + banner + practice + tools + renderOperationsNav() + view;
   }
@@ -800,6 +804,8 @@ function cloudUpdated(next) {
     if (dialog.open && modal?.type !== 'cloud') dialog.close();
   }
   if (contextChanged) {
+    activeBarcodeScan?.close();
+    stockSearch = ''; stockBarcodeExact = false;
     announcedAutoExtensions.clear();
     cloudMembers = {members: [], invites: []};
     customersQuery = '';
@@ -819,13 +825,19 @@ function cloudUpdated(next) {
   }
   if (contextChanged || before.state !== next.state) syncFloorSelection();
   if ((contextChanged || accountChanged) && dialog.open && modal?.type === 'cloud') paintDialog();
+  if (dialog.open && modal?.type === 'cloud-sync-review' && (before.pending !== next.pending || before.conflict !== next.conflict)) paintDialog();
   if (accountChanged && dialog.open && modal?.type === 'cloud-groups' && !modal.demo) dialog.close();
   if (contextChanged || before.state !== next.state || before.status !== next.status
     || before.pending !== next.pending || accountChanged) render({preserveFocus: true});
+  if (before.status === 'offline' && next.status === 'ready' && !next.store && next.stores.length > 0) void restoreCloud();
 }
 
 async function refreshMembers() {
-  if (cloudState.store?.role === 'admin') cloudMembers = await cloud.listMembers();
+  const store = cloudState.store;
+  const uid = cloudState.user?.uid;
+  if (store?.role !== 'admin') return;
+  const members = await cloud.listMembers();
+  if (cloudState.store?.id === store.id && cloudState.store.role === 'admin' && cloudState.user?.uid === uid) cloudMembers = members;
 }
 
 async function restoreCloud() {
@@ -1045,7 +1057,15 @@ async function cloudAction(action, target) {
         break;
       }
       case 'cloud-member-revoke':
-        if (window.confirm('このメンバーの店舗アクセスを解除しますか？')) await cloud.removeMember(id);
+        if (!window.confirm('グループ経由の権限も含め、この店舗へのアクセスを解除しますか？')) break;
+        await cloud.removeMember(id);
+        cloudMessage = 'この店舗へのアクセスを解除しました。';
+        await refreshMembers();
+        break;
+      case 'cloud-member-restore':
+        if (!window.confirm('この店舗へのグループ経由のアクセスを再開しますか？')) break;
+        await cloud.restoreGroupMember(id);
+        cloudMessage = 'グループ経由のアクセスを再開しました。';
         await refreshMembers();
         break;
       case 'cloud-invite-revoke':
@@ -1058,22 +1078,25 @@ async function cloudAction(action, target) {
         if (dialog.open && modal === active) dialog.close();
         break;
       case 'cloud-demo':
-        cloud.leaveStore();
+        await cloud.leaveStore();
         rememberStore(null);
         if (dialog.open && modal === active) dialog.close();
         break;
       case 'cloud-sync-retry':
         await cloud.retrySync();
         break;
+      case 'cloud-sync-review':
+        openDialog(action);
+        break;
       case 'cloud-sync-discard':
-        if (cloudState.conflict && window.confirm('この操作の送信待ちを取り消し、最新の営業データを読み込みますか？')) {
-          cloud.clearQueue();
+        if (cloudState.conflict && window.confirm(`${cloudState.pending}件の送信待ちを取り消し、最新の営業データを読み込みますか？`)) {
+          await cloud.clearQueue();
           await cloud.retrySync();
         }
         break;
     }
   } catch (error) {
-    if (dialog.open && modal === active && ['cloud-overview','cloud-groups'].includes(active?.type)) showError(error.message);
+    if (dialog.open && modal === active && ['cloud-overview','cloud-groups','cloud-sync-review'].includes(active?.type)) showError(error.message);
     else if (dialog.open && modal === active) cloudActionError = error.message;
     else toast(error.message);
   } finally {
@@ -1095,10 +1118,43 @@ function toast(message, {error = false} = {}) {
   setTimeout(()=>item.remove(), 4300);
 }
 
+async function scanStockBarcode(action) {
+  if (activeBarcodeScan) return;
+  const register = action === 'stock-barcode-register';
+  const field = register ? dialog.querySelector('[name=store-barcode]') : app.querySelector('[name=stockSearch]');
+  if (!field || (register ? !modal?.editor || currentRole() !== 'admin' : page !== 'stock' || !canOpenPage('stock'))) return;
+  const storeId = cloudState.store?.id;
+  const scan = openBarcodeScanner();
+  activeBarcodeScan = scan;
+  try {
+    const value = await scan.result;
+    if (!value || storeId !== cloudState.store?.id) return;
+    if (register) {
+      if (field.isConnected && dialog.open && currentRole() === 'admin') {
+        field.value = value;
+        field.focus({preventScroll:true});
+      }
+    } else if (page === 'stock' && canOpenPage('stock')) {
+      stockSearch = value;
+      stockBarcodeExact = true;
+      stockLowOnly = false;
+      if (state.stock.some(({barcode,hidden}) => hidden && barcode?.toLowerCase() === value.toLowerCase())) showHiddenStock = true;
+      render();
+      app.querySelector('[name=stockSearch]')?.focus({preventScroll:true});
+    }
+  } finally {
+    if (activeBarcodeScan === scan) activeBarcodeScan = undefined;
+  }
+}
+
+function visibleOperationMessage(message) {
+  return /売掛|与信/.test(message) ? 'この操作を完了できません。最新の会計記録を開き直してください。' : message;
+}
+
 function showError(message) {
   const box = dialog.querySelector('.modal-body > .form-error');
   if (!box) return;
-  box.textContent = /売掛|与信/.test(message) ? 'この操作を完了できません。最新の会計記録を開き直してください。' : message;
+  box.textContent = visibleOperationMessage(message);
   box.hidden = false;
   box.scrollIntoView({ block: 'nearest' });
 }
@@ -1126,7 +1182,8 @@ async function commit(command, message, after, {fromFloor = false} = {}) {
     if (!queued && demoPractice) mobileDetails = false;
     render();
     if (fromFloor && !queued) after?.(next);
-    if (queued) toast('送信待ちです。接続が回復すると同期を確認します。');
+    if (queued) toast(cloudState.pendingVolatile ? '送信待ちです。同期待ちの間はこの画面を開いてください。'
+      : '送信待ちを端末に保存しました。接続が回復すると同期します。');
     else if (message) toast(message);
     return queued ? null : next;
   };
@@ -1260,7 +1317,7 @@ function downloadFile(filename, data, type) {
 
 function exportStoreFile() {
   const text = `${JSON.stringify(exportStoreConfiguration(state),null,2)}\n`;
-  downloadFile(`np-pos-settings-${businessDate()}.json`,text,'application/json');
+  downloadFile(`np-pos-settings-${operationBusinessDate(state)}.json`,text,'application/json');
   toast('店舗設定と卓レイアウトを書き出しました。');
 }
 
@@ -1433,6 +1490,23 @@ function paintDialog(layoutFileInput) {
       for (const section of dialog.querySelectorAll('[data-group-section]')) {
         if (sections.has(section.dataset.groupSection)) section.open = sections.get(section.dataset.groupSection);
       }
+      return;
+    }
+    case 'cloud-sync-review': {
+      const labels = {open:'開店',seat:'来店',order:'注文',extend:'延長',move:'卓移動',settle:'会計',depart:'退店',serve:'提供済み',migrate:'データ移行'};
+      const waiting = cloudState.waiting ?? [];
+      const entries = waiting.map(({type,ticketId,tableIds,createdAt}) => {
+        const visit = (state.tickets ?? []).find(({id}) => ticketId === id);
+        const tables = tableIds?.map(tableName).join('・');
+        const target = visit ? ` ／ 伝票 No. ${visit.number}` : tables ? ` ／ ${tables}` : '';
+        return `<li><span>${escape((labels[type] ?? '営業操作') + target)}</span><span>${dateTime.format(createdAt)}</span></li>`;
+      });
+      const status = cloudState.conflict ? `<p class="ops-highlight" role="status">${escape(visibleOperationMessage(cloudState.conflict))}</p>`
+        : cloudState.pendingVolatile ? '<p class="ops-highlight" role="status">この操作は画面を開いている間、接続の回復を待ちます。</p>'
+          : '<p class="field-help">接続が回復すると上から順に送信し、店舗の営業データに反映します。</p>';
+      present('送信待ちの操作',waiting.length ? status + `<ul class="compact-history">${entries.join('')}</ul>` +
+        (cloudState.conflict ? `<div class="ops-actions">${button('送信待ちを取り消す','cloud-sync-discard',{tone:'danger'})}</div>` : '')
+        : '<p class="form-copy" role="status">送信待ちの操作はありません。</p>',null,{style:'ops-modal'});
       return;
     }
     case 'cloud-overview':
@@ -1695,7 +1769,7 @@ function paintDialog(layoutFileInput) {
       present('確定明細を一括出力',payrollUI.renderPayrollBatch(state,modal.selection,{escape}),'出力する',{style:'ops-modal'});
       return;
     case 'payroll-range':
-      present('日付指定の給与集計',payrollUI.renderPayrollRange(state,modal,{escape,yen}),'集計する',{style:'ops-modal modal-wide'});
+      present('日付指定の給与集計',payrollUI.renderPayrollRange(state,modal,{escape,icon,yen}),'集計する',{style:'ops-modal modal-wide'});
       return;
     case 'payroll-templates':
       present('給与の計算テンプレート',payrollUI.renderPayrollTemplates(state,modal.selection,{escape,icon}),
@@ -1867,6 +1941,12 @@ function paintDialog(layoutFileInput) {
       updateDepositPreview();
       return;
     }
+    case 'personal-sales-adjustment': {
+      const people = getAdjustablePersonalSalesPeople(state,ticket);
+      present('個人売上を調整',headline + renderPersonalSalesAdjustment(ticket,people,q.commission,{escape,yen}),
+        people.length ? '調整を記録' : null,{style:'ops-modal'});
+      return;
+    }
     case 'discount':
       present('値引きを設定',headline + renderDiscountForm({ticket,subtotal:q.subtotal,priceMode:q.priceMode,
         limit:getManagerDiscountLimit(state),role:currentRole(),reasonCodes:discountReasonCodes},{escape,yen}),
@@ -1880,6 +1960,7 @@ function paintDialog(layoutFileInput) {
       const body = `${headline}<div class="result-bar"><span>申請額</span><strong>${yen(request.amount)}</strong></div>
         <p class="form-copy">${escape(discountReasonCodes[request.reasonCode])} · ${escape(request.reason)}</p>
         <p class="field-help">申請者 ${escape(request.actor?.label)} · 申請時の小計 ${yen(request.subtotal)}</p>
+        <p class="field-help">${personalSalesDiscountModes[request.personalSalesMode] ?? personalSalesDiscountModes.reflect}</p>
         ${!rejecting && q.subtotal !== request.subtotal ? '<p class="ops-highlight">明細の小計が変わりました。却下してから、現在の小計で申請し直せます。</p>' : ''}
         ${operationReason({title:rejecting?'却下理由':'承認メモ（任意）',required:rejecting})}
         ${rejecting ? '' : button('却下する','discount-reject',{id,tone:'danger'})}`;
@@ -2626,7 +2707,7 @@ function modalFromAction(target) {
   const {action,id} = target.dataset;
   if (['customer-new','customer-import'].includes(action)) openDialog(action);
   if (['customer-detail','customer-edit','customer-merge','customer-link'].includes(action)) openDialog(action,{customerId:id});
-  if (['move','extend','deposit','discount','depart','receipt','seat-history','cancel-settlement','reopen-ticket'].includes(action)) openDialog(action,{ticketId:id});
+  if (['move','extend','deposit','discount','depart','receipt','seat-history','cancel-settlement','reopen-ticket','personal-sales-adjustment'].includes(action)) openDialog(action,{ticketId:id});
   if (action === 'extend-overdue' && state.bulkExtensionEnabled !== false && state.tickets.some((ticket) => ticket.id === id && ticket.status === 'open')) {
     openDialog(action,{ticketId:id});
   }
@@ -3013,6 +3094,27 @@ function clickAction(target) {
     if (action === 'payroll-attendance-item-remove') target.closest('[data-payroll-attendance-item]')?.remove();
     return;
   }
+  if (modal?.type === 'payroll-range' && ['payroll-range-export','payroll-range-select-all','payroll-range-select-none'].includes(action)) {
+    const form = target.form;
+    if (action === 'payroll-range-export') {
+      try {
+        if (!form.reportValidity()) return;
+        const data = new FormData(form);
+        const range = payrollUI.readPayrollRange(data);
+        if (!modal.result || Object.keys(range).some((key) => range[key] !== modal.range[key])) {
+          throw new Error('集計条件を変更しました。もう一度「集計する」を押してください。');
+        }
+        const records = getPayrollRangeStatements(state,range,data.getAll('rangeExportCast'));
+        void downloadPayrollZip({records,storeName:cloudState.store?.name ?? '銀座店',start:range.start,end:range.end,
+          control:target,periodReference:true});
+      } catch (error) { showError(error.message); }
+    } else {
+      for (const checkbox of form.querySelectorAll('[name="rangeExportCast"]:enabled')) {
+        checkbox.checked = action === 'payroll-range-select-all';
+      }
+    }
+    return;
+  }
   if (action.startsWith('payroll-') && page === 'payroll') {
     const {month,castId} = payrollUI.getPayrollPageSelection(state,payrollMonth,payrollCastId);
     const selection = {month,castId};
@@ -3056,6 +3158,10 @@ function clickAction(target) {
   if (action === 'toggle-hidden-stock') {
     showHiddenStock = !showHiddenStock;
     render({ preserveFocus: true });
+    return;
+  }
+  if (action === 'stock-barcode-register' || action === 'stock-barcode-search') {
+    void scanStockBarcode(action);
     return;
   }
   if (action === 'commission-cast') {
@@ -3257,22 +3363,28 @@ function clickAction(target) {
   modalFromAction(target);
 }
 
-async function downloadPayrollZip(records,storeName,start,end,control) {
+async function downloadPayrollZip({records,storeName,start,end,control,periodReference = false}) {
   const active = modal;
+  if (active.zipInProgress) return;
+  active.zipInProgress = true;
+  const source = active.result;
+  const label = control.innerHTML;
+  const title = periodReference ? '給与期間参考明細' : '支給明細';
   control.disabled = true;
   control.textContent = 'PDFを作成中…';
   try {
-    const {createPayrollZip} = await import('./payroll-pdf.mjs');
-    const archive = await createPayrollZip(records,storeName);
-    if (modal === active && dialog.open && currentRole() === 'admin') {
-      downloadFile(`NP-POS_支給明細_${start}${start === end ? '' : `_${end}`}.zip`,archive);
+    const {createPayrollZip,createPayrollRangeZip} = await import('./payroll-pdf.mjs');
+    const archive = await (periodReference ? createPayrollRangeZip : createPayrollZip)(records,storeName);
+    if (modal === active && active.result === source && dialog.open && currentRole() === 'admin') {
+      downloadFile(`NP-POS_${title}_${start}${start === end ? '' : `_${end}`}.zip`,archive);
       toast('個別PDFのZIPを保存しました。');
     }
   } catch (error) {
-    if (modal === active && dialog.open) showError(error.message);
+    if (modal === active && active.result === source && dialog.open) showError(error.message);
   } finally {
+    active.zipInProgress = false;
     control.disabled = false;
-    control.textContent = '出力する';
+    control.innerHTML = label;
   }
 }
 
@@ -3337,7 +3449,7 @@ function submitDialog(form) {
         rules:payrollUI.readPayrollTemplateRows(form)},'給与の計算テンプレートを保存しました。');
       break;
     case 'payroll-range': {
-      const range = {start:value('rangeStart'),end:value('rangeEnd'),castId:value('rangeCast')};
+      const range = payrollUI.readPayrollRange(data);
       const result = previewPayrollRange(state,range);
       Object.assign(modal,{range,result});
       paintDialog();
@@ -3356,7 +3468,7 @@ function submitDialog(form) {
       const api = {escape,yen,storeName:cloudState.store?.name ?? '銀座店'};
       if (value('batchOutput') === 'zip') {
         const control = form.querySelector('#submit-dialog');
-        if (!control.disabled) void downloadPayrollZip(records,api.storeName,start,end,control);
+        if (!control.disabled) void downloadPayrollZip({records,storeName:api.storeName,start,end,control});
       } else printWorkspace(records.map((record)=>`<section class="payroll-print-page">${payrollUI.renderPayrollPrint(record,api)}</section>`).join(''));
       break;
     }
@@ -3551,7 +3663,12 @@ function submitDialog(form) {
       break;
     case 'discount':
       commit({type:'discount',ticketId:id,mode:value('discountMode'),value:numeric('discountValue'),
-        reasonCode:value('reasonCode'),reason:value('reason')},'値引きの入力を保存しました。');
+        reasonCode:value('reasonCode'),reason:value('reason'),personalSalesMode:value('personalSalesMode')},'値引きの入力を保存しました。');
+      break;
+    case 'personal-sales-adjustment':
+      commit({type:'adjustPersonalSales',ticketId:id,castId:value('personalSalesCast'),
+        amount:numeric('personalSalesAmount') * (value('personalSalesDirection') === 'subtract' ? -1 : 1),reason:value('reason')},
+      '個人売上の調整を記録しました。');
       break;
     case 'discount-review':
     case 'discount-reject':
@@ -3746,7 +3863,7 @@ app.addEventListener('compositionend',updateCustomerPageSearch);
 app.addEventListener('change',(event)=> {
   if (page === 'stock' && ['stockSearch','stockLowOnly','stockHistoryId'].includes(event.target.name)) {
     const {name,value,checked} = event.target;
-    if (name === 'stockSearch') stockSearch = value;
+    if (name === 'stockSearch') { stockSearch = value; stockBarcodeExact = false; }
     if (name === 'stockLowOnly') stockLowOnly = checked;
     if (name === 'stockHistoryId') stockHistoryId = value;
     render();
@@ -4018,6 +4135,7 @@ dialog.addEventListener('submit',(event)=> {
 });
 dialog.addEventListener('close',()=> {
   if (!dialog.open) {
+    activeBarcodeScan?.close();
     modal=null;
     if (pendingStorage) {
       pendingStorage = false;

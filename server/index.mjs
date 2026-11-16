@@ -1,5 +1,5 @@
 import { createRemoteJWKSet, jwtVerify } from 'jose';
-import { applyCommand, changeMember, createStore, getStoreOverview, inviteMember, listAudit, listMembers, listStores, migrateState, readState, revokeInvite } from './database.mjs';
+import { applyCommand, changeMember, createStore, getStoreOverview, inviteMember, listAudit, listMembers, listStores, migrateState, readState, restoreGroupStoreMember, revokeInvite } from './database.mjs';
 import { changeGroupMember, createStoreGroup, inviteGroupMember, listStoreGroups, renameStoreGroup, revokeGroupInvite, setGroupStore } from './store-groups.mjs';
 import { ApiError, isRecord, requireCondition } from './policy.mjs';
 import { answerGuideTopic, getGuideAccess } from './guide-assistant.mjs';
@@ -188,6 +188,7 @@ async function route(request, env, url) {
   }
   if (section === 'members' && id) {
     if (method === 'DELETE') return changeMember(db, actor, storeId, id);
+    if (method === 'PUT') return restoreGroupStoreMember(db, actor, storeId, id);
     if (method === 'PATCH') {
       const { role } = await jsonBody(request);
       requireCondition(typeof role === 'string', 400, 'invalid-role', '権限を選択してください。');

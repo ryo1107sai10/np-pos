@@ -1,9 +1,10 @@
 import { getNextAutoExtensionAt } from './auto-extension.mjs';
+import { offlineCommands, offlineLimit, openOperationQueue, orderCanWait } from './offline-operations.mjs';
 
 const authSDK = 'https://www.gstatic.com/firebasejs/13.3.0/';
-const offlineCommands = new Set(['open', 'seat', 'order', 'extend', 'move', 'settle', 'depart', 'serve']);
 const conflictMessage = '別の端末でデータが更新されました。最新の内容を確認し、操作をやり直してください。';
 const lockedMessage = '送信結果を確認中の操作があります。同期状況を確認してください。';
+const offlineOrderMessage = '同じ伝票や卓に送信待ちの操作があります。同期後に最新の内容を確認してください。';
 const authMessages = {
   'auth/invalid-credential': 'メールアドレスまたはパスワードを確認してください。',
   'auth/wrong-password': 'メールアドレスまたはパスワードを確認してください。',
@@ -67,13 +68,14 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
   firebaseLoader = loadFirebase,
   fetchImpl = globalThis.fetch,
   isOnline = networkAvailable,
+  operationQueue = openOperationQueue(globalThis.indexedDB),
 } = {}) {
   const endpoint = endpointFor(apiBase);
   const configured = Boolean(endpoint && firebase?.apiKey && firebase.projectId);
   let current = {
     status: configured ? 'idle' : 'unavailable', cloudConfigured: configured,
     user: null, userVerified: false, stores: [], store: null, state: null, revision: null,
-    restricted: false, pending: 0, conflict: '', error: '',
+    restricted: false, pending: 0, waiting: [], pendingVolatile: false, conflict: '', error: '',
   };
   let sdk;
   let auth;
@@ -81,8 +83,8 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
   let detachAuth;
   let timer;
   let activeScope;
-  let pendingOperation;
   let takingOrder = false;
+  let writingQueue = false;
   let polling = false;
   let ended = false;
 
@@ -94,12 +96,11 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
 
   function clearStore() {
     activeScope = undefined;
-    pendingOperation = undefined;
-    patch({ store: null, state: null, revision: null, restricted: false, pending: 0, conflict: '' });
+    patch({ store: null, state: null, revision: null, restricted: false, pending: 0, waiting: [], pendingVolatile: false, conflict: '' });
   }
 
   function assertNoPending(discard = false) {
-    if ((pendingOperation || takingOrder) && !discard) throw new CloudError('sync-pending', lockedMessage);
+    if ((current.pending || takingOrder || writingQueue) && !discard) throw new CloudError('sync-pending', lockedMessage);
   }
 
   function requireActor() {
@@ -151,6 +152,40 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
     return `/stores/${encodeURIComponent(scope.storeId)}`;
   };
 
+  function setPending(scope, rows) {
+    assertScope(scope);
+    const changed = rows.length !== scope.queue.length || rows.some((row,index) => row.body.operationId !== scope.queue[index].body.operationId);
+    scope.queue = rows;
+    if (changed) patch({pending:rows.length,pendingVolatile:Boolean(scope.volatile),waiting:rows.map(({route,body,createdAt})=>({
+      type:route === 'migrate' ? 'migrate' : body.command?.type,
+      ticketId:body.command?.ticketId,tableIds:body.command?.tableIds,createdAt,
+    }))});
+  }
+
+  async function refreshQueue(scope) {
+    if (scope.volatile || scope.storageUnavailable) return;
+    let rows;
+    try { rows = await operationQueue.update(scope.key); }
+    catch { scope.storageUnavailable = true; return; }
+    setPending(scope,rows);
+    if (!rows.length && current.conflict) patch({conflict:'',status:'connecting'});
+  }
+
+  async function removePending(scope, operation) {
+    if (scope.volatile) {
+      scope.volatile = false;
+      setPending(scope,[]);
+      return;
+    }
+    let rows;
+    try {
+      rows = await operationQueue.update(scope.key,(saved) => saved.filter(({body}) => body.operationId !== operation.body.operationId));
+    } catch {
+      throw new CloudError('queue-storage-write','端末の送信待ちを更新できませんでした。',503);
+    }
+    setPending(scope,rows);
+  }
+
   function acceptState(scope, result, serial) {
     assertScope(scope);
     if (!Number.isSafeInteger(result.revision) || result.revision < 0) throw new CloudError('invalid-response', 'クラウドの応答を確認できませんでした。');
@@ -174,7 +209,7 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
       state: restricted ? null : result.unchanged ? current.state : (result.state ?? null),
       revision: result.revision,
       restricted,
-      status: current.conflict ? 'conflict' : pendingOperation ? 'offline' : 'synced',
+      status: current.conflict ? 'conflict' : scope.queue.length ? 'offline' : 'synced',
       error: '',
     });
     return false;
@@ -280,28 +315,36 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
 
   async function tick() {
     const scope = activeScope;
-    if (!scope || polling || takingOrder) { schedule(); return; }
+    if (!scope || polling || takingOrder || writingQueue) { schedule(); return; }
     if (globalThis.document?.hidden || !isOnline()) return;
     polling = true;
+    let sent = false;
     try {
-      if (pendingOperation && !current.conflict) await sendPending(scope);
+      await refreshQueue(scope);
+      if (scope.queue.length && !current.conflict) {
+        const result = await sendPending(scope);
+        sent = Boolean(result && !result.queued);
+      }
       else await refreshStore(scope);
     } catch (error) {
-      if (error.code !== 'revision-conflict') topicDenied(scope, error);
+      if (!current.conflict) topicDenied(scope, error);
     } finally {
       polling = false;
-      schedule();
+      schedule(sent && scope.queue.length ? 0 : pollMs);
     }
   }
 
   function onConnectivity() {
-    if (!activeScope) return;
+    if (!activeScope) {
+      if (isOnline() && current.userVerified && current.status === 'offline') void listStores().catch(() => {});
+      return;
+    }
     if (!isOnline()) patch({ status: current.conflict ? 'conflict' : 'offline' });
     schedule(isOnline() ? 0 : pollMs);
   }
 
   function onPendingExit(event) {
-    if (!pendingOperation) return;
+    if (!activeScope?.volatile || !current.pending) return;
     event.preventDefault();
     event.returnValue = '';
   }
@@ -312,23 +355,28 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
     if (!store) throw new CloudError('store-unknown', '店舗一覧を更新してから選び直してください。');
     if (activeScope?.storeId === storeId && current.revision !== null) return current;
     assertNoPending();
-    const scope = { uid: actor.uid, storeId, sequence: 0, roleSerial: 0 };
+    const scope = { uid: actor.uid, storeId, key:JSON.stringify([endpoint,actor.uid,storeId]), sequence:0,roleSerial:0,queue:[] };
     activeScope = scope;
     patch({ store, state: null, revision: null, restricted: false, status: 'connecting', conflict: '', error: '' });
     try {
+      await refreshQueue(scope);
+      if (!isOnline()) {
+        patch({status:'offline'});
+        return current;
+      }
       await refreshStore(scope);
       return current;
     } catch (error) {
       topicDenied(scope, error);
       throw error;
     } finally {
-      schedule();
+      schedule(scope.queue.length ? 0 : pollMs);
     }
   }
 
-  async function sendPending(scope) {
+  async function sendPending(scope, immediateId) {
     assertScope(scope);
-    const operation = pendingOperation;
+    const operation = scope.queue[0];
     if (!operation || current.conflict) return null;
     if (takingOrder) throw new CloudError('sync-pending', lockedMessage);
     takingOrder = true;
@@ -337,17 +385,11 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
       const result = await request(`${storePath(scope)}/${operation.route}`, { method: 'POST', body: operation.body });
       assertScope(scope);
       acceptState(scope, result, serial);
-      pendingOperation = undefined;
-      patch({ pending: 0, status: 'synced', conflict: '', error: '' });
+      await removePending(scope,operation);
+      patch({ status: scope.queue.length ? 'offline' : 'synced', conflict: '', error: '' });
       return currentStoreResult();
     } catch (error) {
       if (scope !== activeScope) throw error;
-      if (error.status === 409 && error.code === 'auto-extension-updated') {
-        pendingOperation = undefined;
-        patch({ pending: 0, status: 'synced', conflict: '', error: '' });
-        void refreshStore(scope).catch(() => {});
-        throw error;
-      }
       if (error.status === 409 && error.code === 'revision-conflict') {
         patch({ status: 'conflict', conflict: conflictMessage, error: '' });
         void refreshStore(scope).catch(() => {});
@@ -357,8 +399,18 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
         patch({ status: 'offline', error: '' });
         return { queued: true, operationId: operation.body.operationId };
       }
-      pendingOperation = undefined;
-      patch({ pending: 0, status: 'synced', error: '' });
+      if (error.code === 'store-access' || error.status === 401) {
+        topicDenied(scope,error);
+        throw error;
+      }
+      if (operation.body.operationId !== immediateId || scope.queue.length > 1) {
+        patch({status:'conflict',conflict:error.message,error:''});
+        void refreshStore(scope).catch(() => {});
+        throw error;
+      }
+      await removePending(scope,operation);
+      patch({ status: 'synced', error: '' });
+      if (error.code === 'auto-extension-updated') void refreshStore(scope).catch(() => {});
       throw error;
     } finally {
       takingOrder = false;
@@ -369,18 +421,46 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
     const scope = activeScope;
     assertScope(scope);
     requireActor();
-    assertNoPending();
     const operationId = globalThis.crypto.randomUUID();
-    pendingOperation = { route, body: { ...data, operationId } };
-    patch({ pending: 1, error: '' });
+    if (takingOrder || writingQueue || current.conflict) throw new CloudError('sync-pending', lockedMessage);
+    const durable = route === 'commands' && offlineCommands.has(data.command?.type);
+    const operation = {route,body:{...data,operationId},createdAt:Date.now()};
+    const append = (rows) => {
+      if (rows.length >= offlineLimit) throw new CloudError('queue-full','送信待ちが30件あります。同期後に操作してください。');
+      if (!orderCanWait(rows,data.command)) throw new CloudError('sync-pending',offlineOrderMessage);
+      const previous = rows.at(-1);
+      if (previous && previous.body.expectedRevision < data.expectedRevision) {
+        throw new CloudError('sync-pending','先に送信待ちの操作を同期し、最新の内容を確認してください。');
+      }
+      return [...rows,{...operation,body:{...operation.body,expectedRevision:previous ? previous.body.expectedRevision + 1 : data.expectedRevision}}];
+    };
+    writingQueue = true;
     try {
-      if (!isOnline()) {
+      let rows;
+      if (durable && !scope.volatile && !scope.storageUnavailable) {
+        try { rows = await operationQueue.update(scope.key,append); }
+        catch (error) {
+          if (error instanceof CloudError) throw error;
+          scope.storageUnavailable = true;
+        }
+      } else if (!durable) await refreshQueue(scope);
+      assertScope(scope);
+      if (!rows) {
+        if (scope.queue.length) throw new CloudError('sync-pending',lockedMessage);
+        if (!isOnline()) throw new CloudError('queue-unavailable','このブラウザーに送信待ちを保存できません。接続回復後に操作してください。');
+        scope.volatile = true;
+        rows = [operation];
+      }
+      setPending(scope,rows);
+      patch({error:''});
+      if (!isOnline() || rows[0].body.operationId !== operationId) {
         patch({ status: 'offline' });
         return { queued: true, operationId };
       }
-      return await sendPending(scope);
+      return await sendPending(scope,operationId);
     } finally {
-      schedule();
+      writingQueue = false;
+      schedule(current.pending > 1 && isOnline() && !current.conflict ? 0 : pollMs);
     }
   }
 
@@ -403,17 +483,26 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
     return queueOrSend('migrate', { snapshot: structuredClone(snapshot) });
   }
 
-  function leaveStore({ discard = false } = {}) {
+  async function leaveStore({ discard = false } = {}) {
     assertNoPending(discard);
+    const scope = activeScope;
+    if (discard && scope && !scope.volatile && (scope.queue.length || !scope.storageUnavailable)) {
+      await operationQueue.update(scope.key,()=>[]);
+    }
+    if (scope !== activeScope) return;
     clearTimeout(timer);
     clearStore();
     patch({ status: current.userVerified ? 'ready' : 'signed-out', error: '' });
   }
 
-  function clearQueue() {
-    if (takingOrder) throw new CloudError('sync-pending', lockedMessage);
-    pendingOperation = undefined;
-    patch({ pending: 0, conflict: '', error: '', status: isOnline() ? 'synced' : 'offline' });
+  async function clearQueue() {
+    if (takingOrder || writingQueue) throw new CloudError('sync-pending', lockedMessage);
+    const scope = activeScope;
+    assertScope(scope);
+    if (!scope.volatile) await operationQueue.update(scope.key,()=>[]);
+    scope.volatile = false;
+    setPending(scope,[]);
+    patch({ conflict: '', error: '', status: isOnline() ? 'synced' : 'offline' });
     schedule(0);
   }
 
@@ -472,7 +561,7 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
       });
     },
     async signOut(options) {
-      leaveStore(options);
+      await leaveStore(options);
       patch({ user: null, userVerified: false, stores: [], status: 'signed-out', error: '' });
       if (auth) await sdk.signOut(auth);
     },
@@ -533,12 +622,14 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
     inviteMember(email, role) { return request(`${storePath()}/members`, { method: 'POST', body: { email, role } }); },
     updateMember(uid, role) { return request(`${storePath()}/members/${encodeURIComponent(uid)}`, { method: 'PATCH', body: { role } }); },
     removeMember(uid) { return request(`${storePath()}/members/${encodeURIComponent(uid)}`, { method: 'DELETE' }); },
+    restoreGroupMember(uid) { return request(`${storePath()}/members/${encodeURIComponent(uid)}`, { method: 'PUT' }); },
     cancelInvite(id) { return request(`${storePath()}/invites/${encodeURIComponent(id)}`, { method: 'DELETE' }); },
     async retrySync() {
       const scope = activeScope;
       assertScope(scope);
+      await refreshQueue(scope);
       if (current.conflict) return refreshStore(scope);
-      if (pendingOperation) return sendPending(scope);
+      if (scope.queue.length) return sendPending(scope);
       return refreshStore(scope);
     },
     clearQueue,

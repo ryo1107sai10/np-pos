@@ -12,9 +12,11 @@ import { calculateCashTender, getCashCountTotal } from './register-cash.mjs';
 import { applyPrintCommand } from './print-domain.mjs';
 import { applyAccountingCsv } from './accounting-csv.mjs';
 import { normalizeRolePolicy, roleAllowsCommand } from './role-policy.mjs';
+import { getPersonalSalesDiscountMode, isPersonalSalesDiscountMode, personalSalesAdjustmentDetails,
+  recordPersonalSalesAdjustment } from './personal-sales.mjs';
 import { saveCashAccounts } from './cash-accounts.mjs';
 import { replayPurchaseCancellation } from './inventory-operations.mjs';
-import { normalizeRegisterSettings, openingCashSuggestion, registerCutoff } from './register-config.mjs';
+import { businessDate, normalizeRegisterSettings, openingCashSuggestion, operationBusinessDate, registerCutoff } from './register-config.mjs';
 import { applyShiftCommand } from './shifts.mjs';
 import { applySetSchedule, isValidInitialSetSchedule } from './set-schedule.mjs';
 import { applyCastSelfCommand, bindCastAccount, isCastAttendanceReview, isCastSelfCommand, isManagedAttendanceCommand } from './cast-self.mjs';
@@ -27,9 +29,6 @@ const minute = 60_000;
 const methods = ['cash', 'card', 'qr'];
 const methodLabel = { cash: '現金', card: 'カード', qr: 'QR決済', receivable: '売掛' };
 const occupiedStatuses = new Set(['open', 'paid']);
-const japanDate = new Intl.DateTimeFormat('en-CA', {
-  timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit',
-});
 const moneyFormatter = new Intl.NumberFormat('ja-JP');
 
 export const layoutGrid = Object.freeze({ columns: 12, rows: 8, tableWidth: 3, tableHeight: 2 });
@@ -142,11 +141,7 @@ export function yen(amount) {
   return `¥${moneyFormatter.format(amount)}`;
 }
 
-export function businessDate(now = Date.now(), cutoffMinutes = 360) {
-  const parts = Object.fromEntries(japanDate.formatToParts(new Date(now - cutoffMinutes * minute))
-    .map(({ type, value }) => [type, value]));
-  return `${parts.year}-${parts.month}-${parts.day}`;
-}
+export { businessDate } from './register-config.mjs';
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -317,6 +312,13 @@ export function quote(state, ticketId) {
   return calculateQuote(ticket);
 }
 
+function removeEmbeddedItemTax(amounts, indices, rate, settings) {
+  const gross = indices.map((index) => amounts[index]);
+  const subtotal = gross.reduce((sum, amount) => sum + amount, 0);
+  const taxByLine = allocate(calculationTaxGroup(subtotal, rate, settings).tax, gross);
+  indices.forEach((index, offset) => { amounts[index] -= taxByLine[offset]; });
+}
+
 function calculateQuote(ticket, frozenFee = null) {
   const lines = ticket.lines.filter((line) => line.cancelledAt === null);
   const settings = getTicketCalculationSettings(ticket);
@@ -338,15 +340,14 @@ function calculateQuote(ticket, frozenFee = null) {
     byTaxRate.set(taxRate, indices);
   });
   const commissionSalesByLine = netByLine.slice();
+  const keepPersonalSales = discount > 0 && getPersonalSalesDiscountMode(ticket) === 'keep';
+  const personalSalesByLine = keepPersonalSales ? listedAmounts.slice() : commissionSalesByLine;
   const itemTaxBreakdown = [...byTaxRate].sort(([first], [second]) => second - first).map(([rate, indices]) => {
     const taxable = indices.reduce((sum, index) => sum + netByLine[index] + serviceByLine[index], 0);
     if (inclusive && rate > 0) {
       // Commission uses discounted item sales before tax, without the separately charged service fee.
-      const itemAmounts = indices.map((index) => netByLine[index]);
-      const itemSubtotal = itemAmounts.reduce((sum, amount) => sum + amount, 0);
-      const embeddedTax = calculationTaxGroup(itemSubtotal, rate, settings).tax;
-      const taxByLine = allocate(embeddedTax, itemAmounts);
-      indices.forEach((index, offset) => { commissionSalesByLine[index] -= taxByLine[offset]; });
+      removeEmbeddedItemTax(commissionSalesByLine, indices, rate, settings);
+      if (keepPersonalSales) removeEmbeddedItemTax(personalSalesByLine, indices, rate, settings);
     }
     return calculationTaxGroup(taxable, rate, settings);
   });
@@ -358,15 +359,19 @@ function calculateQuote(ticket, frozenFee = null) {
     const count = line.castIds.length;
     line.castIds.forEach((castId, castIndex) => {
       const rule = line.castCommissions?.[castIndex] ?? line.commission;
-      const sales = equalShare(commissionSalesByLine[index], count, castIndex);
+      const commissionBase = equalShare(commissionSalesByLine[index], count, castIndex);
+      const sales = keepPersonalSales ? equalShare(personalSalesByLine[index], count, castIndex) : commissionBase;
       const fixed = equalShare(rule.fixed * line.quantity, count, castIndex);
       const points = equalShare(Math.round(rule.points * pointsScale) * line.quantity, count, castIndex);
-      const amount = fixed + exactRate(sales, Math.round(rule.rate * 100));
+      const amount = fixed + exactRate(commissionBase, Math.round(rule.rate * 100));
       addCommission(commission, castId, sales, amount, points);
       commissionDetails.push({ castId, castName: line.castNames?.[castIndex] ?? null,
         lineId: line.id, name: line.name, createdAt: line.createdAt, sales, amount, points: points / pointsScale });
     });
   });
+  for (const { castId, amount } of ticket.personalSalesAdjustments ?? []) {
+    addCommission(commission, castId, amount, 0, 0);
+  }
 
   const itemTax = itemTaxBreakdown.reduce((total, group) => total + group.tax, 0);
   const baseTotal = subtotal - discount + service + (inclusive ? 0 : itemTax);
@@ -393,8 +398,9 @@ function calculateQuote(ticket, frozenFee = null) {
 
 export function getTicketCommissionDetails(state, ticketId) {
   const ticket = findTicket(state, ticketId);
-  if (!ticket.settlement) return calculateQuote(ticket).commissionDetails;
-  if (ticket.settlement.commissionDetails) return structuredClone(ticket.settlement.commissionDetails);
+  const adjustments = personalSalesAdjustmentDetails(ticket);
+  if (!ticket.settlement) return [...calculateQuote(ticket).commissionDetails, ...adjustments];
+  if (ticket.settlement.commissionDetails) return [...structuredClone(ticket.settlement.commissionDetails), ...adjustments];
   const calculated = calculateQuote(ticket);
   const stored = ticket.settlement.commission ?? [];
   const byCast = new Map(calculated.commission.map((entry) => [entry.castId, entry]));
@@ -402,7 +408,7 @@ export function getTicketCommissionDetails(state, ticketId) {
     const entry = byCast.get(castId);
     return entry && entry.sales === sales && entry.amount === amount && entry.points === points;
   });
-  return matches ? calculated.commissionDetails
+  return matches ? [...calculated.commissionDetails, ...adjustments]
     : stored.map((entry) => ({ ...entry, castName: null, lineId: null, name: '伝票合計', createdAt: null }));
 }
 
@@ -1037,7 +1043,7 @@ function doStockAdjust(state, action, now, actor) {
     const amount = Math.round((quantity - stock.quantity) * movementScale) / movementScale;
     Object.assign(stock,{quantity,value,unitCost});
     const movement = {id:createId(state,'stock'),stockId:stock.id,stockName:stock.name,unit:stock.unit,kind,reason,
-      quantity:amount,unitCost,cost:Math.abs(valueChange),valueChange,reversesId:purchase.id,at:now,date:businessDate(now),
+      quantity:amount,unitCost,cost:Math.abs(valueChange),valueChange,reversesId:purchase.id,at:now,date:operationBusinessDate(state,now),
       ticketId:null,sourceLineId:null};
     state.movements.unshift(movement);
     return;
@@ -1279,8 +1285,9 @@ function doDiscount(state, ticket, action, now, actor) {
   assert(typeof action.reasonCode === 'string' && Object.hasOwn(discountReasonCodes, action.reasonCode),
     '値引きの理由区分を選択してください。');
   const reason = operationalReason(action.reason, '値引き理由');
-  const { mode, value } = action;
+  const { mode, value, personalSalesMode } = action;
   assert(mode === 'amount' || mode === 'percent', '値引きの単位を選択してください。');
+  assert(personalSalesMode === undefined || isPersonalSalesDiscountMode(personalSalesMode), '個人売上への反映方法を選択してください。');
   const { subtotal } = calculateQuote(ticket);
   let amount;
   let rateBps;
@@ -1293,7 +1300,8 @@ function doDiscount(state, ticket, action, now, actor) {
     amount = money(value, '値引き額');
   }
   validateDiscountAmount(ticket, amount, subtotal);
-  const request = { amount, subtotal, mode, value, reasonCode: action.reasonCode, reason, actor: { ...actor }, at: now };
+  const request = { amount, subtotal, mode, value, reasonCode: action.reasonCode, reason, actor: { ...actor }, at: now,
+    ...(personalSalesMode !== undefined && { personalSalesMode }) };
   const limit = getManagerDiscountLimit(state);
   if (actor.role === 'manager' && (amount > exactRate(subtotal, limit) || (subtotal > 0 && rateBps > limit))) {
     ticket.discountRequest = { ...request, id: createId(state, 'discount') };
@@ -1331,7 +1339,7 @@ export function apply(state, action, now = Date.now(), actor = demoActor) {
   const addedMovements = next.movements.length - state.movements.length;
   for (const movement of next.movements.slice(0,addedMovements)) {
     movement.actorLabel = authenticatedActor.label;
-    if (!movement.ticketId) movement.date = next.day.status === 'open' ? next.day.date : businessDate(now);
+    if (!movement.ticketId) movement.date = operationBusinessDate(next,now);
   }
   const audit = buildOperationAudit(state, next, action, now, authenticatedActor);
   if (audit) next.auditLog = [audit, ...(next.auditLog ?? [])];
@@ -1608,6 +1616,11 @@ function reduce(state, action, now, actor) {
     }
     case 'discount': {
       doDiscount(next, ticket, action, now, actor);
+      break;
+    }
+    case 'adjustPersonalSales': {
+      const before = calculateQuote(ticket).commission.find(({castId}) => castId === action.castId)?.sales ?? 0;
+      recordPersonalSalesAdjustment(next, ticket, action, { actor, at: now, before, createId: () => createId(next, 'sales-adjustment') });
       break;
     }
     case 'approveDiscount':

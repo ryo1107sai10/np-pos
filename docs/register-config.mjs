@@ -1,6 +1,9 @@
 import { isRegisterCashAmount } from './register-cash.mjs';
 
 export const defaultRegisterSettings = Object.freeze({cutoff:'06:00',hoursStart:'20:00',hoursEnd:'05:00',openingMode:'fixed',openingCash:20_000});
+const japanDate = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit',
+});
 
 const validTime = (value) => typeof value === 'string' && /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value);
 
@@ -20,6 +23,16 @@ export function normalizeRegisterSettings(settings) {
 export function registerCutoff(state) {
   const [hours,minutes] = getRegisterSettings(state).cutoff.split(':').map(Number);
   return hours * 60 + minutes;
+}
+
+export function businessDate(now = Date.now(), cutoffMinutes = 360) {
+  const parts = Object.fromEntries(japanDate.formatToParts(new Date(now - cutoffMinutes * 60_000))
+    .map(({type,value}) => [type,value]));
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
+export function operationBusinessDate(state, now = Date.now()) {
+  return state.day.status === 'open' ? state.day.date : businessDate(now,registerCutoff(state));
 }
 
 export function openingCashSuggestion(state,date) {

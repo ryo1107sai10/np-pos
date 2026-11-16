@@ -2,11 +2,11 @@ import { applyPayrollCommand, getDailyPayLimit, getPayrollDailyPays, getPayrollD
 import { applyShiftCommand } from './shifts.mjs';
 import { normalizeAttendanceItems, resolveAttendanceItems } from './payroll-records.mjs';
 import { getCastPerformance } from './cast-performance.mjs';
+import { operationBusinessDate, registerCutoff } from './register-config.mjs';
 
 const minute = 60_000;
 const day = 24 * 60 * minute;
 const japanOffset = 9 * 60 * minute;
-const businessDayCutoff = 6 * 60 * minute;
 const selfCommands = new Set(['castClockIn','castClockOut','castRequestShift','castRequestDailyPay']);
 const attendanceStatuses = new Set(['open','pending','approved','rejected','absent']);
 const absenceTypes = new Set(['absent','no-show']);
@@ -40,8 +40,7 @@ function optionalNote(value, label) {
 }
 
 function dateForPunch(state, at) {
-  if (state.day.status === 'open' && isDate(state.day.date)) return state.day.date;
-  return new Date(at + japanOffset - businessDayCutoff).toISOString().slice(0,10);
+  return operationBusinessDate(state,at);
 }
 
 function activeCast(state, castId) {
@@ -256,7 +255,9 @@ function saveManagedAttendance(state, action, now, actor, allocateId) {
     Object.assign(row,{clockInAt:null,clockOutAt:null,status:'absent'});
   } else {
     check(!castRows.some((entry)=>entry.date === date && entry.status === 'absent'), 'この営業日は欠勤が登録されています。');
-    check(isTimestamp(clockInAt) && clockInAt >= dateStart && clockInAt < dateStart + day + businessDayCutoff && clockInAt <= now,
+    const savedTime = prior?.date === date && prior.clockInAt === clockInAt;
+    const lastPossibleStart = dateStart + day + registerCutoff(state) * minute;
+    check(isTimestamp(clockInAt) && clockInAt >= dateStart && (savedTime || clockInAt < lastPossibleStart) && clockInAt <= now,
       '営業日と出勤時刻を確認してください。');
     check(clockOutAt === null || (isTimestamp(clockOutAt) && clockOutAt > clockInAt && clockOutAt <= now && clockOutAt - clockInAt <= day),
       '退勤時刻は出勤から24時間以内で指定してください。');

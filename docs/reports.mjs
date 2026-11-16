@@ -2,9 +2,11 @@ import { cashMovementCategories, cashMovementKinds } from './cash-ledger.mjs';
 import { cashAccounts, vaultBalance } from './cash-accounts.mjs';
 import { cashDenominations } from './register-cash.mjs';
 import { businessDate, getTicketCommissionDetails, getTicketTableLabels } from './engine.mjs';
+import { operationBusinessDate, registerCutoff } from './register-config.mjs';
 import { getInventoryCostSummary, purchaseCancellationBlocker } from './inventory-operations.mjs';
 import { getReportPeriod } from './report-period.mjs';
 import { getDailyPayTotals } from './payroll.mjs';
+import { barcodeScannerAvailable } from './barcode-scanner.mjs';
 
 const formatDay = new Intl.DateTimeFormat('ja-JP', {
   month: 'short', day: 'numeric', weekday: 'short', timeZone: 'Asia/Tokyo',
@@ -152,7 +154,7 @@ function renderCommission(state, api, period, result) {
     const rows = details
       .filter(({ticket, entry}) => (ticket.status === 'open') === set.pending && (!selected || selected === entry.castId))
       .map(({ticket, entry}) => `<tr><td>${set.pending ? ticketLink(ticket, api) : receiptLink(ticket, period.date, api)}</td>
-        <td><strong>${escape(entry.name)}</strong></td><td>${escape(entry.castName ?? castName(entry.castId))}</td>
+        <td><strong>${escape(entry.name)}</strong>${entry.adjustmentReason ? `<span class="lr-row-note">${escape(entry.adjustmentReason)}</span>` : ''}</td><td>${escape(entry.castName ?? castName(entry.castId))}</td>
         <td class="lr-muted">${timeLabel(set.pending ? (entry.createdAt ?? ticket.createdAt) : ticket.settledAt)}</td>
         <td class="lr-numeric"><span class="lr-mobile-label" aria-hidden="true">個人売上</span>${yen(entry.sales)}</td>
         <td class="lr-numeric"><span class="lr-mobile-label" aria-hidden="true">歩合</span><strong class="${set.pending ? 'lr-estimate' : 'lr-positive'}">${yen(entry.amount)}</strong>
@@ -180,9 +182,11 @@ function renderStock(state, api) {
   const valuation = (item) => item.value ?? item.quantity * asNumber(item.unitCost);
   const shown = state.stock.filter((item) => item.hidden !== true);
   const hiddenCount = state.stock.length - shown.length;
-  const query = (api.stockSearch ?? '').trim().toLowerCase();
+  const query = (api.stockSearch ?? '').trim().normalize('NFKC').toLowerCase();
   const rows = (showHiddenStock ? state.stock : shown).filter((item) => (!api.stockLowOnly || item.quantity <= item.minimum)
-    && [item.name,item.itemCode,item.barcode].some((value) => String(value ?? '').toLowerCase().includes(query))).map((item) => {
+    && (api.stockBarcodeExact
+      ? item.barcode?.toLowerCase() === query
+      : [item.name,item.itemCode,item.barcode].some((value) => String(value ?? '').normalize('NFKC').toLowerCase().includes(query)))).map((item) => {
     const isLow = item.quantity <= item.minimum;
     const status = item.quantity === 0 ? '在庫なし' : isLow ? '残りわずか' : '在庫あり';
     const restockCost = stockNumber.format(item.defaultUnitCost ?? item.unitCost);
@@ -225,15 +229,18 @@ function renderStock(state, api) {
   const visibility = hiddenCount ? `<button type="button" class="btn lr-stock-filter" data-action="toggle-hidden-stock"
     aria-pressed="${showHiddenStock}" aria-label="非表示を含む">${icon('filter', 15)}非表示を含む${panelCount(hiddenCount, '件')}</button>` : '';
   const control = `<div class="ops-actions"><label class="field"><span>品目検索</span><input name="stockSearch" type="search" value="${escape(api.stockSearch ?? '')}" placeholder="品目名・コード・バーコード"></label>
+    ${barcodeScannerAvailable() ? '<button type="button" class="btn btn-secondary" data-action="stock-barcode-search">カメラでバーコードを読む</button>' : ''}
     <label class="inline-check"><input name="stockLowOnly" type="checkbox"${api.stockLowOnly ? ' checked' : ''}>在庫不足のみ</label>${visibility}</div>`;
   const historyPicker = `<label class="field"><span>品目別の履歴</span><select name="stockHistoryId"><option value="">すべて</option>
     ${[...names.values()].map(({id,name}) => `<option value="${escape(id)}"${id === api.stockHistoryId ? ' selected' : ''}>${escape(name)}</option>`).join('')}</select></label>`;
-  const costs = getInventoryCostSummary(state.movements,state.day.date.slice(0,7),businessDate);
+  const cutoff = registerCutoff(state);
+  const costs = getInventoryCostSummary(state.movements,operationBusinessDate(state).slice(0,7),(at)=>businessDate(at,cutoff));
   const balanceColumns = ['品目', '現在庫', '下限', '仕入原価', '評価額', '在庫状態'];
   if (canAdjustStock) balanceColumns.push('操作');
   const balance = rows.length ? table(api, balanceColumns, rows, 'lr-stock-table')
-    : empty(api, 'box', hiddenCount ? '表示中の在庫品目はありません' : '在庫品目がありません',
-      hiddenCount ? '「非表示を含む」で品目を確認できます。' : '「品目設定」から品目を追加できます。');
+    : query ? empty(api,'search','検索条件に一致する品目がありません','品目名・コード・バーコードを確認してください。')
+      : empty(api, 'box', hiddenCount ? '表示中の在庫品目はありません' : '在庫品目がありません',
+        hiddenCount ? '「非表示を含む」で品目を確認できます。' : '「品目設定」から品目を追加できます。');
   return `<div class="lr-view"><div class="lr-stats">
     ${stat(api, 'box', '管理品目', `${state.stock.length}<small> 品目</small>`)}
     ${stat(api, 'alert', '下限に達した品目', `${low.length}<small> 品目</small>`, low.length ? 'warning' : '')}

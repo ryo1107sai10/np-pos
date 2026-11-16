@@ -26,6 +26,15 @@ function fixture() {
   return {state,command};
 }
 
+test('closed-store cast punches use the configured cutoff at a calendar month boundary', () => {
+  const {state,command} = fixture();
+  const early = Date.parse('2026-12-01T03:30:00+09:00');
+  state.controls = {register:{cutoff:'03:00'}};
+  command(clockIn,early);
+  assert.equal(state.castAttendance[0].date,'2026-12-01');
+  assert.equal(getCastWorkspace(state,first.id,early).date,'2026-12-01');
+});
+
 test('manager punches, corrected breaks and named attendance amounts are reflected in frozen payroll', () => {
   let state = createDemo('closed',now);
   const run = (action, at = now, actor = manager) => { state = apply(state,action,at,actor); };
