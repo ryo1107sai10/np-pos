@@ -155,6 +155,30 @@ export function customerForSeat(state, action) {
   return { customer: customer.name, customerId: customer.id };
 }
 
+export function setTicketCustomer(state, ticket, { customerId }, actor) {
+  check(['admin', 'manager', 'staff'].includes(actor.role), '伝票の顧客を変更する権限がありません。');
+  check(customerId === null || typeof customerId === 'string', '登録済みの顧客を選んでください。');
+  const customer = findCustomer(state, customerId);
+  check(customerId === null || customer, '顧客が見つかりません。選び直してください。');
+  if (customer && ticket.customerId === customer.id) return;
+
+  const previous = findCustomer(state, ticket.customerId);
+  ticket.customer = customer?.name ?? '';
+  if (customer) {
+    ticket.customerId = customer.id;
+    firstVisit(customer, state.day.date);
+  } else {
+    delete ticket.customerId;
+  }
+
+  if (previous?.firstVisitDate === state.day.date) {
+    previous.firstVisitDate = '';
+    for (const { ticket: visit, date } of ticketSnapshots(state)) {
+      if (visit.customerId === previous.id && visit.status !== 'void') firstVisit(previous, date);
+    }
+  }
+}
+
 function rewriteTicketLinks(state, from, to) {
   const update = (ticket) => { if (ticket?.customerId === from) ticket.customerId = to; };
   (state.tickets ?? []).forEach(update);

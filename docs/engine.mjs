@@ -1,7 +1,7 @@
 import { addCardFeeTax, getCardFee, getCardFeeSettings, normalizeCardFeeSettings } from './card-fee.mjs';
 import { getStoreSettings, normalizeStoreSettings, replaceStoreSettings } from './store-settings.mjs';
 import { buildOperationAudit } from './operational-audit.mjs';
-import { applyCustomerCommand, customerForSeat, findCustomer, isAssignedCustomer } from './customers.mjs';
+import { applyCustomerCommand, customerForSeat, findCustomer, isAssignedCustomer, setTicketCustomer } from './customers.mjs';
 import { getCustomerReceivableBalance, getReceivableBalance, getReceivableRecoveryTotals,
   receivableCollectionMethods } from './receivables.mjs';
 import { createCashMovement, getCashMovements, getDailyRecoveryRows, totalCashMovements } from './cash-ledger.mjs';
@@ -901,6 +901,9 @@ function reduce(state, action, now, actor) {
   }
   requireOrderable(ticket);
   switch (action.type) {
+    case 'setTicketCustomer':
+      setTicketCustomer(next, ticket, action, actor);
+      break;
     case 'pauseVisitAutoExtension':
       pauseVisitAutoExtension(next, ticket, action, now, actor);
       break;

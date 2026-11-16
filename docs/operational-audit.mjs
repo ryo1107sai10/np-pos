@@ -189,6 +189,21 @@ export function buildOperationAudit(before, after, action, at, actor) {
     details = auditSettings(before, after, action);
   } else if (customerActions.has(action.type)) {
     details = auditCustomers(before, after, action);
+  } else if (action.type === 'setTicketCustomer') {
+    const previous = before.tickets.find(({ id }) => id === action.ticketId);
+    const current = after.tickets.find(({ id }) => id === action.ticketId);
+    const customerLink = (ticket) => ({
+      customerId: ticket.customerId ?? null,
+      customerName: typeof ticket.customer === 'string' ? ticket.customer || null : null,
+    });
+    const oldLink = customerLink(previous);
+    const newLink = customerLink(current);
+    if (!sameValue(oldLink, newLink)) {
+      const reason = !newLink.customerId ? '顧客のひもづけを解除'
+        : oldLink.customerId || oldLink.customerName ? '顧客のひもづけを変更' : '顧客をひもづけ';
+      details = { target: target('ticket', current.id, `伝票 No. ${current.number}`),
+        before: oldLink, after: newLink, reason };
+    }
   } else if (action.type === 'stockAdjust') {
     const previous = before.stock.find(({ id }) => id === action.stockId);
     const current = after.stock.find(({ id }) => id === action.stockId);

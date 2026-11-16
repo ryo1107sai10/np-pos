@@ -838,6 +838,109 @@ test('cloud blocks inline customer registration while retaining existing-custome
   assert.equal(registrations.length, 1);
 });
 
+test('operators update an unpaid ticket customer across devices without widening CRM access', async () => {
+  const db = database();
+  const tenant = await store(db);
+  const cast = { uid: 'cast-1', email: 'cast@example.test' };
+  for (const [person, role] of [[helper, 'manager'], [outsider, 'staff'], [cast, 'cast']]) {
+    await inviteMember(db, owner, tenant, person.email, role);
+    await listStores(db, person);
+  }
+  const run = (actor, revision, suffix, action) => command(db, actor, tenant, revision, `ticket-customer-${suffix}`, action);
+
+  await run(owner, 0, 'opening', { type: 'open', openingCash: 0 });
+  await run(owner, 1, 'first-customer', { type: 'saveCustomer', customer: { name: 'テスト顧客 A', phone: '09011112222' } });
+  const registered = await run(owner, 2, 'second-customer', { type: 'saveCustomer', customer: { name: 'テスト顧客 B', memo: '非公開メモ' } });
+  const [first, second] = registered.state.customers;
+  const publicLink = ({ id, name }) => ({ id, name });
+  const seated = await run(owner, 3, 'seating', { type: 'seat', tableIds: ['a1'], setId: 'set60', guests: 1 });
+  const { id: ticketId } = seated.state.tickets[0];
+  const link = { type: 'setTicketCustomer', ticketId, customerId: first.id };
+  await assert.rejects(run(cast, 4, 'cast-denied', link), { code: 'forbidden' });
+  await assert.rejects(run(outsider, 4, 'missing-selection', { type: link.type, ticketId }), { code: 'invalid-command' });
+  await assert.rejects(run(outsider, 4, 'missing-customer', { ...link, customerId: 'does-not-exist' }), { code: 'rejected-command' });
+  await assert.rejects(run(outsider, 3, 'stale-selection', link), { code: 'revision-conflict' });
+
+  const linked = await run(outsider, 4, 'linked', link);
+  assert.equal(linked.revision, 5);
+  assert.deepEqual(await run(outsider, 4, 'linked', link), linked);
+  const managerView = (await readState(db, helper, tenant)).state;
+  for (const view of [linked.state, managerView]) {
+    const [ticket] = view.tickets;
+    assert.deepEqual(ticket.activeCustomerLink, publicLink(first));
+    assert.equal(ticket.customerId, undefined);
+    assert.equal(ticket.customer, '');
+    assert.equal(view.customers[0].phone, undefined);
+    assert.equal(view.customers[1].memo, undefined);
+  }
+  const relink = { ...link, customerId: second.id };
+  const changed = await run(helper, 5, 'changed', relink);
+  assert.deepEqual(changed.state.tickets[0].activeCustomerLink, publicLink(second));
+  const identical = await run(owner, 6, 'same-customer', relink);
+  assert.equal(identical.state.tickets[0].customerId, second.id);
+  const cleared = await run(outsider, 7, 'cleared', { ...link, customerId: null });
+  assert.equal(cleared.state.tickets[0].activeCustomerLink, undefined);
+  const guest = await readState(db, owner, tenant);
+  assert.equal(guest.state.tickets[0].customerId, undefined);
+  assert.equal(guest.state.tickets[0].customer, '');
+  assert.equal(quote(guest.state, ticketId).total, quote(seated.state, ticketId).total);
+  assert.deepEqual(guest.state.customers, registered.state.customers);
+
+  const finalLink = await run(owner, 8, 'chosen-before-payment', relink);
+  assert.equal(finalLink.state.tickets[0].activeCustomerLink, undefined);
+  const remaining = quote(finalLink.state, ticketId).remaining;
+  await run(outsider, 9, 'paid', { type: 'settle', ticketId, payments: [{ method: 'cash', amount: remaining }] });
+  for (const person of [helper, outsider]) {
+    const [ticket] = (await readState(db, person, tenant)).state.tickets;
+    assert.equal(ticket.activeCustomerLink, undefined);
+    assert.equal(ticket.customerId, undefined);
+  }
+  await assert.rejects(run(owner, 10, 'paid-protected', link), { code: 'rejected-command' });
+  await run(outsider, 10, 'departed', { type: 'depart', ticketId });
+  const closed = await run(owner, 11, 'closed', { type: 'close', actualCash: remaining });
+  assert.equal(closed.state.closedDays[0].ticketSnapshots[0].customerId, second.id);
+  assert.equal((await readState(db, helper, tenant)).state.closedDays[0].ticketSnapshots[0].activeCustomerLink, undefined);
+  await assert.rejects(run(owner, 12, 'closed-protected', link), { code: 'rejected-command' });
+  await assert.rejects(listAudit(db, outsider, tenant), { code: 'forbidden' });
+  const edits = (await listAudit(db, owner, tenant)).events.filter(({ action }) => action === link.type).reverse();
+  assert.deepEqual(edits.map(({ actor, target, before, after }) => [actor.id, target.id, before.customerId, after.customerId]), [
+    [outsider.uid, ticketId, null, first.id], [helper.uid, ticketId, first.id, second.id],
+    [outsider.uid, ticketId, second.id, null], [owner.uid, ticketId, null, second.id],
+  ]);
+  assert.equal(edits[1].before.customerName, first.name);
+  assert.equal(edits[1].after.customerName, second.name);
+});
+
+test('migration strips forged active customer links from every ticket view', async () => {
+  const db = database();
+  const tenant = await store(db);
+  await inviteMember(db, owner, tenant, helper.email, 'manager');
+  await listStores(db, helper);
+  const now = Date.parse('2026-11-16T20:00:00+09:00');
+  const admin = { id: owner.uid, label: owner.email, role: 'admin' };
+  let browser = createDemo('closed', now);
+  const applyBrowser = (action) => { browser = apply(browser, action, now, admin); };
+  const seat = { type: 'seat', tableIds: ['a1'], setId: 'set60', guests: 1 };
+  applyBrowser({ type: 'open', date: '2026-11-16', openingCash: 0 });
+  applyBrowser(seat);
+  const { id: ticketId } = browser.tickets[0];
+  const payment = { type: 'settle', ticketId, payments: [{ method: 'cash', amount: quote(browser, ticketId).remaining }] };
+  applyBrowser(payment);
+  applyBrowser({ type: 'cancelSettlement', ticketId, reason: '入力内容の修正' });
+  applyBrowser({ type: 'reopenTicket', ticketId, tableIds: ['a1'], reason: '再会計' });
+  applyBrowser(payment);
+  applyBrowser({ type: 'depart', ticketId });
+  applyBrowser({ type: 'close', actualCash: summary(browser).expectedCash });
+  applyBrowser({ type: 'open', date: '2026-11-17', openingCash: 0 });
+  applyBrowser(seat);
+  const ticketViews = (state) => [state.tickets[0], state.closedDays[0].ticketSnapshots[0], state.cancelledSettlements[0].receipt];
+  for (const ticket of ticketViews(browser)) ticket.activeCustomerLink = { id: 'fake', name: '偽のリンク' };
+  const migrated = await migrateState(db, owner, tenant, { operationId: 'forged-ticket-link-migration', snapshot: browser });
+  for (const { state } of [migrated, await readState(db, helper, tenant)]) {
+    assert.ok(ticketViews(state).every(({ activeCustomerLink }) => activeCustomerLink === undefined));
+  }
+});
+
 test('browser migration validates a visit pause timestamp and source as a pair', async () => {
   const db = database();
   const tenant = await store(db);

@@ -260,11 +260,43 @@ export function renderSeatCustomerSelection(state, id, api) {
     ${action(api, '選択を解除', 'seat-customer-clear')}</div>${renderSeatCustomerSuggestion(state, id, api)}`;
 }
 
-export function renderSeatCustomer(state, api, {query = '', selected = ''} = {}) {
+function renderSeatCustomerPicker(state, api, {query, selected, label, help, selection}) {
   const {escape} = api;
-  return `<fieldset class="np-seat-customer"><legend>お客様（任意）</legend>
-    ${field('顧客を検索', `<input name="customerQuery" type="search" autocomplete="off" value="${escape(query)}" placeholder="${canView(api) ? '表示名・ふりがな・電話番号' : '表示名'}" maxlength="100" aria-controls="seat-customer-results">`, '登録済みのお客様を検索できます。顧客の指定は任意です。')}
+  return `<fieldset class="np-seat-customer"><legend>${label}</legend>
+    ${field('顧客を検索', `<input name="customerQuery" type="search" autocomplete="off" value="${escape(query)}" placeholder="${canView(api) ? '表示名・ふりがな・電話番号' : '表示名'}" maxlength="100" aria-controls="seat-customer-results">`, help)}
     <div id="seat-customer-results" class="np-seat-customer-results" role="group" aria-label="顧客の検索候補">${renderSeatCustomerResults(state, query, selected, api)}</div>
-    <div id="seat-customer-selection" aria-live="polite">${renderSeatCustomerSelection(state, selected, api)}</div>
+    <div id="seat-customer-selection" aria-live="polite">${selection}</div>
   </fieldset>`;
+}
+
+export function renderSeatCustomer(state, api, {query = '', selected = ''} = {}) {
+  return renderSeatCustomerPicker(state, api, {
+    query, selected, label: 'お客様（任意）', help: '登録済みのお客様を検索できます。顧客の指定は任意です。',
+    selection: renderSeatCustomerSelection(state, selected, api),
+  });
+}
+
+export function renderTicketCustomerSelection(state, selected, api, currentAlias) {
+  const hasCurrent = Boolean(currentAlias?.id || currentAlias?.name);
+  const detachLabel = hasCurrent ? 'ひもづけを解除' : '選択を解除';
+  if (selected === null) return hasCurrent
+    ? '<p class="np-ticket-customer-detached">保存後は顧客の指定が解除されます。</p>' : '';
+  if (selected === undefined || selected === currentAlias?.id) return hasCurrent
+    ? `<div class="np-ticket-customer-actions">${action(api, detachLabel, 'seat-customer-clear')}</div>` : '';
+  const customer = findCustomer(state, selected);
+  if (!customer) return '';
+  return `<div class="np-seat-customer-current"><span>保存後のお客様 <strong>${api.escape(customer.name)}</strong></span>
+    ${action(api, detachLabel, 'seat-customer-clear')}</div>${renderSeatCustomerSuggestion(state, selected, api)}`;
+}
+
+export function renderTicketCustomerEditor(state, {currentAlias, query = '', selected = currentAlias?.id}, api) {
+  const hasCurrent = Boolean(currentAlias?.id || currentAlias?.name);
+  const currentName = currentAlias?.name || (hasCurrent ? '指定済み' : '顧客の指定なし');
+  return `<div class="np-ticket-customer">
+    <dl class="np-ticket-customer-current"><dt>現在のお客様</dt><dd>${api.escape(currentName)}</dd></dl>
+    ${renderSeatCustomerPicker(state, api, {
+      query, selected, label: '登録済みのお客様', help: '検索結果からお客様を選び、保存します。',
+      selection: renderTicketCustomerSelection(state, selected, api, currentAlias),
+    })}
+  </div>`;
 }

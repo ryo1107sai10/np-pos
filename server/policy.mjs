@@ -8,7 +8,7 @@ import { isValidPrintDocument, normalizePrintSettings } from '../docs/print-doma
 
 export const roles = new Set(['admin', 'manager', 'staff', 'cast', 'trainee']);
 const staffCommands = ['seat', 'move', 'order', 'extend', 'deposit', 'settle', 'depart', 'serve', 'issuePrintDocument',
-  'syncAutoExtensions', 'setTableAutoExtension', 'pauseVisitAutoExtension', 'resumeVisitAutoExtension'];
+  'syncAutoExtensions', 'setTableAutoExtension', 'pauseVisitAutoExtension', 'resumeVisitAutoExtension', 'setTicketCustomer'];
 const managerCommands = [...staffCommands, 'open', 'close', 'discount', 'stockAdjust', 'cancelDeposit', 'cancelLine', 'void',
   'saveCustomer', 'recoverReceivable', 'recordCashMovement'];
 const roleCommands = {
@@ -54,6 +54,12 @@ export function verifyCommand(role, command) {
   if (command.type === 'seat') {
     requireCondition(command.newCustomer == null, 400, 'invalid-command',
       '顧客の新規登録は顧客管理から行ってください。来店登録では登録済みの顧客を選べます。');
+  }
+  if (command.type === 'setTicketCustomer') {
+    const { ticketId, customerId } = command;
+    requireCondition(typeof ticketId === 'string' && ticketId.trim().length > 0
+      && (customerId === null || (typeof customerId === 'string' && customerId.trim().length > 0)),
+    400, 'invalid-command', '伝票と顧客の選択内容を確認してください。');
   }
   if (command.type === 'order') {
     requireCondition(Array.isArray(command.items) && command.items.length <= 100 && command.items.every(isRecord),
@@ -121,6 +127,14 @@ export function projectState(state, role, actorUid) {
     delete customer.createdByUid;
     return customer;
   });
+  if (next.day.status === 'open') {
+    const names = new Map(next.customers.map(({ id, name }) => [id, name]));
+    for (const ticket of next.tickets) {
+      if (ticket.status === 'open' && names.has(ticket.customerId)) {
+        ticket.activeCustomerLink = { id: ticket.customerId, name: names.get(ticket.customerId) };
+      }
+    }
+  }
   if (role === 'manager') {
     const recoveriesByDate = recoveryRowsByDate(state);
     next.recoveryTotalsForDay = summary(state).recoveries;
@@ -427,6 +441,7 @@ export function validateSnapshot(state) {
   for (const customer of migrated.customers ?? []) delete customer.createdByUid;
   for (const ticket of allSnapshotTickets(migrated)) {
     delete ticket.seatedByUid;
+    delete ticket.activeCustomerLink;
   }
   return migrated;
 }

@@ -199,7 +199,7 @@ function permittedAction(action) {
   if (store && ['demo', 'demo-start', 'demo-live', 'demo-cash', 'demo-reports', 'demo-billing', 'demo-role'].includes(action)) return false;
   if (ownerActions.has(action) || action.startsWith('store-editor-') || action.startsWith('layout-editor-')) return role === 'admin';
   if (managerActions.has(action)) return role === 'admin' || role === 'manager';
-  if (['table-auto-extension','auto-extension-pause','auto-extension-checkout','auto-extension-resume'].includes(action)) {
+  if (['table-auto-extension','auto-extension-pause','auto-extension-checkout','auto-extension-resume','ticket-customer'].includes(action)) {
     return ['admin','manager','staff'].includes(role);
   }
   return true;
@@ -421,6 +421,13 @@ function tableAutoExtensionModel(tableId) {
     storeEnabled:getAutoExtensionSettings(state).enabled, available:Boolean(getAutomaticExtensionPlan(state)), blockedBy};
 }
 
+function ticketCustomerAlias(ticket) {
+  if (ticket.activeCustomerLink) return ticket.activeCustomerLink;
+  const customer = findCustomer(state,ticket.customerId);
+  if (customer) return {id:customer.id,name:customer.name};
+  return ticket.customer ? {name:ticket.customer} : null;
+}
+
 function renderDetail(notices, now) {
   const ticket = selected && getTicketForTable(state, selected);
   const detailClose = `<button type="button" class="icon-btn detail-mobile-close" data-action="hide-detail" aria-label="伝票詳細を閉じる">${icon('x',18)}</button>`;
@@ -432,6 +439,8 @@ function renderDetail(notices, now) {
   const autoModel = tableAutoExtensionModel(selected);
   const status = tableStatus(state,selected);
   const settled = ticket.status === 'paid';
+  const canSetCustomer = ticket.status === 'open' && state.day.status === 'open';
+  const customerName = ticket.customer || (canSetCustomer ? ticket.activeCustomerLink?.name : '');
   const lines = ticket.lines.filter((line)=>!line.cancelledAt);
   const requested = ticket.discountRequest;
   const pending = requested ? `<div class="ops-highlight" role="status">値引き承認待ち
@@ -442,7 +451,10 @@ function renderDetail(notices, now) {
   return `<aside class="detail ${mobileDetails ? 'mobile-visible' : ''}" aria-label="伝票詳細" data-ticket="${escape(ticket.id)}">
     <div class="detail-head"><h2>${icon('ticket',17)}伝票詳細</h2><span class="detail-number">No. ${ticket.number}</span>${detailClose}</div>
     <div class="detail-inner"><div class="detail-title"><h3>${escape(tableName(selected))}</h3>${pill(status)}</div>
-    <div class="detail-meta"><span>${icon('users',13)}${ticket.guests}名${ticket.customer ? ` · ${escape(ticket.customer)}` : ''}</span><span>${settled ? `${icon('check',13)}退店待ち` : `${icon('clock',13)}<time data-ends="${ticket.endsAt}">${timer(ticket.endsAt)}</time>`}</span></div>
+    <div class="detail-meta"><span>${icon('users',13)}${ticket.guests}名${customerName ? ` · ${escape(customerName)}` : ''}</span><span>${settled ? `${icon('check',13)}退店待ち` : `${icon('clock',13)}<time data-ends="${ticket.endsAt}">${timer(ticket.endsAt)}</time>`}</span></div>
+    ${canSetCustomer && permittedAction('ticket-customer') ? `<div class="ops-actions">
+      ${button('顧客を設定','ticket-customer',{id:ticket.id,glyph:'users',tone:'quiet'})}
+    </div>` : ''}
     ${ticket.tableIds.length > 1 ? `<div class="detail-links" aria-label="同じ伝票の卓">${ticket.tableIds.map(id=>`<span class="detail-link">${escape(tableName(id))}</span>`).join('')}</div>` : ''}
     ${warning ? `<div class="auto-extension-detail-warning" role="group" aria-label="自動延長まで1分以内">${renderAutoExtensionBadge('soon',{icon})}
       <strong data-auto-extension-deadline="${warning.deadline}">${formatAutoExtensionCountdown(warning.deadline,now)}</strong></div>` : ''}
@@ -1050,6 +1062,12 @@ function paintDialog(layoutFileInput) {
     case 'edit-layout':
       present('ホールのレイアウト編集', renderLayoutEditor(modal.layout, escape), 'レイアウトを保存', { style: 'modal-layout' });
       return;
+    case 'ticket-customer':
+      present('伝票の顧客を設定',headline + customerUI.renderTicketCustomerEditor(customerWorkspaceState(),{
+        currentAlias:modal.ticketCustomerAlias,query:modal.seatCustomerQuery ?? '',selected:modal.seatCustomerId,
+      },customerUIApi()),'顧客の設定を保存',{style:'modal-wide customer-dialog'});
+      syncTicketCustomerSubmit();
+      return;
     case 'customer-detail':
       present('顧客詳細', customerUI.renderCustomerDetail(customerWorkspaceState(),modal.customerId,customerUIApi()), null, {style:'modal-wide customer-dialog'});
       return;
@@ -1569,6 +1587,11 @@ function clickAction(target) {
   }
   if (action === 'audit-more') { void loadAuditPage(); return; }
   if (['ops-settings','print-settings'].includes(action)) { openDialog(action); return; }
+  if (action === 'ticket-customer') {
+    const ticket = state.tickets.find((entry) => entry.id === id && entry.status === 'open');
+    if (ticket && state.day.status === 'open') openDialog(action,{ticketId:id,ticketCustomerAlias:ticketCustomerAlias(ticket)});
+    return;
+  }
   if (action === 'table-auto-extension') {
     const tableId = id ?? selected ?? state.tables[0]?.id;
     if (state.tables.some((table) => table.id === tableId)) openDialog(action,{autoTableId:tableId});
@@ -1579,8 +1602,8 @@ function clickAction(target) {
     void changeVisitAutoExtension(id,source);
     return;
   }
-  if (action === 'seat-customer-clear' && modal?.type === 'seat') {
-    modal.seatCustomerId = '';
+  if (action === 'seat-customer-clear' && hasCustomerPicker()) {
+    modal.seatCustomerId = null;
     renderSeatCustomerMatches();
     renderSeatCustomerSelection();
     dialog.querySelector('[name=customerQuery]')?.focus({preventScroll:true});
@@ -1846,6 +1869,11 @@ function submitDialog(form) {
       commit({type:'saveCustomer',customerId:modal.customerId,customer},'顧客情報を保存しました。');
       break;
     }
+    case 'ticket-customer':
+      if (!hasTicketCustomerChange()) break;
+      commit({type:'setTicketCustomer',ticketId:id,customerId:modal.seatCustomerId},
+        modal.seatCustomerId ? '伝票に顧客をひもづけました。' : '伝票の顧客のひもづけを解除しました。');
+      break;
     case 'customer-merge':
       commit({type:'mergeCustomers',sourceId:value('sourceId'),targetId:modal.customerId,reason:value('reason')},'顧客と履歴を統合しました。');
       break;
@@ -2022,7 +2050,7 @@ dialog.addEventListener('change', (event) => {
   updatePrintPreview(event.target);
   if (event.target.name === 'cashKind') dialog.querySelector('[name=cashCategory]').innerHTML = cashCategoryOptions(event.target.value);
   if (event.target.name === 'paymentMethod') updatePaymentNote();
-  if (event.target.name === 'customerId' && modal?.type === 'seat') {
+  if (event.target.name === 'customerId' && hasCustomerPicker()) {
     modal.seatCustomerId = event.target.value;
     renderSeatCustomerSelection();
   }
@@ -2036,20 +2064,42 @@ dialog.addEventListener('change', (event) => {
     input.closest('label').querySelector('span').textContent = rate ? '値引き率（%）' : '値引き額（円）';
   }
 });
+function hasCustomerPicker() {
+  return ['seat','ticket-customer'].includes(modal?.type);
+}
+
+function hasTicketCustomerChange() {
+  if (modal.seatCustomerId === undefined) return false;
+  const current = modal.ticketCustomerAlias;
+  return modal.seatCustomerId !== (current?.id ?? null) || (!current?.id && Boolean(current?.name));
+}
+
+function syncTicketCustomerSubmit() {
+  const save = dialog.querySelector('#submit-dialog');
+  if (modal?.type === 'ticket-customer' && save) save.disabled = !hasTicketCustomerChange();
+}
+
 function renderSeatCustomerMatches() {
   const results = dialog.querySelector('#seat-customer-results');
+  const selected = modal.seatCustomerId === undefined ? modal.ticketCustomerAlias?.id : modal.seatCustomerId;
   if (results) results.innerHTML = customerUI.renderSeatCustomerResults(customerWorkspaceState(),
-    modal.seatCustomerQuery ?? '',modal.seatCustomerId,customerUIApi());
+    modal.seatCustomerQuery ?? '',selected,customerUIApi());
 }
 
 function renderSeatCustomerSelection() {
   const selection = dialog.querySelector('#seat-customer-selection');
-  if (selection) selection.innerHTML = customerUI.renderSeatCustomerSelection(customerWorkspaceState(),
-    modal.seatCustomerId,customerUIApi());
+  if (!selection) return;
+  const workspace = customerWorkspaceState();
+  if (modal.type === 'ticket-customer') {
+    selection.innerHTML = customerUI.renderTicketCustomerSelection(workspace,modal.seatCustomerId,customerUIApi(),modal.ticketCustomerAlias);
+    syncTicketCustomerSubmit();
+  } else {
+    selection.innerHTML = customerUI.renderSeatCustomerSelection(workspace,modal.seatCustomerId,customerUIApi());
+  }
 }
 
 function updateSeatCustomerSearch(event) {
-  if (modal?.type !== 'seat' || event.target.name !== 'customerQuery' || event.isComposing
+  if (!hasCustomerPicker() || event.target.name !== 'customerQuery' || event.isComposing
     || modal.seatCustomerQuery === event.target.value) return;
   modal.seatCustomerQuery = event.target.value;
   renderSeatCustomerMatches();

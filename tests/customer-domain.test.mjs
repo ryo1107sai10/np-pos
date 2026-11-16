@@ -96,6 +96,123 @@ test('visits cannot create customer profiles and can remain unlinked', () => {
   assert.deepEqual(guest.customers ?? [], []);
 });
 
+test('operators can attach, change, and clear an open ticket without changing its financials', () => {
+  let state = register(opened(), { name: '登録済み A' });
+  state = register(state, { name: '登録済み B' });
+  const [first, second] = state.customers;
+  state = seat(state, {}, staff);
+  const ticketId = state.tickets[0].id;
+  state = run(state, { type: 'order', ticketId, items: [
+    { menuId: 'nomination', quantity: 1, castIds: ['cast3'] },
+  ] }, staff);
+  state = run(state, { type: 'deposit', ticketId, method: 'cash', amount: 1000 }, staff);
+  const before = state;
+  const setCustomer = (customerId, actor) => {
+    state = run(state, { type: 'setTicketCustomer', ticketId, customerId }, actor);
+  };
+
+  setCustomer(first.id, staff);
+  assert.equal(state.tickets[0].customerId, first.id);
+  assert.equal(state.tickets[0].customer, first.name);
+  assert.equal(getCustomerDetail(state, first.id).visits[0].id, ticketId);
+  assert.equal(getCustomerDetail(state, first.id).nominations[0].castId, 'cast3');
+  assert.equal(findCustomer(state, first.id).firstVisitDate, '2026-11-16');
+
+  state = run(state, { type: 'saveCustomer', customerId: first.id, customer: { name: '変更後の氏名' } });
+  const attached = state;
+  setCustomer(first.id, manager);
+  assert.deepEqual(state, attached);
+  assert.equal(state.tickets[0].customer, first.name);
+
+  setCustomer(second.id, manager);
+  assert.equal(state.tickets[0].customerId, second.id);
+  assert.equal(state.tickets[0].customer, second.name);
+  assert.deepEqual(getCustomerDetail(state, first.id).visits, []);
+  assert.deepEqual(getCustomerDetail(state, first.id).nominations, []);
+  assert.equal(findCustomer(state, first.id).firstVisitDate, '');
+  assert.equal(getCustomerDetail(state, second.id).nominations[0].ticketId, ticketId);
+  assert.equal(isAssignedCustomer(state, second, manager.id), false);
+  assert.equal(findCustomer(state, second.id).firstVisitDate, '2026-11-16');
+
+  setCustomer(null, admin);
+  assert.deepEqual(state.tickets, before.tickets);
+  assert.deepEqual(state.stock, before.stock);
+  assert.deepEqual(state.movements, before.movements);
+  assert.deepEqual(quote(state, ticketId), quote(before, ticketId));
+  assert.deepEqual(summary(state), summary(before));
+  assert.deepEqual(getCustomerDetail(state, second.id).visits, []);
+  assert.equal(findCustomer(state, second.id).firstVisitDate, '');
+});
+
+test('the ticket customer edit is limited to registered customers and current open visits', () => {
+  let state = register(opened(), { name: '登録済み' });
+  const [{ id: customerId }] = state.customers;
+  state = seat(state, { customer: '旧伝票の表示名' });
+  const ticketId = state.tickets[0].id;
+  const action = { type: 'setTicketCustomer', ticketId };
+  for (const role of ['cast', 'trainee']) {
+    assert.throws(() => run(state, { ...action, customerId }, { id: role, label: role, role }), /権限/);
+  }
+  for (const invalid of [undefined, 123, {}, '', 'missing']) {
+    assert.throws(() => run(state, { ...action, customerId: invalid }), /顧客/);
+  }
+  assert.throws(() => run(state, action), /顧客/);
+  assert.throws(() => run(state, { ...action, ticketId: 'missing', customerId }), /伝票が見つかりません/);
+  const cleared = run(state, { ...action, customerId: null }, staff);
+  assert.equal(cleared.tickets[0].customer, '');
+  assert.deepEqual(listUnlinkedVisits(cleared), []);
+
+  const paid = run(state, { type: 'settle', ticketId,
+    payments: [{ method: 'cash', amount: quote(state, ticketId).remaining }] });
+  const departed = run(paid, { type: 'depart', ticketId });
+  const cancelled = run(paid, { type: 'cancelSettlement', ticketId, reason: '確認' });
+  const voided = run(state, { type: 'void', ticketId });
+  for (const locked of [paid, departed, cancelled, voided]) {
+    assert.throws(() => run(locked, { ...action, customerId }), /会計前の伝票/);
+  }
+  const closed = run(departed, { type: 'close', actualCash: summary(departed).expectedCash });
+  assert.throws(() => run(closed, { ...action, customerId }), /開店/);
+});
+
+test('ticket correction preserves past customer visits and cancelled receipt snapshots', () => {
+  let state = register(opened(), { name: '既存のお客様', creditEnabled: true, creditLimit: 30_000 });
+  state = register(state, { name: '移動先のお客様' });
+  const [previous, target] = state.customers;
+  state = seat(state, { customerId: previous.id });
+  const oldTicket = state.tickets[0].id;
+  state = departPaid(state, oldTicket);
+  state = run(state, { type: 'close', actualCash: summary(state).expectedCash });
+  const tomorrow = now + 24 * 60 * 60_000;
+  state = run(state, { type: 'open', date: '2026-11-17', openingCash: 20_000 }, admin, tomorrow);
+  state = seat(state, { customerId: previous.id }, admin, tomorrow);
+  const ticketId = state.tickets[0].id;
+  state = run(state, { type: 'settle', ticketId, creditDueDate: '2026-11-25',
+    payments: [{ method: 'receivable', amount: quote(state, ticketId).remaining }] }, admin, tomorrow);
+  state = run(state, { type: 'cancelSettlement', ticketId, reason: '顧客の選択を訂正' }, admin, tomorrow);
+  state = run(state, { type: 'reopenTicket', ticketId, tableIds: ['a1'], reason: '顧客の選択を訂正' }, admin, tomorrow);
+  const next = run(state, { type: 'setTicketCustomer', ticketId, customerId: target.id }, staff, tomorrow);
+  assert.deepEqual(next.closedDays, state.closedDays);
+  assert.deepEqual(next.cancelledSettlements, state.cancelledSettlements);
+  assert.deepEqual(next.receivables, state.receivables);
+  assert.deepEqual(getCustomerDetail(next, previous.id).visits.map(({ id }) => id), [oldTicket]);
+  assert.equal(findCustomer(next, previous.id).firstVisitDate, '2026-11-16');
+  assert.deepEqual(getCustomerDetail(next, target.id).visits.map(({ id }) => id), [ticketId]);
+  assert.equal(findCustomer(next, target.id).firstVisitDate, '2026-11-17');
+});
+
+test('clearing a customer keeps the first visit date when another ticket remains on the same day', () => {
+  let state = register(opened(), { name: '本日のお客様' });
+  const [{ id: customerId }] = state.customers;
+  state = seat(state, { customerId });
+  const firstTicket = state.tickets[0].id;
+  state = departPaid(state, firstTicket);
+  state = seat(state, { customerId });
+  const secondTicket = state.tickets.at(-1).id;
+  state = run(state, { type: 'setTicketCustomer', ticketId: secondTicket, customerId: null });
+  assert.equal(findCustomer(state, customerId).firstVisitDate, '2026-11-16');
+  assert.deepEqual(getCustomerDetail(state, customerId).visits.map(({ id }) => id), [firstTicket]);
+});
+
 test('the arrival picker displays candidates only when searched and keeps the chosen customer separate', () => {
   const state = register(opened(), { name: '山本 花子', kana: 'ヤマモト ハナコ', phone: '090-1111-2222' });
   const [{id}] = state.customers;

@@ -253,6 +253,32 @@
 .np-seat-customer-current strong { color: var(--text); }
 .np-seat-customer-current .btn { flex: none; min-height: 44px; }
 .np-seat-customer-hints { display: flex; flex-wrap: wrap; gap: 5px 13px; padding: 8px; border-radius: 7px; color: #50447b; background: #ece7f9; font-size: 11px; }
+.np-ticket-customer { display: grid; gap: 12px; min-width: 0; }
+.np-ticket-customer-current {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: baseline;
+  gap: 10px;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid #e4e3f0;
+  border-radius: 10px;
+  background: #f8f7fc;
+  font-size: 13px;
+}
+.np-ticket-customer-current dt { color: #56617b; }
+.np-ticket-customer-current dd { margin: 0; color: var(--text); font-weight: 680; overflow-wrap: anywhere; }
+.np-ticket-customer-actions { display: flex; justify-content: flex-end; }
+.np-ticket-customer-actions .btn { min-height: 44px; }
+.np-ticket-customer-detached {
+  margin: 0;
+  padding: 9px;
+  border: 1px solid #d6caef;
+  border-radius: 8px;
+  color: #50447b;
+  background: #f4efff;
+  font-size: 12px;
+}
 @media (max-width: 600px) {
   .np-directory { gap: 12px; }
   .np-directory-page-actions { justify-content: flex-start; }
@@ -282,6 +308,10 @@
   .np-seat-customer-results { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .np-seat-customer input[type=search] { font-size: 16px; }
   .modal .field :is(textarea[name=memo], textarea[name=csv], textarea[name=creditOverrideReason]), .np-directory-toolbar :is(input,select) { font-size: 16px; }
+}
+@media (max-width: 390px) {
+  .np-ticket-customer .np-seat-customer-current { align-items: stretch; flex-direction: column; }
+  .np-ticket-customer-actions .btn { width: 100%; }
 }
 @media (hover: none) {
   .np-directory-toolbar :is(input,select), .np-seat-customer :is(input:not([type=radio]),select) { min-height: 44px; }

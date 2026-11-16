@@ -11,6 +11,7 @@ export function createPhaseTwoDemo(mode = 'live', now = Date.now()) {
   if (mode === 'closed') return state;
 
   const customerId = state.customers[0].id;
+  step({type:'saveCustomer', customer:{name:'佐藤 彩',kana:'さとう あや'}},now - 175 * 60_000);
   const past = now - 80 * 60_000;
   step({ type:'seat', tableIds:['a3'], guests:2, setId:'set60', customerId }, past);
   const ticketId = state.tickets.at(-1).id;
