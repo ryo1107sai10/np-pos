@@ -2055,6 +2055,11 @@ function updateSeatCustomerSearch(event) {
   renderSeatCustomerMatches();
 }
 
+dialog.addEventListener('keydown',(event) => {
+  if (event.key !== 'Enter' || event.target.name !== 'customerQuery' || event.isComposing) return;
+  event.preventDefault();
+  dialog.querySelector('#seat-customer-results [name=customerId]')?.focus();
+});
 dialog.addEventListener('compositionend',updateSeatCustomerSearch);
 dialog.addEventListener('input',(event)=> {
   updatePrintPreview(event.target);
