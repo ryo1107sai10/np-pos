@@ -872,6 +872,43 @@ test('cloud stocktaking is manager-only, preserves the physical count, and recor
   assert.equal(events[0].reason, action.reason);
 });
 
+test('cloud stock purchase expenses require the cash permission and reconcile exactly once', async () => {
+  const db = database();
+  db.migrate(accessMigration);
+  db.migrate(roleMigration);
+  const tenant = await store(db);
+  const profileId = 'role-a1234567-1234-4123-8123-123456789abc';
+  const opened = apply(createDemo('closed'),{type:'open',openingCash:10_000});
+  opened.rolePolicy = {custom:{[profileId]:{label:'入庫担当',base:'manager',allowed:['inventory','editInventory']}}};
+  await migrateState(db,owner,tenant,{operationId:'stock-pay-migrate-01',snapshot:opened});
+  await inviteMember(db,owner,tenant,helper.email,profileId);
+  await listStores(db,helper);
+  const action = {type:'recordStockOperation',kind:'purchase',stockId:'soda',quantity:2,unitCost:250,reason:'店頭で仕入れ',
+    cashPayment:{amount:520,destination:'取引先'}};
+  await assert.rejects(command(db,helper,tenant,1,'stock-pay-not-allowed',action),{code:'forbidden'});
+  await assert.rejects(command(db,owner,tenant,1,'stock-pay-invalid-01',{...action,cashPayment:{amount:-520}}),{code:'rejected-command'});
+  const saved = await command(db,owner,tenant,1,'stock-pay-saved-0001',action);
+  assert.deepEqual(await command(db,owner,tenant,1,'stock-pay-saved-0001',action),saved);
+  const [receipt] = saved.state.movements;
+  const [expense] = saved.state.cashMovements;
+  assert.equal(saved.state.movements.length,1);
+  assert.equal(saved.state.cashMovements.length,1);
+  assert.equal(receipt.cashMovementId,expense.id);
+  assert.equal(summary(saved.state).expectedCash,9_480);
+  assert.equal((await listAudit(db,owner,tenant)).events[0].after.cashPayment.destination,'取引先');
+  await assert.rejects(command(db,helper,tenant,saved.revision,'stock-pay-void-denied',{...action,kind:'purchaseCancellation',
+    cashPayment:undefined,purchaseId:receipt.id,voidPurchaseCash:{id:expense.id,amount:expense.amount}}),{code:'forbidden'});
+  const closed = await command(db,owner,tenant,saved.revision,'stock-pay-close-0001',{type:'close',actualCash:9_480});
+  assert.equal(closed.state.closedDays[0].expenses,520);
+  assert.equal(closed.state.closedDays[0].cashMovements[0].stockPurchaseId,receipt.id);
+  const importedTenant = await store(db);
+  const inconsistent = structuredClone(closed.state);
+  inconsistent.movements[0].cashMovementId = 'unknown-cash';
+  await assert.rejects(migrateState(db,owner,importedTenant,{operationId:'stock-pay-bad-link1',snapshot:inconsistent}),{code:'invalid-snapshot'});
+  const imported = await migrateState(db,owner,importedTenant,{operationId:'stock-pay-import-01',snapshot:closed.state});
+  assert.equal(imported.state.cashMovements[0].stockPurchaseId,receipt.id);
+});
+
 test('server controls limit manager discounts and require administrator decisions and corrections', async () => {
   const db = database();
   const tenant = await store(db);

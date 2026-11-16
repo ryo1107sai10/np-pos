@@ -97,6 +97,7 @@ function payrollAmounts(pay) {
   return {month,castName,work,minutes,hourlyPay,commission,commissionDetails,points,pointPay,
     allowances,deductions,allowanceTotal,deductionTotal,advance,net,
     statementItems:statementItems?.filter(({kind}) => kind !== 'intermediate').map(({label,kind,amount}) => ({label,kind,amount})),
+    ...(pay.settings?.statementLayout && {settings:{statementLayout:pay.settings.statementLayout}}),
     ...(attendanceItems && {attendanceItems})};
 }
 

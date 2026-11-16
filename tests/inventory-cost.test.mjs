@@ -102,6 +102,50 @@ test('receipts use actual purchase cost and loss and consumption preserve distin
   assert.equal(soda(initial).quantity, 24);
 });
 
+test('recording stock and its cash expense together keeps receipt valuation separate from the register amount', () => {
+  const unopened = createDemo('closed',now);
+  const action = {kind:'purchase',quantity:3,unitCost:245,cashPayment:{amount:850,destination:'飲料卸'}};
+  assert.throws(() => inventoryOperation(unopened,action), /営業中/);
+  const initial = apply(unopened,{type:'open',openingCash:20_000},now);
+  assert.throws(() => inventoryOperation(initial,{...action,cashPayment:{amount:1.5}}), /円単位/);
+  assert.equal(soda(initial).quantity,24);
+  assert.deepEqual(initial.movements,[]);
+  assert.equal(summary(initial).expectedCash,20_000);
+
+  const purchased = inventoryOperation(initial,action);
+  const [receipt] = purchased.movements;
+  const [expense] = purchased.cashMovements;
+  assert.equal(receipt.cost,735);
+  assert.equal(receipt.cashMovementId,expense.id);
+  assert.equal(expense.stockPurchaseId,receipt.id);
+  assert.equal(expense.date,receipt.date);
+  assert.deepEqual([expense.kind,expense.category,expense.amount,expense.destination],['expense','purchase',850,'飲料卸']);
+  assert.equal(summary(purchased).expectedCash,19_150);
+  assert.equal(summary(purchased).expenses,850);
+  assert.equal(purchased.auditLog[0].after.cashPayment.amount,850);
+  const api = {summary,yen,escape:String,icon:() => ''};
+  assert.match(renderReport('stock',purchased,api), /レジ現金支払 ¥850/);
+  assert.match(renderReport('cash',purchased,api), /在庫の入庫と同時に記録/);
+
+  const edited = apply(purchased,{type:'editCashMovement',movementId:expense.id,kind:'expense',category:'purchase',amount:900,
+    destination:'飲料卸',reason:'伝票金額を訂正',correctionReason:'税込の支払額に訂正'},now,inventoryManager);
+  assert.equal(edited.cashMovements[0].stockPurchaseId,receipt.id);
+  assert.equal(edited.movements[0].cost,735);
+  assert.equal(summary(edited).expectedCash,19_100);
+  const cancellation = {kind:'purchaseCancellation',purchaseId:receipt.id};
+  const stockOnly = inventoryOperation(edited,cancellation);
+  assert.equal(soda(stockOnly).quantity,24);
+  assert.equal(summary(stockOnly).expectedCash,19_100);
+  assert.throws(() => inventoryOperation(edited,{...cancellation,voidPurchaseCash:{id:expense.id,amount:850}}), /記録が更新/);
+  const both = inventoryOperation(edited,{...cancellation,voidPurchaseCash:{id:expense.id,amount:900}});
+  assert.equal(soda(both).quantity,24);
+  assert.equal(summary(both).expenses,0);
+  assert.equal(summary(both).expectedCash,20_000);
+  assert.equal(both.auditLog[0].before.cashPayment.amount,900);
+  assert.equal(both.auditLog[0].after.cashPayment.voidedAt,now);
+  assert.match(renderReport('stock',both,api), /レジ現金支払 ¥900 ／ 取消済み/);
+});
+
 test('stocktake records the book quantity and actual count even with no difference, and rejects stale or unauthorized counts', () => {
   const initial = createDemo('closed', now);
   const corrected = inventoryOperation(initial, { kind: 'stocktake', bookQuantity: 24, actualQuantity: 23.75 });

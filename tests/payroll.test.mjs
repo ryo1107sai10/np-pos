@@ -4,7 +4,9 @@ import { apply, createDemo, quote, summary } from '../docs/engine.mjs';
 import { getDailyPayLimit, getDailyPayTotals, getPayrollDailyPays, getPayrollDraft, getPayrollRangeStatements, getPayrollSettings, getPayrollTemplates,
   previewPayroll, previewPayrollRange } from '../docs/payroll.mjs';
 import { makeImagePdf, makeStoredZip } from '../docs/payroll-pdf.mjs';
-import { renderPayroll, renderPayrollRange } from '../docs/payroll-ui.mjs';
+import { renderPayroll, renderPayrollPrint, renderPayrollRange } from '../docs/payroll-ui.mjs';
+import { defaultPayrollStatementLayout, monthlyPayrollSections } from '../docs/payroll-statement-layout.mjs';
+import { bindCastAccount, getCastWorkspace } from '../docs/cast-self.mjs';
 import { createPayrollDemo } from '../docs/phase-two-demo.mjs';
 import { buildDailyReportCsv } from '../docs/report-export.mjs';
 import { getReportDay, getReportPeriod } from '../docs/report-period.mjs';
@@ -224,6 +226,48 @@ test('named payroll templates apply to assigned casts and leave finalized amount
   state = run(state,{type:'removePayrollTemplate',templateId});
   assert.equal(previewPayroll(state,{month:'2026-12',castId}).net,500);
   assert.equal(getPayrollDraft(state,month,castId).snapshot.net,1_500);
+});
+
+test('monthly print and individual PDFs use the layout frozen at finalization without changing pay or exposing formulas', () => {
+  let state = shop();
+  const rows = defaultPayrollStatementLayout();
+  const base = [...rows.splice(1,1),...rows].map((row) => ({...row,visible:row.key !== 'allowances'}));
+  const template = [...base].reverse().map((row) => ({...row,visible:row.key !== 'work'}));
+  const saveLayout = {type:'savePayrollSettings',settings:{statementLayout:base}};
+  const saveTemplate = {type:'savePayrollTemplate',name:'店舗用',rules:[],statementLayout:template};
+  assert.throws(() => run(state,{...saveLayout,settings:{statementLayout:base.map((row) => ({...row,visible:false}))}}),/表示項目/);
+  assert.throws(() => run(state,{...saveTemplate,statementLayout:[template[1],...template.slice(1)]}),/表示項目/);
+  assert.throws(() => verifyCommand('manager',saveLayout),{code:'forbidden'});
+  assert.throws(() => verifyCommand('manager',saveTemplate),{code:'forbidden'});
+  state = run(state,rate(3_500));
+  state = run(state,payDraft({allowances:[{label:'精勤手当',amount:500}],deductions:[{label:'備品代',amount:100}]}));
+  const before = previewPayroll(state,getPayrollDraft(state,month,castId));
+  state = run(state,saveLayout);
+  assert.deepEqual(previewPayroll(state,{month,castId}).settings.statementLayout,base);
+  state = run(state,saveTemplate);
+  const [{id:templateId}] = getPayrollTemplates(state);
+  state = run(state,{type:'assignPayrollTemplate',castId,templateId});
+  state = run(state,finalize);
+  let record = getPayrollDraft(state,month,castId);
+  assert.equal(record.snapshot.net,before.net);
+  assert.deepEqual(record.snapshot.settings.statementLayout,template);
+  const printApi = {escape:String,yen:String,storeName:'検証店舗'};
+  const print = renderPayrollPrint(record,printApi);
+  assert.match(print,/<h2>控除<\/h2>[\s\S]*<h2>手当<\/h2>[\s\S]*<h2>支給内訳<\/h2>/);
+  assert.doesNotMatch(print,/<h2>勤務の内訳<\/h2>/);
+  assert.deepEqual(monthlyPayrollSections(record.snapshot,String).map(([title]) => title),['控除','手当','支給内訳']);
+
+  state = run(state,{...saveTemplate,templateId,statementLayout:null});
+  assert.deepEqual(previewPayroll(state,{month:'2026-12',castId}).settings.statementLayout,base);
+  state = run(state,{...saveLayout,settings:{statementLayout:null}});
+  assert.equal(previewPayroll(state,{month:'2026-12',castId}).settings.statementLayout,undefined);
+  state = validateSnapshot(state);
+  record = getPayrollDraft(state,month,castId);
+  assert.equal(renderPayrollPrint(record,printApi),print);
+  bindCastAccount(state,{memberUid:'verified-cast',castId},admin);
+  const [ownStatement] = getCastWorkspace(state,'verified-cast',now).payroll.finals;
+  assert.deepEqual(ownStatement.settings,{statementLayout:template});
+  assert.equal(renderPayrollPrint({month,snapshot:ownStatement},printApi),print);
 });
 
 test('a monthly wage of ¥17,100 only includes settled commissions and locks the original amount', () => {

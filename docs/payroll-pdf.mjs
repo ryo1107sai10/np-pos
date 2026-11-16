@@ -1,3 +1,5 @@
+import { monthlyPayrollSections, payrollStatementNote, payrollSummaryAmounts, payrollWorkRows } from './payroll-statement-layout.mjs';
+
 const encoder = new TextEncoder();
 const pageWidth = 595.28;
 const pageHeight = 841.89;
@@ -11,29 +13,14 @@ function money(label,amount) {
 
 function baseSections(pay) {
   return [
-    ['支給内訳',[
-      money('時給分',pay.hourlyPay),money('確定歩合',pay.commission),money('ポイント換金',pay.pointPay),
-      money('手当合計',pay.allowanceTotal),money('控除合計',-pay.deductionTotal),money('日払い済み',-pay.advance),
-    ]],
-    ['勤務の内訳',pay.work.map(({date,minutes,hourlyRate,source}) =>
-      [`${date}   ${source === 'attendance' ? '勤怠' : '手入力'}`,
-        `${Math.floor(minutes / 60)}時間 ${minutes % 60}分   ${yen.format(hourlyRate)}/時`])],
+    ['支給内訳',payrollSummaryAmounts(pay).map(([label,amount]) => money(label,amount))],
+    ['勤務の内訳',payrollWorkRows(pay.work,yen.format)],
   ];
 }
 
 function monthlyStatement({month,snapshot:pay}) {
-  const sections = [
-    ...baseSections(pay),
-    ['確定歩合の内訳',pay.commissionDetails.map(({name,amount}) => money(name,amount))],
-    ['手当',pay.allowances.map(({label,amount}) => money(label,amount))],
-    ['控除',pay.deductions.map(({label,amount}) => money(label,-amount))],
-    ['計算テンプレートの内訳',(pay.statementItems ?? []).filter(({kind}) => kind !== 'intermediate')
-      .map(({label,amount,kind}) => money(label,kind === 'deduction' ? -amount : amount))],
-    ['勤怠項目の内訳',(pay.attendanceItems ?? []).map(({label,amount,kind}) => kind === 'points'
-      ? [label,`${amount} pt`] : money(label,kind === 'deduction' ? -amount : amount))],
-  ];
-  return {title:'支給明細',period:month,filenamePeriod:month,castName:pay.castName,totalLabel:'支給合計',total:pay.net,sections,
-    note:'店舗で登録した手当・控除を記載しています。源泉徴収・社会保険料の自動計算は対象外です。'};
+  return {title:'支給明細',period:month,filenamePeriod:month,castName:pay.castName,totalLabel:'支給合計',total:pay.net,
+    sections:monthlyPayrollSections(pay,yen.format),note:payrollStatementNote};
 }
 
 function rangeStatement({start,end,snapshot:pay}) {

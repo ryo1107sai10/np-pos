@@ -12,6 +12,7 @@ const paths = {
   power: '<path d="M12 2v9m5-6a8 8 0 1 1-10 0"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
   minus: '<path d="M5 12h14"/>',
+  'chevron-up': '<path d="m6 15 6-6 6 6"/>',
   'chevron-down': '<path d="m6 9 6 6 6-6"/>',
   'chevron-right': '<path d="m9 6 6 6-6 6"/>',
   'arrow-right': '<path d="M4 12h16m-6-6 6 6-6 6"/>',

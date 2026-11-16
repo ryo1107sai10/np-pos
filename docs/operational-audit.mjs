@@ -3,7 +3,7 @@ import { depositGrossAmount, getCardFeeSettings } from './card-fee.mjs';
 import { findSettledCustomerTicket } from './customers.mjs';
 import { getStoreSettings } from './store-settings.mjs';
 import { getReceivableBalance, getReceivableStatus } from './receivables.mjs';
-import { cashMovementCategories, cashMovementKinds } from './cash-ledger.mjs';
+import { cashMovementCategories, cashMovementKinds, getCashMovement } from './cash-ledger.mjs';
 import { getPrintSettings, printDocumentKinds } from './print-domain.mjs';
 import { getPayrollDraft, getPayrollRates, getPayrollSettings, getPayrollTemplateAssignment, getPayrollTemplates, isDailyPayCommand, isPayrollCommand } from './payroll.mjs';
 import { getStaffLabor, isStaffLaborCommand } from './labor-workspace.mjs';
@@ -127,6 +127,13 @@ function auditMovements(before, after) {
   return after.movements.slice(0, count).map(({ stockId, stockName, quantity, unit, cost }) => ({
     stockId, name: stockName, quantity, unit, cost,
   }));
+}
+
+function auditPurchaseCash(state, id) {
+  const payment = getCashMovement(state,id);
+  if (!payment) return null;
+  const {amount,destination,voidedAt} = payment;
+  return {cashMovementId:payment.id,amount,destination,...(voidedAt != null && {voidedAt})};
 }
 
 function auditLine({id,name,quantity,price,total,castIds,castNames,cancelledAt,providedAt,serviceExcluded,taxRate,originalTaxRate,lineDiscount}) {
@@ -558,13 +565,17 @@ export function buildOperationAudit(before, after, action, at, actor) {
   } else if (action.type === 'stockAdjust' || action.type === 'recordStockOperation') {
     const previous = before.stock.find(({ id }) => id === action.stockId);
     const current = after.stock.find(({ id }) => id === action.stockId);
+    const paymentId = action.voidPurchaseCash?.id ?? after.movements[0]?.cashMovementId;
+    const cashBefore = auditPurchaseCash(before,paymentId);
+    const cashAfter = auditPurchaseCash(after,paymentId);
     details = {
       businessDate: after.movements[0]?.date ?? after.day.date,
       target: target('stock', current.id, current.name),
-      before: { quantity: previous.quantity, value: previous.value },
+      before: { quantity: previous.quantity, value: previous.value, ...(cashBefore && {cashPayment:cashBefore}) },
       after: { quantity: current.quantity, value: current.value, stockMovements: auditMovements(before, after),
         ...(action.type === 'recordStockOperation' && { kind: action.kind }),
-        ...(action.type === 'recordStockOperation' && action.kind === 'purchase' && { unitCost: action.unitCost }) },
+        ...(action.type === 'recordStockOperation' && action.kind === 'purchase' && { unitCost: action.unitCost }),
+        ...(cashAfter && {cashPayment:cashAfter}) },
       reason: textReason(action.reason),
     };
   } else if (action.type === 'saveControls') {

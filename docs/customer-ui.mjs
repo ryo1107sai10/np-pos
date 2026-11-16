@@ -1,5 +1,5 @@
 import { customerAnniversaryLimit, customerPhotoMax, customerWeekdays, findCustomer, getCustomerDetail, getCustomerDirectory, getCustomerNotices,
-  isCustomerPhoto, listUnlinkedVisits, searchCustomers } from './customers.mjs';
+  getReturningCustomerCastSuggestions, isCustomerPhoto, listUnlinkedVisits, searchCustomers } from './customers.mjs';
 
 const appointment = new Intl.DateTimeFormat('ja-JP', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'Asia/Tokyo' });
 const canView = (api) => ['admin', 'manager'].includes(api.role);
@@ -328,14 +328,17 @@ export function renderSeatCustomerResults(state, query, selected, api) {
 }
 
 function renderSeatCustomerSuggestion(state, id, api) {
-  if (!canViewCustomer(findCustomer(state, id), api)) return '';
-  const detail = getCustomerDetail(state, id);
-  const preferred = detail.preferredCast?.name;
-  const last = detail.lastNomination?.castName;
+  const customer = findCustomer(state, id);
+  if (!canViewCustomer(customer, api)) return '';
   const {escape} = api;
-  const bottles = (detail.customer.bottleKeeps ?? []).filter(({quantity}) => quantity > 0).slice(0,3);
-  return preferred || last || bottles.length ? `<div class="np-seat-customer-hints">${preferred ? `<span>担当キャスト <strong>${escape(preferred)}</strong></span>` : ''}${last ? `<span>前回の指名 <strong>${escape(last)}</strong></span>` : ''}
-    ${bottles.map(({name,quantity,unit}) => `<span>キープ <strong>${escape(name)} ${escape(quantity)}${escape(unit)}</strong></span>`).join('')}</div>` : '';
+  const suggestions = getReturningCustomerCastSuggestions(state,id);
+  const castHints = suggestions.map(({name,assigned,nominated}) => {
+    const label = [assigned && '担当キャスト', nominated && '前回の指名'].filter(Boolean).join('・');
+    return `<span>${label} <strong>${escape(name)}</strong></span>`;
+  });
+  const bottles = (customer.bottleKeeps ?? []).filter(({quantity}) => quantity > 0).slice(0,3);
+  const bottleHints = bottles.map(({name,quantity,unit}) => `<span>キープ <strong>${escape(name)} ${escape(quantity)}${escape(unit)}</strong></span>`);
+  return castHints.length || bottleHints.length ? `<div class="np-seat-customer-hints">${castHints.join('')}${bottleHints.join('')}</div>` : '';
 }
 
 export function renderSeatCustomerSelection(state, id, api) {

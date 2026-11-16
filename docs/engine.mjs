@@ -10,7 +10,7 @@ import { applyStaffLaborCommand, isStaffLaborCommand } from './labor-workspace.m
 import { applyCustomerCommand, customerForSeat, findCustomer, findSettledCustomerTicket, isAssignedCustomer, setTicketCompanion, setTicketCustomer } from './customers.mjs';
 import { correctSettledTicketReceivable, getCustomerReceivableBalance, getReceivableBalance, getReceivableRecoveryTotals,
   receivableCollectionMethods } from './receivables.mjs';
-import { createCashMovement, editableCashMovement, getCashMovements, getDailyRecoveryRows, totalCashMovements } from './cash-ledger.mjs';
+import { createCashMovement, editableCashMovement, getCashMovement, getCashMovements, getDailyRecoveryRows, totalCashMovements } from './cash-ledger.mjs';
 import { calculateCashTender, getCashCountTotal } from './register-cash.mjs';
 import { applyPrintCommand } from './print-domain.mjs';
 import { applyAccountingCsv } from './accounting-csv.mjs';
@@ -795,6 +795,10 @@ function amendCashMovement(state, action, now, actor) {
     ? {...original,voidedAt:now,voidReason:why}
     : createCashMovement({...state,day:{status:'open',date:original.date}},action,original.at,original.actor,() => original.id);
   assert(replacement.cashAccountKind !== 'vault','金庫移動は新しい入出金として登録してください。');
+  if (original.stockPurchaseId) {
+    assert(replacement.kind === 'expense' && replacement.category === 'purchase','入庫と紐づいた支払の区分は「経費・仕入れ」です。');
+    replacement.stockPurchaseId = original.stockPurchaseId;
+  }
   const replace = (rows) => rows?.map((row) => row.id === original.id ? replacement : row);
   if (state.cashMovements) state.cashMovements = replace(state.cashMovements);
   if (archive) {
@@ -1099,10 +1103,23 @@ function doStockAdjust(state, action, now, actor) {
   const kind = adjust ? 'adjust' : action.kind;
   assert(adjust || ['purchase', 'purchaseCancellation', 'loss', 'usage', 'stocktake'].includes(kind), '在庫の操作区分を確認してください。');
   const reason = operationalReason(action.reason, '調整理由');
+  assert(action.cashPayment === undefined || (kind === 'purchase' && action.cashPayment && typeof action.cashPayment === 'object'
+    && !Array.isArray(action.cashPayment)), '仕入れの現金支払を確認してください。');
+  assert(action.voidPurchaseCash === undefined || (kind === 'purchaseCancellation' && action.voidPurchaseCash
+    && typeof action.voidPurchaseCash === 'object' && !Array.isArray(action.voidPurchaseCash)), '取り消す仕入れの現金支払を確認してください。');
 
   if (kind === 'purchaseCancellation') {
     const purchase = state.movements.find(({id,stockId}) => id === action.purchaseId && stockId === stock.id);
     const {quantity,value,unitCost,valueChange} = replayPurchaseCancellation(state,stock,purchase);
+    if (action.voidPurchaseCash) {
+      const payment = getCashMovement(state,purchase.cashMovementId);
+      assert(payment && payment.stockPurchaseId === purchase.id && payment.voidedAt == null
+        && payment.id === action.voidPurchaseCash.id && payment.amount === action.voidPurchaseCash.amount,
+      '現金支払の記録が更新されました。入庫の取消を開き直してください。');
+      assert(state.day.status === 'open' && payment.date === state.day.date,
+        '支払の同時取消は同じ営業日の営業中に行えます。締め後は入出金管理から訂正してください。');
+      amendCashMovement(state,{type:'voidCashMovement',movementId:payment.id,correctionReason:reason},now,actor);
+    }
     const amount = Math.round((quantity - stock.quantity) * movementScale) / movementScale;
     Object.assign(stock,{quantity,value,unitCost});
     const movement = {id:createId(state,'stock'),stockId:stock.id,stockName:stock.name,unit:stock.unit,kind,reason,
@@ -1133,6 +1150,14 @@ function doStockAdjust(state, action, now, actor) {
     '仕入単価を小数点以下6桁までの0以上の金額で入力してください。');
     assert(action.adoptUnitCost === undefined || typeof action.adoptUnitCost === 'boolean','参考単価の更新を確認してください。');
     const movement = newStockMovement(state, stock, units / movementScale, kind, reason, now, null, null, price);
+    if (action.cashPayment) {
+      const {amount,destination,cashAccountId} = action.cashPayment;
+      const payment = createCashMovement(state,{kind:'expense',category:'purchase',amount,destination,cashAccountId,reason},
+        now,actor,() => createId(state,'cash'));
+      payment.stockPurchaseId = movement.id;
+      movement.cashMovementId = payment.id;
+      (state.cashMovements ??= []).push(payment);
+    }
     if (action.adoptUnitCost) {
       movement.previousReferenceUnitCost = stock.defaultUnitCost ?? stock.unitCost;
       stock.defaultUnitCost = price;

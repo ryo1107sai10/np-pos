@@ -1,4 +1,4 @@
-import { cashMovementCategories, cashMovementKinds } from './cash-ledger.mjs';
+import { cashMovementCategories, cashMovementKinds, getCashMovement } from './cash-ledger.mjs';
 import { cashAccounts, vaultBalance } from './cash-accounts.mjs';
 import { cashDenominations } from './register-cash.mjs';
 import { businessDate, getTicketCommissionDetails, getTicketTableLabels } from './engine.mjs';
@@ -219,8 +219,10 @@ function renderStock(state, api) {
     const linked = tickets.get(entry.ticketId);
     const receipt = archive ? `<button type="button" class="lr-link" data-action="history-receipt" data-id="${escape(archive.ticket.id)}" data-date="${escape(archive.date)}">No. ${escape(archive.ticket.number)}</button>`
       : ticketLink(linked,api);
+    const payment = getCashMovement(state,entry.cashMovementId);
     return `<tr><td class="lr-muted lr-numeric">${time}${entry.actorLabel ? `<small class="lr-row-note">${escape(entry.actorLabel)}</small>` : ''}</td><td><strong>${escape(entry.stockName ?? item?.name ?? entry.stockId)}</strong></td>
-      <td>${escape(labels[entry.kind] || '入出庫')}${detail}${entry.reason ? `<span class="lr-row-note">${escape(entry.reason)}</span>` : ''}</td>
+      <td>${escape(labels[entry.kind] || '入出庫')}${detail}${entry.reason ? `<span class="lr-row-note">${escape(entry.reason)}</span>` : ''}
+        ${payment ? `<span class="lr-row-note">レジ現金支払 ${yen(payment.amount)}${payment.voidedAt != null ? ' ／ 取消済み' : ''}</span>` : ''}</td>
       <td class="lr-numeric ${entry.quantity > 0 ? 'lr-positive' : ''}">${signedQuantity(entry.quantity)}<span class="lr-unit"> ${unit}</span></td>
       <td>${receipt}${canAdjustStock && entry.kind === 'purchase' && !purchaseCancellationBlocker(state,entry)
         ? `<button type="button" class="lr-link" data-action="stock-cancel-purchase" data-id="${escape(entry.id)}">入庫を取消</button>` : ''}</td></tr>`;
@@ -324,6 +326,7 @@ function cashLedgerHistory(current, api) {
       <strong class="lr-cash-entry-amount ${inflow ? 'lr-positive' : ''}">${signedYen(inflow ? item.amount : -item.amount,yen,true)}</strong>
       <div class="lr-cash-entry-extra">${item.reason ? `<p>${escape(item.reason)}</p>` : ''}
         <small>${[item.destination ? `相手先 ${item.destination}` : '', actor?.label ? `担当 ${actor.label}` : ''].filter(Boolean).map(escape).join(' · ')}</small>
+        ${item.stockPurchaseId ? '<p>在庫の入庫と同時に記録</p>' : ''}
         ${item.voidedAt != null ? `<p>取消済み ／ ${escape(item.voidReason)}</p>` : ''}
         ${api.canEditCash?.(item) ? `<div class="ops-actions"><button type="button" class="btn" data-action="edit-cash-movement" data-id="${escape(item.id)}">訂正</button>
           <button type="button" class="btn" data-action="void-cash-movement" data-id="${escape(item.id)}">入出金を取消</button></div>` : ''}</div>

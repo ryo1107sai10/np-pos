@@ -3,8 +3,8 @@ import test from 'node:test';
 import { apply, createDemo, quote, summary } from '../docs/engine.mjs';
 import { renderCompanionEditor, renderCompanionResults, renderCustomerNotices, renderSeatCustomer, renderSeatCustomerResults, renderSeatCustomerSelection } from '../docs/customer-ui.mjs';
 import { projectState,validateSnapshot,verifyCommand } from '../server/policy.mjs';
-import { findCustomer, findSettledCustomerTicket, getCustomerDetail, getCustomerNotices, isAssignedCustomer, listUnlinkedVisits, parseCustomersCsv,
-  searchCustomers } from '../docs/customers.mjs';
+import { findCustomer, findSettledCustomerTicket, getCustomerDetail, getCustomerNotices, getReturningCustomerCastSuggestions, isAssignedCustomer,
+  listUnlinkedVisits, parseCustomersCsv, searchCustomers } from '../docs/customers.mjs';
 import { writeDemoBackup, readDemoBackup } from '../docs/demo-backup.mjs';
 
 const now = Date.parse('2026-11-16T21:00:00+09:00');
@@ -149,6 +149,53 @@ test('selecting a customer from the floor stores the visit and appointment acros
   assert.equal(isAssignedCustomer(state, details.customer, staff.id), false);
   assert.ok(isAssignedCustomer(state, details.customer, admin.id));
   assert.throws(() => run(state, { type: 'saveCustomer', customerId: customer.id, customer: { name: '担当外' } }, manager), /担当/);
+});
+
+test('returning-customer suggestions prefer the assigned cast and a previous completed nomination', () => {
+  let state = register(opened(), {name:'再来店',castId:'cast3'}, manager);
+  const [{id:customerId}] = state.customers;
+  const at = (minute) => now + minute * 60_000;
+  const anotherVisit = (minute) => {
+    state = seat(state,{customerId},admin,at(minute));
+    return state.tickets.at(-1).id;
+  };
+  const nominate = (ticketId,castIds,minute) => {
+    state = run(state,{type:'order',ticketId,items:[{menuId:'nomination',quantity:1,castIds}]},admin,at(minute));
+    return state.tickets.find(({id}) => id === ticketId).lines.at(-1).id;
+  };
+
+  const previous = anotherVisit(1);
+  nominate(previous,['cast2'],2);
+  const cancelledLine = nominate(previous,['cast1'],3);
+  state = run(state,{type:'cancelLine',ticketId:previous,lineId:cancelledLine,reason:'指名を訂正'},admin,at(4));
+  state = run(state,{type:'extend',ticketId:previous,menuId:'extend30'},admin,at(5));
+  state = departPaid(state,previous,at(6));
+
+  const cancelledVisit = anotherVisit(7);
+  nominate(cancelledVisit,['cast1'],8);
+  state = run(state,{type:'settle',ticketId:cancelledVisit,payments:[{method:'cash',amount:quote(state,cancelledVisit).remaining}]},admin,at(9));
+  state = run(state,{type:'cancelSettlement',ticketId:cancelledVisit,reason:'二重会計を取り消す'},admin,at(10));
+
+  const activeVisit = anotherVisit(11);
+  nominate(activeVisit,['cast1'],12);
+  const suggested = getReturningCustomerCastSuggestions(state,customerId,{before:at(11)});
+  assert.deepEqual(suggested.map(({id,assigned,nominated}) => [id,assigned,nominated]), [
+    ['cast3',true,false], ['cast2',false,true],
+  ]);
+  assert.deepEqual(getReturningCustomerCastSuggestions(state,customerId,{before:at(5)}),[suggested[0]]);
+  const scoped = projectState(state,'manager',manager.id);
+  assert.deepEqual(getReturningCustomerCastSuggestions(scoped,customerId),suggested);
+  assert.deepEqual(getReturningCustomerCastSuggestions(projectState(state,'manager','other'),customerId),[]);
+  assert.deepEqual(getReturningCustomerCastSuggestions(projectState(state,'staff',staff.id),customerId),[]);
+  assert.deepEqual(getReturningCustomerCastSuggestions(state,customerId,{people:state.cast.filter(({id}) => id === 'cast2')}),[suggested[1]]);
+
+  const api = {role:'admin',escape:String,icon:()=>''};
+  const selection = renderSeatCustomerSelection(state,customerId,api);
+  const assignedHint = selection.indexOf(`担当キャスト <strong>${suggested[0].name}`);
+  const nominatedHint = selection.indexOf(`前回の指名 <strong>${suggested[1].name}`);
+  assert.ok(assignedHint >= 0 && nominatedHint > assignedHint);
+  assert.doesNotMatch(renderSeatCustomer(state,api),/再来店|前回の指名/);
+  assert.doesNotMatch(renderSeatCustomerSelection(state,customerId,{...api,role:'staff'}),/担当キャスト|前回の指名/);
 });
 
 test('visits cannot create customer profiles and can remain unlinked', () => {

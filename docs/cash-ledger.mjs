@@ -37,6 +37,8 @@ export function isValidCashMovement(entry) {
     && validKind(entry.kind) && validCategory(entry.kind, entry.category) && validAmount(entry.amount)
     && validText(entry.reason, 120, true) && validText(entry.destination, 80)
     && validCashAccountMetadata(entry)
+    && (entry.stockPurchaseId === undefined || (validText(entry.stockPurchaseId, 128, true)
+      && entry.kind === 'expense' && entry.category === 'purchase'))
     && (entry.voidedAt === undefined || (Number.isSafeInteger(entry.voidedAt) && entry.voidedAt >= entry.at && validText(entry.voidReason,120,true)))
     && validText(entry.actor?.id, 256, true) && validText(entry.actor?.label, 320, true) && cashOperators.has(entry.actor?.role);
 }
@@ -59,6 +61,12 @@ export function getCashMovements(state, date) {
   return (state.cashMovements ?? []).filter((entry) => entry.date === date);
 }
 
+export function getCashMovement(state, id) {
+  if (id == null) return undefined;
+  return state.cashMovements?.find((row) => row.id === id)
+    ?? state.closedDays.flatMap((day) => day.cashMovements ?? []).find((row) => row.id === id);
+}
+
 export function totalCashMovements(entries) {
   const totals = { cashIn: 0, cashOut: 0, expenses: 0 };
   for (const entry of entries) {
@@ -72,8 +80,7 @@ export function totalCashMovements(entries) {
 
 export function editableCashMovement(state, id) {
   if (state.payroll?.dailyPays?.some(({cashMovementId}) => cashMovementId === id)) return null;
-  const movement = state.cashMovements?.find((row) => row.id === id)
-    ?? state.closedDays.flatMap((day) => day.cashMovements ?? []).find((row) => row.id === id);
+  const movement = getCashMovement(state,id);
   return movement?.voidedAt == null && movement?.cashAccountKind !== 'vault' ? movement : null;
 }
 

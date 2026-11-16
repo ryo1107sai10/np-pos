@@ -68,6 +68,7 @@ const valueLabels = {
   changedFields: '変更項目', customerId: '顧客ID', customerName: '顧客名',
   kind: '種類', category: '理由区分', destination: '相手先・移動先',
   stocktake: '棚卸', purchase: '仕入れ・入庫', loss: '廃棄・破損（ロス）', usage: '店舗消費', adjust: '数量調整', unitCost: '仕入単価',
+  cashPayment:'レジ現金支払', stockPurchaseId:'入庫記録ID', voidedAt:'取消時刻',
   expectedCash: 'レジ理論残高', actualCash: 'レジ実残高', discrepancy: 'レジ差額',
   cashTender: '現金のお預かりとお釣り', received: '現金お預かり', change: 'お釣り', cashDenominations: '金種別の枚数',
   issueNumber: '発行回数', width: '用紙幅（mm）', storeName: '印字する店名', address: '住所', phone: '電話番号',
@@ -134,7 +135,7 @@ function visibleAuditFields(value) {
 function readableValue(value, key) {
   if (value == null) return value;
   if (key === 'castDutyMode') return castDutyModes[value] ?? value;
-  if (['startsAt','endsAt','arrivedAt','providedAt','cancelledAt'].includes(key) && Number.isFinite(new Date(value).getTime())) return timestamp.format(value);
+  if (['startsAt','endsAt','arrivedAt','providedAt','cancelledAt','voidedAt'].includes(key) && Number.isFinite(new Date(value).getTime())) return timestamp.format(value);
   if (['managerDiscountRateBps','rateBps','dailyPayLimitBps','serviceRateBps','cardFeeRateBps','waivedFeeRate',
     'taxRate','originalTaxRate','lineDiscountRateBps'].includes(key)) return `${value / 100}%`;
   if (typeof value === 'number' && moneyFields.has(key)) return `¥${japaneseNumber.format(value)}`;

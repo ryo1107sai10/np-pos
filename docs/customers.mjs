@@ -228,6 +228,28 @@ export function getCustomerDetail(state, id) {
     lastNomination: nominations[0] ?? null, preferredCast };
 }
 
+export function getReturningCustomerCastSuggestions(state, id, {
+  before = Infinity, people = state.cast ?? [],
+} = {}) {
+  const customer = findCustomer(state, id);
+  if (!customer || customer.restricted) return [];
+
+  let previousIds = [];
+  for (const {ticket} of ticketSnapshots(state)) {
+    if (ticket.customerId !== id || !settled.has(ticket.status) || (ticket.settledAt ?? ticket.createdAt ?? 0) > before) continue;
+    const lastNomination = ticket.lines?.findLast((line) => line.category === '指名' && line.cancelledAt == null
+      && line.menuId !== 'nominationExtra' && !line.extensionGroupId && line.castIds?.length);
+    if (!lastNomination) continue;
+    previousIds = lastNomination.castIds;
+    break;
+  }
+
+  const active = new Map(people.filter(({enabled}) => enabled !== false).map((person) => [person.id,person]));
+  const suggestions = [customer.castId,...previousIds].filter((castId) => active.has(castId));
+  return [...new Set(suggestions)].map((castId) => ({id:castId,name:active.get(castId).name,
+    assigned:castId === customer.castId, nominated:previousIds.includes(castId)}));
+}
+
 function customerInput(state, incoming, previous) {
   check(record(incoming), '顧客情報を確認してください。');
   const fields = { ...previous, ...incoming };

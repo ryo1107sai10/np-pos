@@ -2,6 +2,7 @@ import { normalizeEmployeeProfiles, payrollAttendanceItems, replaceAttendanceIte
 import { advancedPayrollBases, calculateAdvancedPayrollRule, ensurePayrollVariableReferences, getPayrollVariables, getPayrollVariableValues,
   normalizeAdvancedPayrollRule, normalizeFormulaContext, normalizePayrollVariables, savePayrollVariables } from './payroll-formula.mjs';
 import { getPayrollActualContext } from './payroll-actuals.mjs';
+import { normalizePayrollStatementLayout } from './payroll-statement-layout.mjs';
 
 const dailyPayActions = new Set(['requestDailyPay', 'reviewDailyPay', 'payDailyPay']);
 const payrollActions = new Set(['savePayrollDraft', 'finalizePayroll', 'savePayrollRate', 'savePayrollSettings',
@@ -57,8 +58,9 @@ function castById(state, castId) {
 }
 
 export function getPayrollSettings(state) {
-  const {statementRules = [], ...saved} = state.payroll?.settings ?? {};
-  return { ...defaults, ...saved, statementRules:statementRules.map((row) => ({...row})) };
+  const {statementRules = [], statementLayout, ...saved} = state.payroll?.settings ?? {};
+  return { ...defaults, ...saved, statementRules:statementRules.map((row) => ({...row})),
+    ...(statementLayout && {statementLayout:statementLayout.map((row) => ({...row}))}) };
 }
 
 function normalizeStatementRules(rules) {
@@ -84,8 +86,10 @@ export function getPayrollTemplateAssignment(state, castId) {
 
 function normalizeTemplate(row) {
   check(isRecord(row), '計算テンプレートを確認してください。');
+  const statementLayout = normalizePayrollStatementLayout(row.statementLayout);
   return {id:text(row.id,128,'テンプレートID'), name:text(row.name,60,'テンプレート名'), rules:normalizeStatementRules(row.rules),
     ...(row.columns !== undefined && {columns:integer(row.columns,1,4,'支給明細の列数')}),
+    ...(statementLayout && {statementLayout}),
     ...(row.isDefault === true && {isDefault:true})};
 }
 
@@ -108,7 +112,8 @@ function applyTemplateCommand(state, action, allocateId) {
   }
   check(index >= 0 || templates.length < 20, '計算テンプレートは20件以内で登録してください。');
   const entry = normalizeTemplate({id:templateId ?? allocateId('pay-template'),name:action.name,rules:action.rules,
-    columns:action.columns,isDefault:action.isDefault});
+    columns:action.columns,isDefault:action.isDefault,
+    statementLayout:action.statementLayout === undefined ? templates[index]?.statementLayout : action.statementLayout});
   ensurePayrollVariableReferences(entry.rules,getPayrollVariables(state));
   check(!templates.some((row) => row.id !== entry.id && row.name === entry.name), '同じ名前の計算テンプレートが登録されています。');
   if (entry.isDefault) for (const template of templates) delete template.isDefault;
@@ -119,10 +124,12 @@ function applyTemplateCommand(state, action, allocateId) {
 function normalizeSettings(settings) {
   check(isRecord(settings) && ['floor', 'nearest'].includes(settings.commissionRounding)
     && [1, 10, 100, 1000].includes(settings.commissionUnit), '歩合の端数処理を指定してください。');
+  const statementLayout = normalizePayrollStatementLayout(settings.statementLayout);
   return { pointRate: money(settings.pointRate, '1ポイントあたりの換金額'),
     commissionRounding: settings.commissionRounding, commissionUnit: settings.commissionUnit,
     dailyPayLimitBps:integer(settings.dailyPayLimitBps ?? defaults.dailyPayLimitBps,0,10000,'日払い上限率の設定値'),
-    statementRules:normalizeStatementRules(settings.statementRules === undefined ? [] : settings.statementRules) };
+    statementRules:normalizeStatementRules(settings.statementRules === undefined ? [] : settings.statementRules),
+    ...(statementLayout && {statementLayout}) };
 }
 
 export function getPayrollRates(state, castId) {
@@ -321,6 +328,7 @@ export function previewPayroll(state, input) {
   const template = getPayrollTemplates(state).find(({id,isDefault}) => templateId ? id === templateId : isDefault);
   const settings = getPayrollSettings(state);
   if (template) settings.statementRules = template.rules.map((row) => ({...row}));
+  if (template?.statementLayout) settings.statementLayout = template.statementLayout.map((row) => ({...row}));
   const unavailableDates = [];
   const tickets = settledTickets(state,month,undefined,unavailableDates);
   const commissionData = confirmedCommission(tickets,castId);

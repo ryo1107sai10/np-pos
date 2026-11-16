@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {getTicketAutoExtensionAt} from '../docs/auto-extension.mjs';
-import {apply,createDemo,getOverdueExtensionCount,quote,summary} from '../docs/engine.mjs';
+import {apply,createDemo,getLayoutAreas,getLayoutTables,getOverdueExtensionCount,quote,summary} from '../docs/engine.mjs';
 import {getReportPeriod} from '../docs/report-period.mjs';
 import {getTicketHistory} from '../docs/ticket-history.mjs';
 import {validateSnapshot,verifyCommand} from '../server/policy.mjs';
@@ -123,6 +123,34 @@ test('headcount changes price only future extensions and preserve total historic
   assert.equal(state.closedDays[0].ticketSnapshots[0].guests,2);
   assert.equal(getReportPeriod(state,{mode:'day',date}).totals.guests,3);
   assert.equal(getTicketHistory(state,{start:date,end:date}).rows[0].guests,3);
+});
+
+test('table history follows linked, moved and deleted tables across close without double-counting a visit', () => {
+  let state = fixture();
+  const [ticket] = state.tickets;
+  const ticketId = ticket.id;
+  state = apply(state,{type:'move',ticketId,tableIds:['a2','b1']},now - 10 * minute,staff);
+  state = apply(state,{type:'move',ticketId,tableIds:['a2','a1']},now - 5 * minute,staff);
+  const total = quote(state,ticketId).total;
+  state = apply(state,{type:'settle',ticketId,payments:[{method:'cash',amount:total}]},now,staff);
+  state = apply(state,{type:'depart',ticketId},now + minute,staff);
+  state = apply(state,{type:'close',actualCash:20_000 + total},now + 2 * minute,manager);
+  state = apply(state,{type:'saveLayout',areas:getLayoutAreas(state),
+    tables:getLayoutTables(state).filter((table) => table.id !== 'b1')},now + 3 * minute);
+  state = apply(state,{type:'open',date:'2026-11-17',openingCash:0},now + 4 * minute,manager);
+
+  const filters = {start:date,end:date};
+  for (const [tableId,time] of [['a1','20:30'],['a2','20:50'],['b1','20:50']]) {
+    const result = getTicketHistory(state,{...filters,tableId});
+    assert.equal(result.rows.length,1);
+    assert.equal(result.rows[0].time,time);
+    assert.equal(result.rows[0].guests,2);
+    assert.match(result.rows[0].room,/B-01/);
+    assert.equal(result.total,total);
+  }
+  assert.equal(getTicketHistory(state,{...filters,tableId:'a3'}).count,0);
+  assert.equal(getTicketHistory(state,filters).rows[0].time,'21:00');
+  assert.equal(state.archivedTables[0].id,'b1');
 });
 
 test('manual overdue extension confirms a rounded-up interval count and adds one set and nomination fee per interval', () => {

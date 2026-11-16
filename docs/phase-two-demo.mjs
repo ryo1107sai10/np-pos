@@ -31,7 +31,7 @@ export function createCustomerNoticeDemo(now = Date.now()) {
   let state = createPhaseTwoDemo('live', now);
   const date = (offset) => new Date(Date.parse(state.day.date) + offset * 86_400_000).toISOString().slice(0,10);
   const [birthday, anniversary] = state.customers;
-  state = apply(state, {type:'saveCustomer',customerId:birthday.id,customer:{birthday:`2000-${date(0).slice(5)}`,
+  state = apply(state, {type:'saveCustomer',customerId:birthday.id,customer:{castId:'cast2',birthday:`2000-${date(0).slice(5)}`,
     bottleKeeps:[{name:'サンプルウイスキー',quantity:0.7,unit:'本',expiresAt:date(5)}]}}, now, demoAdmin);
   return apply(state, {type:'saveCustomer',customerId:anniversary.id,customer:{
     anniversaries:[{label:'初回来店記念日',monthDay:date(2).slice(5)}],

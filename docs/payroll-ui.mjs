@@ -3,6 +3,8 @@ import { getDailyPayLimit, getPayrollDailyPays, getPayrollDraft, getPayrollRates
 import { advancedPayrollBases, getPayrollVariables, PayrollFormulaError } from './payroll-formula.mjs';
 import { payrollActualOptionGroups } from './payroll-actuals.mjs';
 import { getEmployeeProfile } from './payroll-records.mjs';
+import { defaultPayrollStatementLayout, monthlyPayrollSections, payrollStatementLabels, payrollStatementNote,
+  payrollSummaryAmounts } from './payroll-statement-layout.mjs';
 
 const castMembers = (state) => [...state.cast, ...(state.archivedCast ?? [])];
 const hours = (minutes) => `${Math.floor(minutes / 60)}時間 ${minutes % 60}分`;
@@ -19,8 +21,7 @@ function listAmounts(rows, {escape,yen}) {
 }
 
 function details(pay, api) {
-  return listAmounts([['時給分',pay.hourlyPay],['確定歩合',pay.commission],['ポイント換金',pay.pointPay],
-    ['手当合計',pay.allowanceTotal],['控除合計',-pay.deductionTotal],['日払い済み',-pay.advance]],api);
+  return listAmounts(payrollSummaryAmounts(pay),api);
 }
 
 function ruleAmounts(pay,api) {
@@ -271,6 +272,39 @@ export function readPayrollTemplateRows(form) {
   });
 }
 
+function renderStatementLayout(layout,{icon},template = false) {
+  const rows = layout ?? defaultPayrollStatementLayout();
+  return `<details class="payroll-rate-history"${layout ? ' open' : ''}><summary>支給明細の表示・並び順</summary>
+    <label class="inline-check"><input type="checkbox" name="payrollStatementLayoutEnabled"${layout ? ' checked' : ''}>${template ? 'このテンプレートの表示設定を使う' : '店舗共通の表示設定を使う'}</label>
+    <p class="field-help">確定する月次明細の印刷と個別PDFに反映します。支給合計と支給内訳は常に表示します。${template ? '未選択の場合は店舗共通の設定を使用します。' : ''}</p>
+    <ol class="payroll-advances" data-payroll-statement-layout>${rows.map(({key,visible},index) => {
+      const title = payrollStatementLabels[key];
+      return `<li><input type="hidden" name="payrollStatementSection" value="${key}"><label class="inline-check">
+        <input type="checkbox" name="payrollStatementVisible" value="${key}"${visible ? ' checked' : ''}${key === 'summary' ? ' disabled' : ''}>${title}</label>
+        <div class="ops-actions"><button type="button" class="icon-btn" data-action="payroll-layout-up" aria-label="${title}を上へ"${index === 0 ? ' disabled' : ''}>${icon('chevron-up',16)}</button>
+        <button type="button" class="icon-btn" data-action="payroll-layout-down" aria-label="${title}を下へ"${index === rows.length - 1 ? ' disabled' : ''}>${icon('chevron-down',16)}</button></div></li>`;
+    }).join('')}</ol></details>`;
+}
+
+export function readPayrollStatementLayout(data) {
+  if (!data.has('payrollStatementLayoutEnabled')) return null;
+  const visible = new Set(data.getAll('payrollStatementVisible'));
+  return data.getAll('payrollStatementSection').map((key) => ({key,visible:key === 'summary' || visible.has(key)}));
+}
+
+export function movePayrollStatementSection(target) {
+  const row = target.closest('li');
+  const list = row?.parentElement;
+  if (!list?.hasAttribute('data-payroll-statement-layout')) return;
+  if (target.dataset.action === 'payroll-layout-up') row.previousElementSibling?.before(row);
+  else row.nextElementSibling?.after(row);
+  for (const [index,entry] of [...list.children].entries()) {
+    entry.querySelector('[data-action=payroll-layout-up]').disabled = index === 0;
+    entry.querySelector('[data-action=payroll-layout-down]').disabled = index === list.children.length - 1;
+  }
+  (target.disabled ? row.querySelector('button:not(:disabled)') : target)?.focus();
+}
+
 export function renderPayrollSettings(state,api) {
   const setting = getPayrollSettings(state);
   return `<div class="form-grid">${input('1ポイントあたりの換金額（円）',yenInput('payrollPointRate',setting.pointRate,true))}
@@ -279,7 +313,7 @@ export function renderPayrollSettings(state,api) {
     ${input('日払い上限の目安（%）',`<input type="number" name="dailyPayLimit" min="0" max="100" step="0.01" value="${setting.dailyPayLimitBps / 100}" required inputmode="decimal">`)}</div>
     <section class="payroll-edit-section"><h3>店舗共通の計算項目</h3><p class="field-help">個別テンプレートを割り当てていないキャストの下書きに適用します。確定した明細は確定時点の金額で保存されます。</p>
       <div data-payroll-rules>${renderPayrollTemplateRows(setting.statementRules ?? [],{...api,state,variables:getPayrollVariables(state)})}</div>
-      ${button('計算項目を追加','payroll-add-rule',api.icon,'plus')}</section>`;
+      ${button('計算項目を追加','payroll-add-rule',api.icon,'plus')}</section>${renderStatementLayout(setting.statementLayout,api)}`;
 }
 
 export function renderPayrollTemplates(state, {castId}, api) {
@@ -303,14 +337,14 @@ export function renderPayrollTemplates(state, {castId}, api) {
 
 export function renderPayrollTemplateEditor(template, api) {
   return `${input('テンプレート名',`<input name="payrollTemplateName" value="${api.escape(template?.name ?? '')}" maxlength="60" required>`)}
-    ${input('明細の列数',`<select name="payrollTemplateColumns">${[1,2,3,4].map((value)=>
+    ${input('画面の計算内訳の列数',`<select name="payrollTemplateColumns">${[1,2,3,4].map((value)=>
       `<option value="${value}"${template?.columns === value ? ' selected' : ''}>${value}列</option>`).join('')}</select>`)}
     <label class="inline-check"><input type="checkbox" name="payrollTemplateDefault"${template?.isDefault ? ' checked' : ''}>店舗の既定にする</label>
     <p class="field-help">割り当てたキャストの未確定の給与に適用する手当・控除を指定します。</p>
     <section class="payroll-edit-section"><h3>計算項目</h3>
       <p class="field-help">商品・分類別は会計時の注文明細を集計します。複数人が担当した数量は人数で分け、売上調整は確定した個人売上の合計に反映します。</p><div data-payroll-rules>
       ${renderPayrollTemplateRows(template?.rules ?? [],api)}</div>
-      ${button('計算項目を追加','payroll-add-rule',api.icon,'plus')}</section>`;
+      ${button('計算項目を追加','payroll-add-rule',api.icon,'plus')}</section>${renderStatementLayout(template?.statementLayout,api,true)}`;
 }
 
 export function renderPayrollBatch(state,selection,{escape}) {
@@ -436,14 +470,16 @@ export function renderPayrollRate(state, {month,castId}, {escape}) {
 
 export function renderPayrollPrint(record, {escape,yen,storeName}) {
   const pay = record.snapshot;
-  return `<div class="payroll-view"><header class="workspace-print-heading"><h1>支給明細</h1>
-    <p>${escape(storeName)} ／ ${escape(record.month)} ／ ${escape(pay.castName)}</p></header>
-    <p class="payroll-print-total"><strong>支給合計　${yen(pay.net)}</strong></p>
-    ${panel('支給内訳',details(pay,{escape,yen}))}
+  const sections = pay.settings?.statementLayout ? monthlyPayrollSections(pay,yen).map(([title,rows]) =>
+    panel(title,`<dl class="lr-money-list">${rows.map(([label,value]) => `<div><dt>${escape(label)}</dt><dd>${escape(value)}</dd></div>`).join('')}</dl>`)).join('')
+    : `${panel('支給内訳',details(pay,{escape,yen}))}
     ${panel('勤務の内訳',pay.work.length ? workDetails(pay,{escape,yen}) : '<p>勤務時間の登録なし</p>')}
     ${pay.allowances.length ? panel('手当',listAmounts(pay.allowances.map(({label,amount}) => [label,amount]),{escape,yen})) : ''}
     ${pay.deductions.length ? panel('控除',listAmounts(pay.deductions.map(({label,amount}) => [label,amount]),{escape,yen})) : ''}
     ${pay.statementItems?.length ? panel('計算テンプレートの内訳',ruleAmounts(pay,{escape,yen})) : ''}
-    ${pay.attendanceItems?.length ? panel('勤怠項目の内訳',attendanceAmounts(pay.attendanceItems,{escape,yen})) : ''}
-    <p>店舗で登録した手当・控除を記載しています。源泉徴収・社会保険料の自動計算は対象外です。</p></div>`;
+    ${pay.attendanceItems?.length ? panel('勤怠項目の内訳',attendanceAmounts(pay.attendanceItems,{escape,yen})) : ''}`;
+  return `<div class="payroll-view"><header class="workspace-print-heading"><h1>支給明細</h1>
+    <p>${escape(storeName)} ／ ${escape(record.month)} ／ ${escape(pay.castName)}</p></header>
+    <p class="payroll-print-total"><strong>支給合計　${yen(pay.net)}</strong></p>
+    ${sections}<p>${payrollStatementNote}</p></div>`;
 }

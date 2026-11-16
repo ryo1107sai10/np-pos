@@ -308,6 +308,17 @@ function snapshotCashMovements(state) {
   return new Set([...(state.cashMovements ?? []), ...state.closedDays.flatMap((day) => day.cashMovements ?? [])]);
 }
 
+function validStockPurchasePayments(state) {
+  const cash = [...snapshotCashMovements(state)];
+  const byCashId = new Map(cash.map((row) => [row.id,row]));
+  const byPurchaseId = new Map(state.movements.filter((row) => row?.cashMovementId !== undefined).map((row) => [row.id,row]));
+  for (const row of byPurchaseId.values()) {
+    const payment = byCashId.get(row.cashMovementId);
+    if (row.kind !== 'purchase' || !payment || payment.stockPurchaseId !== row.id || payment.date !== row.date) return false;
+  }
+  return cash.every((row) => row.stockPurchaseId === undefined || byPurchaseId.get(row.stockPurchaseId)?.cashMovementId === row.id);
+}
+
 function clearCommissionDetails(state) {
   for (const ticket of allSnapshotTickets(state)) {
     delete ticket.personalSalesAdjustments;
@@ -766,7 +777,7 @@ export function validateSnapshot(state) {
     400, 'invalid-snapshot', message);
   const operatingDates = new Set([state.day.date, ...state.closedDays.map(({ date }) => date)]);
   requireCondition((state.cashMovements === undefined || validCashMovements(state.cashMovements, operatingDates))
-    && validPrintDocuments(state, operatingDates), 400, 'invalid-snapshot', message);
+    && validPrintDocuments(state, operatingDates) && validStockPurchasePayments(state), 400, 'invalid-snapshot', message);
   const customerIds = new Set(customers.map(({ id }) => id));
   requireCondition(receivables.every((entry) => validReceivable(entry, customerIds))
     && validReceivableLinks(state, receivables)

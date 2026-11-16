@@ -26,9 +26,9 @@ import { renderCloudBanner, renderCloudEntry, renderCloudMigration, renderCloudP
 import { createLineDemoSettings, readLineSettings, renderLineSettings } from './line-notification-ui.mjs';
 import { createStoreGroupDemo } from './store-group-demo.mjs';
 import { renderStoreGroups } from './store-group-ui.mjs';
-import { customerAnniversaryLimit, findCustomer, findSettledCustomerTicket, getCustomerDetail, isAssignedCustomer, parseCustomersCsv } from './customers.mjs';
+import { customerAnniversaryLimit, findCustomer, findSettledCustomerTicket, getReturningCustomerCastSuggestions, isAssignedCustomer, parseCustomersCsv } from './customers.mjs';
 import { ticketHasReceivable } from './receivables.mjs';
-import { cashMovementCategories, cashMovementKinds, editableCashMovement } from './cash-ledger.mjs';
+import { cashMovementCategories, cashMovementKinds, editableCashMovement, getCashMovement } from './cash-ledger.mjs';
 import { cashAccountOptions, readCashAccounts, renderCashAccountRow, renderCashAccounts, vaultBalance } from './cash-accounts.mjs';
 import { purchaseCancellationBlocker } from './inventory-operations.mjs';
 import { findPrintableTicket, getPrintAutoKind, getPrintDocuments, getPrintSettings, getPrintTenderReceived } from './print-domain.mjs';
@@ -48,7 +48,7 @@ import { getDailyPayLimit, getPayrollDailyPays, getPayrollDraft, getPayrollRange
   previewPayroll, previewPayrollRange } from './payroll.mjs';
 import * as payrollUI from './payroll-ui.mjs';
 import { getPayrollVariables } from './payroll-formula.mjs';
-import { renderTicketHistory, bindTicketHistory } from './ticket-history.mjs';
+import { renderTicketHistory, bindTicketHistory, selectTicketHistoryTable } from './ticket-history.mjs';
 import { readShiftForm, renderShiftEditor, renderShifts } from './shifts-ui.mjs';
 import { castDutyModes, getAssignableCast, getCastDutyMode } from './cast-duty.mjs';
 import { buildTeamPerformanceCsv, renderTeamPerformance } from './team-performance.mjs';
@@ -104,7 +104,7 @@ const ownerActions = new Set(['store-settings', 'stock-settings', 'edit-layout',
   'discount-review', 'discount-reject', 'cancel-settlement', 'reopen-ticket', 'audit-log', 'audit-more', 'ops-settings', 'print-settings', 'billing-settings', 'billing-settings-tab', 'calculation-settings', 'customer-merge', 'customer-link', 'customer-import', 'settled-ticket-customer', 'settled-ticket-payment', 'set-schedule',
   'accounting-settings', 'accounting-add-column', 'accounting-remove-column','correct-register-count','role-policy',
   'cash-accounts','cash-account-add','cash-account-remove-new','settled-ticket-companions','demo-backup','demo-backup-download']);
-const managerActions = new Set(['open', 'close', 'stock-adjust', 'stocktake', 'discount', 'cancel-line', 'cancel-deposit', 'customer-detail', 'customer-new', 'customer-edit', 'customer-visit',
+const managerActions = new Set(['open', 'close', 'stock-adjust', 'stocktake', 'stock-cancel-purchase', 'discount', 'cancel-line', 'cancel-deposit', 'customer-detail', 'customer-new', 'customer-edit', 'customer-visit',
   'record-cash', 'report-mode', 'report-day', 'report-export', 'ticket-end', 'ticket-set-time', 'ticket-guests',
   'edit-ticket-line', 'cancel-ticket-extension', 'ops-notices','edit-cash-movement','void-cash-movement','edit-deposit','personal-sales-adjustment']);
 const cloudLabels = { admin: '店舗管理者', manager: 'マネージャー', staff: 'スタッフ', cast: 'キャスト', trainee: '体入' };
@@ -424,6 +424,7 @@ const offlineWorkspaceActions = new Set([
 
 function permittedAction(action) {
   if (isDeviceLocked()) return false;
+  if (action === 'floor-ticket-history' && !canOpenPage('tickets')) return false;
   if (action === 'device-lock-now') return activeDeviceLock().snapshot.enabled;
   if (action === 'device-lock-settings') return activeDeviceLock().snapshot.available
     && !cloudState.coldOffline
@@ -657,7 +658,7 @@ function renderFloor(notices, now) {
     <div class="floor-layout">
       <section class="floor" aria-labelledby="floor-title"><div class="floor-heading">
       <div class="floor-heading-main"><h2 id="floor-title">${icon('grid',17)}${showingPlan ? '店内レイアウト' : '座席一覧'}</h2>${viewSwitch}</div>
-      <div class="floor-heading-actions">${button('レイアウト編集', 'edit-layout', { glyph: 'move' })}${button('店舗設定', 'store-settings', { glyph: 'settings' })}${button('設定の移行', 'layout-transfer', { glyph: 'download' })}${button('延長・カード設定','billing-settings',{glyph:'settings'})}</div></div>
+      <div class="floor-heading-actions">${button('卓別の履歴','floor-ticket-history',{glyph:'history'})}${button('レイアウト編集', 'edit-layout', { glyph: 'move' })}${button('店舗設定', 'store-settings', { glyph: 'settings' })}${button('設定の移行', 'layout-transfer', { glyph: 'download' })}${button('延長・カード設定','billing-settings',{glyph:'settings'})}</div></div>
       ${areas.length ? `<div class="seating-toolbar glass${showingPlan ? ' seating-plan-toolbar' : ''}"><div class="seg" role="group" aria-label="卓の状態で絞り込む">${[['all','すべて'],['used','使用中'],['available','空席'],['urgent','要対応']].map(([key,text])=>`<button type="button" data-action="filter" data-id="${key}" aria-pressed="${key===filter}">${text}<small>${counts[key]}</small></button>`).join('')}</div>${areaPicker}</div>` : ''}
       ${floorContent}</section>
       ${mobileDetails ? `<button type="button" class="detail-shade" data-action="hide-detail" aria-hidden="true" tabindex="-1"></button>` : ''}${renderDetail(notices,now)}
@@ -2473,7 +2474,8 @@ function paintDialog(layoutFileInput) {
       const entry = editableCashMovement(state,modal.movementId);
       const editing = modal.type === 'edit-cash-movement';
       present(editing ? '入出金を訂正' : '入出金を取り消す',
-        (editing ? renderCashMovementForm(entry) : `<p class="form-copy">${escape(entry.date)}の入出金 ${yen(entry.amount)} を取り消します。</p>`)
+        (editing ? renderCashMovementForm(entry) : `<p class="form-copy">${escape(entry.date)}の入出金 ${yen(entry.amount)} を取り消します。</p>
+          ${entry.stockPurchaseId ? '<p class="field-help">入庫の訂正は在庫画面から行えます。</p>' : ''}`)
         + label('訂正理由','<textarea name="cashCorrectionReason" maxlength="120" rows="2" required></textarea>'),
         editing ? '訂正を保存' : '取消を確定',{style:'ops-modal cash-dialog'});
       return;
@@ -2493,6 +2495,14 @@ function paintDialog(layoutFileInput) {
       const stock = state.stock.find(({id}) => id === modal.stockId);
       const unit = escape(stock.unit);
       const cost = stock.defaultUnitCost ?? stock.unitCost;
+      const cashFields = permittedAction('record-cash') && state.day.status === 'open' ? `
+        <label class="inline-check"><input type="checkbox" name="stockCashPayment" aria-controls="stock-cash-fields">レジから支払った現金も記録する</label>
+        <fieldset id="stock-cash-fields" class="choices" hidden disabled><legend>仕入れの現金支払</legend>
+          ${label('実際に支払った額（円）','<input name="stockCashAmount" type="number" min="1" max="100000000" step="1" inputmode="numeric" required>',
+            '入力した額を仕入経費としてレジ残高と日報に反映します。')}
+          ${cashAccountSelect('expense','purchase')}
+          ${label('支払先（任意）','<input name="stockCashDestination" maxlength="80" placeholder="例　仕入先の名称">')}
+        </fieldset>` : '';
       present('在庫の入出庫',`<p class="form-copy">${escape(stock.name)} · 現在庫 <strong>${number.format(stock.quantity)} ${unit}</strong></p>
         <div class="form-grid">${label('入出庫の種類', `<select name="stockAdjustmentMode">
           <option value="purchase">仕入れ・入庫</option><option value="loss">廃棄・破損（ロス）</option>
@@ -2501,7 +2511,7 @@ function paintDialog(layoutFileInput) {
         </div><div data-stock-purchase>${label(`今回の仕入単価（円 / ${unit}）`,
           `<input name="purchaseUnitCost" type="number" min="0" max="100000000" step="0.000001" inputmode="decimal" value="${cost}" required>`,
           'この単価で入庫し、在庫の平均原価を更新します。')}
-          <label class="inline-check"><input type="checkbox" name="adoptStockUnitCost">この単価を次回の参考単価にする</label></div>
+          <label class="inline-check"><input type="checkbox" name="adoptStockUnitCost">この単価を次回の参考単価にする</label>${cashFields}</div>
         ${operationReason()}`,'入出庫を記録',{style:'ops-modal'});
       return;
     }
@@ -2517,9 +2527,16 @@ function paintDialog(layoutFileInput) {
     case 'stock-cancel-purchase': {
       const entry = state.movements.find(({id}) => id === modal.purchaseId);
       const blocker = purchaseCancellationBlocker(state,entry);
+      const payment = getCashMovement(state,entry?.cashMovementId);
+      const canVoidPayment = payment && payment.voidedAt == null && permittedAction('void-cash-movement')
+        && state.day.status === 'open' && payment.date === state.day.date;
+      modal.purchaseCashToVoid = canVoidPayment ? {id:payment.id,amount:payment.amount} : null;
+      const cashOption = canVoidPayment ? `<p class="field-help">この入庫には現金支払 ${yen(payment.amount)} が紐づいています。支払の記録に誤りがあった場合は、同時に取り消せます。</p>
+          <label class="inline-check"><input type="checkbox" name="voidStockPurchaseCash">レジの支払記録も取り消す</label>`
+        : payment && payment.voidedAt == null ? '<p class="field-help">支払記録は入出金管理で確認できます。</p>' : '';
       present('入庫を取り消す',blocker ? `<p class="form-copy">${escape(blocker)}</p>`
         : `<p class="form-copy">${escape(entry.stockName)}の入庫 ${number.format(entry.quantity)}${escape(entry.unit)} を取り消し、平均原価を再計算します。</p>
-          ${operationReason({title:'取消理由'})}`,blocker ? null : '入庫取消を確定',{style:'ops-modal'});
+          ${cashOption}${operationReason({title:'取消理由'})}`,blocker ? null : '入庫取消を確定',{style:'ops-modal'});
       return;
     }
   }
@@ -2727,10 +2744,12 @@ function renderCashMovementForm(entry) {
   const counterparty = cashAccountSelect(kind,entry?.category,entry?.cashAccountId,Boolean(entry));
   const kinds = Object.entries(cashMovementKinds).map(([value,text]) =>
     `<option value="${value}"${value === kind ? ' selected' : ''}>${text}</option>`).join('');
+  const categories = entry?.stockPurchaseId ? `<p class="form-copy">経費・仕入れ（在庫の入庫と連動）</p>
+    <input type="hidden" name="cashKind" value="expense"><input type="hidden" name="cashCategory" value="purchase">`
+    : `${label('入出金の種類',`<select name="cashKind">${kinds}</select>`)}
+    ${label('理由区分',`<select name="cashCategory">${cashCategoryOptions(kind,entry?.category)}</select>`)}`;
   return `<div class="modal-context">${icon('calendar',16)}<strong>${escape(entry?.date ?? state.day.date)}</strong><span>営業日</span></div>
-    <div class="form-grid">
-    ${label('入出金の種類',`<select name="cashKind">${kinds}</select>`)}
-    ${label('理由区分',`<select name="cashCategory">${cashCategoryOptions(kind,entry?.category)}</select>`)}
+    <div class="form-grid">${categories}
     ${label('金額（円）',`<input name="cashAmount" type="number" min="1" max="100000000" step="1" value="${entry?.amount ?? ''}" inputmode="numeric" required>`)}
     <div data-cash-counterparty${counterparty ? '' : ' hidden'}>${counterparty}</div>
     ${label('相手先・移動先（任意）',`<input name="cashDestination" type="text" maxlength="80" value="${escape(entry?.destination ?? '')}" placeholder="例　金庫、仕入先">`)}
@@ -2852,18 +2871,12 @@ function orderLineAdjustments(line) {
 
 function renderOrderCastChoices(item, pickedIds, people) {
   const selected = new Set(pickedIds);
-  const availableCast = [...people];
-  if (item.category === '指名' && canOpenPage('customers')) {
-    const customerState = customerWorkspaceState();
-    const customerId = state.tickets.find(({id}) => id === modal.ticketId)?.customerId;
-    const customer = findCustomer(customerState,customerId);
-    if (customer && !customer.restricted) {
-      const detail = getCustomerDetail(customerState,customerId);
-      const suggestions = [detail?.preferredCast?.id,detail?.lastNomination?.castId].filter(Boolean);
-      const rank = (id) => suggestions.includes(id) ? suggestions.indexOf(id) : suggestions.length;
-      availableCast.sort((first, second) => rank(first.id) - rank(second.id));
-    }
-  }
+  const ticket = item.category === '指名' && canOpenPage('customers') ? state.tickets.find(({id}) => id === modal.ticketId) : null;
+  const suggestions = ticket?.customerId ? getReturningCustomerCastSuggestions(customerWorkspaceState(),ticket.customerId,
+    {before:ticket.createdAt,people}) : [];
+  const priority = new Map(suggestions.map((entry,index) => [entry.id,{...entry,index}]));
+  const rank = (id) => priority.get(id)?.index ?? suggestions.length;
+  const availableCast = suggestions.length ? [...people].sort((first,second) => rank(first.id) - rank(second.id)) : people;
   const baseCommission = commissionLabel(getItemCommission(item));
   const usesOverrides = availableCast.some((person) => person.commissionOverride);
   const showChoices = item.requiresCast || item.acceptsCast || Boolean(baseCommission)
@@ -2874,7 +2887,9 @@ function renderOrderCastChoices(item, pickedIds, people) {
     : item.requiresCast ? '<p class="field-help">店舗設定で注文に使うキャストを有効にしてください。</p>' : '';
   const choices = availableCast.map((person) => {
     const rule = usesOverrides ? commissionLabel(getItemCommission(item, person)) || '歩合なし' : '';
-    return `<label class="choice"><input name="castIds" type="checkbox" value="${escape(person.id)}"${selected.has(person.id) ? ' checked' : ''}><span><strong>${escape(person.name)}</strong>${rule ? `<small>${rule}</small>` : ''}</span></label>`;
+    const suggestion = priority.get(person.id);
+    const relationship = [suggestion?.assigned && '担当キャスト', suggestion?.nominated && '前回の指名'].filter(Boolean).join('・');
+    return `<label class="choice"><input name="castIds" type="checkbox" value="${escape(person.id)}"${selected.has(person.id) ? ' checked' : ''}><span><strong>${escape(person.name)}</strong>${relationship ? `<small>${relationship}</small>` : ''}${rule ? `<small>${rule}</small>` : ''}</span></label>`;
   }).join('');
   return `<fieldset class="choices cast-choices"><legend>歩合を付けるキャスト${item.requiresCast ? '（必須）' : '（任意）'}</legend><div class="choice-grid">${choices}</div>${usesOverrides
     ? '<p class="field-help">複数のキャストを選ぶと、売上・固定額・ポイントを按分します。</p>'
@@ -3371,6 +3386,13 @@ function updatePractice(action) {
 function clickAction(target) {
   const {action,id} = target.dataset;
   if (!permittedAction(action)) return;
+  if (action === 'floor-ticket-history') {
+    const activeArea = floorView === 'plan' ? planArea : area;
+    const tableId = selected ?? state.tables.find((table) => !activeArea || table.area === activeArea)?.id ?? '';
+    selectTicketHistoryTable(state,{role:currentRole(),workspaceId:cloudState.store?.id},tableId);
+    go('tickets');
+    return;
+  }
   if (action === 'device-lock-now') { activeDeviceLock().lock(); return; }
   if (action === 'device-lock-settings') { openDialog(action); return; }
   if (['customer-anniversary-add','customer-anniversary-remove'].includes(action)
@@ -3686,6 +3708,10 @@ function clickAction(target) {
     if (['shift-edit','shift-remove'].includes(action) && state.shifts?.some((entry) => entry.id === id)) {
       openDialog(action === 'shift-edit' ? 'shift-editor' : 'shift-remove',{shiftId:id});
     }
+    return;
+  }
+  if (['payroll-layout-up','payroll-layout-down'].includes(action)) {
+    if (['payroll-settings','payroll-template-editor'].includes(modal?.type)) payrollUI.movePayrollStatementSection(target);
     return;
   }
   if (action === 'payroll-add-row' || action === 'payroll-remove-row') {
@@ -4111,7 +4137,7 @@ function submitDialog(form) {
     case 'payroll-settings':
       commit({type:'savePayrollSettings',settings:{pointRate:numeric('payrollPointRate'),commissionRounding:value('payrollRounding'),
         commissionUnit:numeric('payrollUnit'),dailyPayLimitBps:Math.round(numeric('dailyPayLimit') * 100),
-        statementRules:payrollUI.readPayrollTemplateRows(form)}},'給与設定を保存しました。');
+        statementRules:payrollUI.readPayrollTemplateRows(form),statementLayout:payrollUI.readPayrollStatementLayout(data)}},'給与設定を保存しました。');
       break;
     case 'payroll-variables':
       commit({type:'savePayrollVariables',castId:modal.selection.castId || null,variables:payrollUI.readPayrollVariables(form)},
@@ -4123,7 +4149,7 @@ function submitDialog(form) {
     case 'payroll-template-editor':
       commit({type:'savePayrollTemplate',templateId:modal.templateId,name:value('payrollTemplateName'),
         columns:numeric('payrollTemplateColumns'),isDefault:data.has('payrollTemplateDefault'),
-        rules:payrollUI.readPayrollTemplateRows(form)},'給与の計算テンプレートを保存しました。');
+        rules:payrollUI.readPayrollTemplateRows(form),statementLayout:payrollUI.readPayrollStatementLayout(data)},'給与の計算テンプレートを保存しました。');
       break;
     case 'payroll-range': {
       const range = payrollUI.readPayrollRange(data);
@@ -4475,9 +4501,12 @@ function submitDialog(form) {
     case 'stock-adjust': {
       const kind = value('stockAdjustmentMode');
       const operation = {stockId:modal.stockId,quantity:numeric('quantity'),reason:value('reason')};
+      const cashPayment = kind === 'purchase' && data.has('stockCashPayment')
+        ? {amount:numeric('stockCashAmount'),destination:value('stockCashDestination'),cashAccountId:value('cashAccountId')} : null;
       const command = kind === 'adjust' ? {type:'stockAdjust',...operation} : {type:'recordStockOperation',kind,...operation,
-        ...(kind === 'purchase' && {unitCost:numeric('purchaseUnitCost'),adoptUnitCost:data.has('adoptStockUnitCost')})};
-      commit(command,'在庫の入出庫を記録しました。');
+        ...(kind === 'purchase' && {unitCost:numeric('purchaseUnitCost'),adoptUnitCost:data.has('adoptStockUnitCost')}),
+        ...(cashPayment && {cashPayment})};
+      commit(command,cashPayment ? '入庫と仕入れの現金支払を記録しました。' : '在庫の入出庫を記録しました。');
       break;
     }
     case 'stocktake':
@@ -4487,8 +4516,9 @@ function submitDialog(form) {
     case 'stock-cancel-purchase': {
       const entry = state.movements.find(({id}) => id === modal.purchaseId);
       if (!entry) throw new Error('入庫記録が見つかりません。');
-      commit({type:'recordStockOperation',kind:'purchaseCancellation',stockId:entry.stockId,purchaseId:entry.id,reason:value('reason')},
-        '入庫を取り消し、平均原価を再計算しました。');
+      const voidPurchaseCash = data.has('voidStockPurchaseCash') ? modal.purchaseCashToVoid : null;
+      commit({type:'recordStockOperation',kind:'purchaseCancellation',stockId:entry.stockId,purchaseId:entry.id,reason:value('reason'),
+        ...(voidPurchaseCash && {voidPurchaseCash})},voidPurchaseCash ? '入庫と仕入れの現金支払を取り消しました。' : '入庫を取り消し、平均原価を再計算しました。');
       break;
     }
   }
@@ -4681,6 +4711,14 @@ dialog.addEventListener('change', (event) => {
     quantity.closest('label').querySelector('span').textContent = `${adjust ? '数量の増減' : purchase ? '入庫数量' : '出庫数量'}（${quantity.dataset.stockUnit}）`;
     dialog.querySelector('[data-stock-purchase]').hidden = !purchase;
     dialog.querySelector('[name=purchaseUnitCost]').disabled = !purchase;
+  }
+  if (modal?.type === 'stock-adjust' && ['stockAdjustmentMode','stockCashPayment'].includes(event.target.name)) {
+    const payment = dialog.querySelector('[name=stockCashPayment]');
+    if (payment) {
+      payment.disabled = dialog.querySelector('[name=stockAdjustmentMode]').value !== 'purchase';
+      const fields = dialog.querySelector('#stock-cash-fields');
+      fields.hidden = fields.disabled = payment.disabled || !payment.checked;
+    }
   }
   if (['payroll-settings','payroll-template-editor'].includes(modal?.type) && event.target.name === 'payrollRuleBasis') {
     const group = dialog.querySelector('[data-payroll-rules]');

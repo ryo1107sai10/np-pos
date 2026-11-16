@@ -167,6 +167,9 @@ export function roleAllowsCommand(state, role, command, profileId) {
   }
   if (command.type === 'seat' && (command.customerId != null || command.companionCustomerIds?.length)
     && !roleGroupAllowed(state,role,'customers',profileId)) return false;
+  if (command.type === 'recordStockOperation' && ((command.cashPayment !== undefined
+    && !roleAllows(state,role,'commands','recordCashMovement',profileId)) || (command.voidPurchaseCash !== undefined
+    && !roleAllows(state,role,'commands','voidCashMovement',profileId)))) return false;
   if (command.type === 'settle' && Array.isArray(command.payments) && command.payments.some((payment)=>payment?.method === 'receivable')
     && !roleGroupAllowed(state,role,'customers',profileId)) return false;
   if (profileId && command.type !== 'syncAutoExtensions'
