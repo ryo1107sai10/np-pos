@@ -1,6 +1,6 @@
 import { apply, businessDate, createDemo, discountReasonCodes, exportStoreConfiguration, getItemCommission, getLayoutAreas, getLayoutTables, getManagerDiscountLimit, getOverdueExtensionCount, getTableLabel, getTicketForTable, getTicketTableLabels, maxOverdueExtensionCount, parseStoreConfiguration, quote, summary, tableStatus, yen } from './engine.mjs';
 import { icon } from './icons.mjs';
-import { previewSettledContents } from './engine.mjs';
+import { orderTaxOverrideRates, previewSettledContents } from './engine.mjs';
 import { readSettledContents, renderSettledContents } from './settled-edit-ui.mjs';
 import { renderReport } from './reports.mjs';
 import { getAutoExtensionNotices, getAutoExtensionPlans, getAutoExtensionSettings, getAutomaticExtensionPlan,
@@ -21,6 +21,7 @@ import { openBarcodeScanner } from './barcode-scanner.mjs';
 import { cloudConfig } from './cloud-config.mjs';
 import { createCloudClient } from './cloud-client.mjs';
 import { renderCloudBanner, renderCloudEntry, renderCloudMigration, renderCloudPanel, renderCloudRestricted, renderStoreOverview } from './cloud-ui.mjs';
+import { createLineDemoSettings, readLineSettings, renderLineSettings } from './line-notification-ui.mjs';
 import { createStoreGroupDemo } from './store-group-demo.mjs';
 import { renderStoreGroups } from './store-group-ui.mjs';
 import { customerAnniversaryLimit, findCustomer, findSettledCustomerTicket, getCustomerDetail, isAssignedCustomer, parseCustomersCsv } from './customers.mjs';
@@ -29,7 +30,7 @@ import { cashMovementCategories, cashMovementKinds, editableCashMovement } from 
 import { cashAccountOptions, readCashAccounts, renderCashAccountRow, renderCashAccounts, vaultBalance } from './cash-accounts.mjs';
 import { purchaseCancellationBlocker } from './inventory-operations.mjs';
 import { findPrintableTicket, getPrintAutoKind, getPrintDocuments, getPrintSettings, getPrintTenderReceived } from './print-domain.mjs';
-import { printDocumentTitles, renderExtensionQuote, renderPrintOptions, renderPrintPreview, renderPrintSettings } from './print-ui.mjs';
+import { printDocumentTitles, renderExtensionQuote, renderPrintOptions, renderPrintPreview, renderPrintSettings, renderPrintTest } from './print-ui.mjs';
 import { createBillingDemo, createCashDemo, createCustomerNoticeDemo, createLaborDemo, createPayrollDemo, createPhaseTwoDemo, createPeriodReportDemo, createVisitAnalyticsDemo } from './phase-two-demo.mjs';
 import * as customerUI from './customer-ui.mjs';
 import { operationReason, renderAuditLog, renderDiscountForm, renderPersonalSalesAdjustment } from './operations-ui.mjs';
@@ -55,7 +56,8 @@ import { renderLaborHighlights, renderLaborReport, renderStaffAttendance, render
 import { getAvailableInitialSets, suggestInitialSet } from './set-schedule.mjs';
 import { getCastWorkspace, listCastAttendance } from './cast-self.mjs';
 import { readManagedAttendance, renderCastAttendance, renderCastShiftRequest, renderCastWorkspace, renderManagedAttendance, renderManagedBreakRow } from './cast-self-ui.mjs';
-import { canExcludeOrderService, getCalculationSettings } from './calculation-settings.mjs';
+import { canApplyOrderLineDiscount, canExcludeOrderService, canOverrideOrderTax, defaultItemTaxRateBps, getCalculationSettings } from './calculation-settings.mjs';
+import { getOrderLineDiscountAmount, getTicketDiscountableSubtotal } from './order-line-discount.mjs';
 import { handleInitialSetScheduleClick, readInitialSetSchedule, renderInitialSetSchedule } from './set-schedule-ui.mjs';
 
 const app = document.querySelector('#app');
@@ -103,6 +105,7 @@ const managerActions = new Set(['open', 'close', 'stock-adjust', 'stocktake', 'd
   'edit-ticket-line', 'cancel-ticket-extension', 'ops-notices','edit-cash-movement','void-cash-movement','edit-deposit','personal-sales-adjustment']);
 const cloudLabels = { admin: '店舗管理者', manager: 'マネージャー', staff: 'スタッフ', cast: 'キャスト', trainee: '体入' };
 let demoProfileId;
+let demoLineSettings = createLineDemoSettings();
 
 let cloudState;
 let demoRole = 'admin';
@@ -288,7 +291,7 @@ function permittedAction(action) {
   if (action.startsWith('payroll-')) return role === 'admin';
   if (action.startsWith('labor-')) return role === 'admin';
   if (action.startsWith('shift-')) return canOpenPage('shifts');
-  if (ownerActions.has(action) || action.startsWith('role-custom-') || action.startsWith('store-editor-') || action.startsWith('layout-editor-')
+  if (ownerActions.has(action) || action.startsWith('line-notifications') || action.startsWith('role-custom-') || action.startsWith('store-editor-') || action.startsWith('layout-editor-')
     || action.startsWith('payment-brand-')) return role === 'admin';
   if (managerActions.has(action)) return role === 'admin' || role === 'manager';
   if (['table-auto-extension','auto-extension-pause','auto-extension-checkout','auto-extension-resume','ticket-customer','ticket-note','extend-overdue'].includes(action)) {
@@ -512,7 +515,8 @@ function totalRows(q, { settlement = false, large = false } = {}) {
   const settlementFee = (q.cardFee ?? 0) - (q.depositFee ?? 0);
   return `<dl class="totals ${large ? 'totals-large' : ''}">
     <div><dt>小計</dt><dd class="money">${yen(q.subtotal)}</dd></div>
-    ${q.discount ? `<div><dt>値引き</dt><dd class="money">−${yen(q.discount)}</dd></div>` : ''}
+    ${q.lineDiscount ? `<div><dt>明細値引き</dt><dd class="money">−${yen(q.lineDiscount)}</dd></div>` : ''}
+    ${q.discount > (q.lineDiscount ?? 0) ? `<div><dt>${q.lineDiscount ? '伝票全体の値引き' : '値引き'}</dt><dd class="money">−${yen(q.discount - (q.lineDiscount ?? 0))}</dd></div>` : ''}
     <div><dt>サービス料</dt><dd class="money">${yen(q.service)}</dd></div>
     <div><dt>${taxLabel}</dt><dd class="money">${yen(q.tax - (q.cardFeeTax ?? 0))}</dd></div>
     ${q.depositFee ? `<div><dt>前受金の決済加算（税込）</dt><dd class="money">${yen(q.depositFee)}</dd></div>` : ''}
@@ -652,7 +656,7 @@ function renderDetail(notices, now) {
     ${!settled && selectedTable && permittedAction('table-auto-extension')
       ? renderTableAutoExtensionControl(selectedTable,autoModel,{escape,icon,tableName}) : ''}
     <div class="detail-aux"><h3>注文明細 <small>${lines.length}</small></h3>${settled ? '' : button('卓移動・連結','move',{glyph:'move',id:ticket.id})}</div>
-    <ul class="ticket-lines">${lines.length ? lines.map((line) => `<li class="ticket-line"><span class="line-desc">${escape(line.name)} <em>×${line.quantity}</em>${line.castIds.length ? `<small>${lineStaffNames(line)}</small>` : ''}${line.autoExtension ? '<small>自動延長</small>' : ''}${line.serviceExcluded === true ? '<small>サービス料対象外</small>' : ''}</span><span class="money">${yen(line.total)}</span>${renderTicketLineControls(ticket,line)}</li>`).join('') : '<li class="lines-empty">注文明細はありません。</li>'}</ul>
+    <ul class="ticket-lines">${lines.length ? lines.map((line) => `<li class="ticket-line"><span class="line-desc">${escape(line.name)} <em>×${line.quantity}</em>${line.castIds.length ? `<small>${lineStaffNames(line)}</small>` : ''}${line.autoExtension ? '<small>自動延長</small>' : ''}${orderLineAdjustments(line)}</span><span class="money">${yen(line.total - getOrderLineDiscountAmount(line))}</span>${renderTicketLineControls(ticket,line)}</li>`).join('') : '<li class="lines-empty">注文明細はありません。</li>'}</ul>
     ${totalRows(q,{settlement:settled})}${pending}
     <div class="mini-tools">${!settled ? `${button('前受金','deposit',{glyph:'wallet',tone:'quiet',id:ticket.id})}${button('値引き','discount',{glyph:'minus',tone:'quiet',id:ticket.id})}${button('個人売上を調整','personal-sales-adjustment',{glyph:'users',tone:'quiet',id:ticket.id})}${quickItem ? button(escape(quickItem.name),'order',{glyph:'plus',tone:'quiet',id:ticket.id,data:'data-product="highball"'}) : ''}${button('卓履歴','seat-history',{glyph:'history',tone:'quiet',id:ticket.id})}${printButton(ticket,state.day.date,'check','確認伝票を印刷',{tone:'quiet'})}` : ''}${ticketAuditButton(ticket,state.day.date)}</div>
     <div class="detail-actions">${!settled ? `${button('注文','order',{glyph:'plus',tone:'secondary',id:ticket.id})}${button('延長','extend',{glyph:'clock',id:ticket.id,disabled:!extensionPlans().length})}${button('会計へ進む','settle',{glyph:'arrow-right',tone:'primary',id:ticket.id,cls:'btn-block',disabled:Boolean(requested)})}` : `${button('会計内訳','receipt',{glyph:'ticket',id:ticket.id,cls:'btn-block'})}${button('退店・卓を解放','depart',{glyph:'checkout',tone:'primary',id:ticket.id,cls:'btn-block'})}`}</div></div></aside>`;
@@ -1151,6 +1155,49 @@ function toast(message, {error = false} = {}) {
   setTimeout(()=>item.remove(), 4300);
 }
 
+async function handleLineSettings(action,target) {
+  if (action === 'line-notifications') {
+    const demo = !cloudState.store;
+    openDialog('line-notifications',{demo,loading:!demo,model:demo ? demoLineSettings : null});
+    if (demo) return;
+  }
+  const active = modal;
+  if (active?.type !== 'line-notifications' || active.busy || currentRole() !== 'admin') return;
+  const save = action === 'line-notifications-save';
+  const test = action === 'line-notifications-test';
+  const input = save ? readLineSettings(target) : null;
+  active.busy = true;
+  try {
+    if (active.demo) {
+      if (save) {
+        demoLineSettings = {...demoLineSettings,...input};
+      } else if (demoLineSettings.enabled && (test || action === 'line-notifications-preview')) {
+        const kind = test ? 'test' : target.dataset.id;
+        if (!(test || kind === 'extension' && demoLineSettings.extension || kind === 'low-stock' && demoLineSettings.lowStock)) return;
+        const history = [{kind,status:'demo',createdAt:Date.now()},...demoLineSettings.history].slice(0,8);
+        demoLineSettings = {...demoLineSettings,history};
+      }
+      active.model = demoLineSettings;
+    } else {
+      active.model = save ? await cloud.saveLineSettings(input) : test ? await cloud.queueLineTest() : await cloud.lineSettings();
+    }
+    active.failed = '';
+    if (modal === active && dialog.open) {
+      if (save) toast('LINE通知の設定を保存しました。');
+      if (test) toast(active.demo ? 'テスト通知をデモで確認しました。' : 'テスト通知を送信待ちに追加しました。');
+    }
+  } catch (error) {
+    if (modal === active && dialog.open) {
+      if (active.loading || !active.model) active.failed = error.message;
+      else { showError(error.message); return; }
+    }
+  } finally {
+    active.busy = false;
+    active.loading = false;
+  }
+  if (modal === active && dialog.open) paintDialog();
+}
+
 async function scanStockBarcode(action) {
   if (activeBarcodeScan) return;
   const register = action === 'stock-barcode-register';
@@ -1585,6 +1632,10 @@ function paintDialog(layoutFileInput) {
   const customerName = currentRoleAllows('customers') ? ticket?.customer : '';
   const headline = ticket ? `<div class="modal-context">${icon('table',16)}<strong>${escape(titles(ticket))}</strong><span>${ticket.guests}名${customerName ? ` · ${escape(customerName)}` : ''}</span></div>` : '';
   switch (modal.type) {
+    case 'line-notifications':
+      present('LINE通知',renderLineSettings(modal,{escape,button}),
+        modal.model?.configured ? '設定を保存' : null,{style:'cloud-dialog'});
+      return;
     case 'cloud-groups': {
       const sections = new Map([...dialog.querySelectorAll('[data-group-section]')].map((section) => [section.dataset.groupSection,section.open]));
       present('店舗グループ',renderStoreGroups(modal,{escape,button}),null,{style:'cloud-dialog'});
@@ -2086,7 +2137,7 @@ function paintDialog(layoutFileInput) {
       return;
     }
     case 'discount':
-      present('値引きを設定',headline + renderDiscountForm({ticket,subtotal:q.subtotal,priceMode:q.priceMode,
+      present('値引きを設定',headline + renderDiscountForm({ticket,subtotal:getTicketDiscountableSubtotal(q),priceMode:q.priceMode,
         limit:getManagerDiscountLimit(state),role:currentRole(),reasonCodes:discountReasonCodes},{escape,yen}),
       currentRole() === 'manager' ? '値引きを保存・申請' : '値引きを確定',{style:'ops-modal'});
       return;
@@ -2095,15 +2146,16 @@ function paintDialog(layoutFileInput) {
       const request = ticket.discountRequest;
       if (!request || request.id !== modal.requestId) { present('値引き申請','<p class="form-copy">この申請は更新されています。伝票から開き直してください。</p>',null); return; }
       const rejecting = modal.type === 'discount-reject';
+      const sameSubtotal = getTicketDiscountableSubtotal(q) === request.subtotal;
       const body = `${headline}<div class="result-bar"><span>申請額</span><strong>${yen(request.amount)}</strong></div>
         <p class="form-copy">${escape(discountReasonCodes[request.reasonCode])} · ${escape(request.reason)}</p>
         <p class="field-help">申請者 ${escape(request.actor?.label)} · 申請時の小計 ${yen(request.subtotal)}</p>
         <p class="field-help">${personalSalesDiscountModes[request.personalSalesMode] ?? personalSalesDiscountModes.reflect}</p>
-        ${!rejecting && q.subtotal !== request.subtotal ? '<p class="ops-highlight">明細の小計が変わりました。却下してから、現在の小計で申請し直せます。</p>' : ''}
+        ${!rejecting && !sameSubtotal ? '<p class="ops-highlight">明細の小計が変わりました。却下してから、現在の小計で申請し直せます。</p>' : ''}
         ${operationReason({title:rejecting?'却下理由':'承認メモ（任意）',required:rejecting})}
         ${rejecting ? '' : button('却下する','discount-reject',{id,tone:'danger'})}`;
       present(rejecting?'値引き申請を却下':'値引き申請の確認',body,
-        rejecting?'却下を確定':q.subtotal === request.subtotal ? '値引きを承認' : null,{style:'ops-modal'});
+        rejecting?'却下を確定':sameSubtotal ? '値引きを承認' : null,{style:'ops-modal'});
       return;
     }
     case 'settle':
@@ -2168,12 +2220,16 @@ function paintDialog(layoutFileInput) {
         ${available.map((person)=>`<label class="choice"><input type="checkbox" name="castIds" value="${escape(person.id)}"${selectedCast.has(person.id) ? ' checked' : ''}><span>${escape(person.name)}</span></label>`).join('')}
         </div></fieldset>`;
       const serviceControl = line.serviceEligible === true && canExcludeOrderService(state,currentRole())
-        ? `${orderServiceChoice(line.serviceExcluded === true)}<div id="order-service-preview" role="status"></div>` : '';
+        ? orderServiceChoice(line.serviceExcluded === true) : '';
+      const priceControls = orderPriceControls(line.originalTaxRate ?? line.taxRate ?? defaultItemTaxRateBps,{
+        taxRateOverride:line.originalTaxRate !== undefined ? line.taxRate : undefined,lineDiscount:line.lineDiscount,
+      },true);
       present('注文を訂正',`${headline}<p class="form-copy">${escape(line.name)}${(line.stockUses.length || menu?.recipe?.length) && line.providedAt
         ? '。提供済みの在庫は、請求数量を減らしても戻りません。' : ''}</p><div class="form-grid">
         ${label('数量',`<input type="number" name="quantity" min="1" max="100" required inputmode="numeric" value="${line.quantity}">`)}
         ${label('単価（円）',`<input type="number" name="linePrice" min="0" max="100000000" required inputmode="numeric" value="${line.price}">`)}
-        </div>${options}${serviceControl}${operationReason({title:'注文の訂正理由'})}`,'注文の訂正を保存',{style:'ops-modal'});
+        </div>${options}${serviceControl}${priceControls}${serviceControl || priceControls ? '<div id="order-service-preview" role="status"></div>' : ''}
+        ${operationReason({title:'注文の訂正理由'})}`,'注文の訂正を保存',{style:'ops-modal'});
       updateOrderServicePreview();
       return;
     }
@@ -2533,6 +2589,53 @@ function orderServiceChoice(checked) {
   return `<label class="inline-check"><input type="checkbox" name="orderServiceExcluded"${checked ? ' checked' : ''}>この明細にサービス料をかけない</label>`;
 }
 
+function orderPriceControls(baseTaxRate, {taxRateOverride, taxOverrideReason, lineDiscount} = {}, editing = false) {
+  const canTax = canOverrideOrderTax(state,currentRole());
+  const canDiscount = canApplyOrderLineDiscount(state,currentRole());
+  if (!canTax && !canDiscount) return '';
+  const taxLabel = (rate) => rate === 0 ? '0%（税額なし）' : `${rate / 100}%`;
+  const discountMode = lineDiscount?.kind ?? '';
+  const discountValue = lineDiscount ? lineDiscount.value / (discountMode === 'percent' ? 100 : 1) : '';
+  const taxChoices = orderTaxOverrideRates.filter((rate) => rate !== baseTaxRate).map((rate) =>
+    `<option value="${rate}"${rate === taxRateOverride ? ' selected' : ''}>${taxLabel(rate)}</option>`).join('');
+  return `<details class="store-editor-advanced order-price-adjustments"${taxRateOverride !== undefined || discountMode ? ' open' : ''}>
+    <summary>明細の税率・値引き</summary><div class="store-editor-advanced-body">
+    ${canTax ? label('この明細の消費税率',`<select name="orderTaxRate"><option value="">商品設定の税率（${taxLabel(baseTaxRate)}）</option>${taxChoices}</select>`) : ''}
+    ${canTax && !editing ? `<div id="order-tax-reason"${taxRateOverride === undefined ? ' hidden' : ''}>
+      ${label('税率を変更する理由',`<textarea name="orderTaxReason" maxlength="120"${taxRateOverride === undefined ? '' : ' required'}>${escape(taxOverrideReason ?? '')}</textarea>`)}</div>` : ''}
+    ${canDiscount ? `<div class="form-grid">
+      ${label('この明細の値引き',`<select name="orderDiscountMode"><option value="">なし</option>
+        <option value="amount"${discountMode === 'amount' ? ' selected' : ''}>金額（円）</option>
+        <option value="percent"${discountMode === 'percent' ? ' selected' : ''}>割合（%）</option></select>`)}
+      <div id="order-discount-value"${discountMode ? '' : ' hidden'}>
+        ${label('値引き額・割合',`<input type="number" name="orderDiscountValue" value="${discountValue}" inputmode="decimal" min="${discountMode === 'percent' ? '0.01' : '1'}" max="${discountMode === 'percent' ? '100' : '100000000'}" step="${discountMode === 'percent' ? '0.01' : '1'}"${discountMode ? ' required' : ' disabled'}>`)}</div></div>
+      ${editing ? '' : `<div id="order-discount-reason"${discountMode ? '' : ' hidden'}>
+        ${label('明細を値引きする理由',`<textarea name="orderDiscountReason" maxlength="120"${discountMode ? ' required' : ''}>${escape(lineDiscount?.reason ?? '')}</textarea>`)}</div>`}` : ''}
+    </div></details>`;
+}
+
+function readOrderLineDiscount(data, preview, editing = false) {
+  const kind = data.get('orderDiscountMode');
+  if (!kind) return null;
+  const percent = kind === 'percent';
+  const value = Number(data.get('orderDiscountValue')) * (percent ? 100 : 1);
+  const integer = Math.round(value);
+  if (!Number.isSafeInteger(integer) || Math.abs(integer - value) > 1e-7 || integer < 1 || integer > (percent ? 10_000 : 100_000_000)) {
+    throw new Error(percent ? '明細値引き率は0.01〜100%で入力してください。' : '明細の値引き額を1円単位で入力してください。');
+  }
+  const reason = preview ? 'プレビュー' : String(data.get(editing ? 'reason' : 'orderDiscountReason') ?? '').trim();
+  if (!editing && (!reason || reason.length > 120)) throw new Error('明細を値引きする理由を120文字以内で入力してください。');
+  return {kind,value:integer,reason};
+}
+
+function orderLineAdjustments(line) {
+  const discount = getOrderLineDiscountAmount(line);
+  const rate = line.taxRateOverride ?? (line.originalTaxRate !== undefined ? line.taxRate : undefined);
+  return `${line.serviceExcluded === true ? '<small>サービス料対象外</small>' : ''}
+    ${rate !== undefined ? `<small>消費税率 ${rate / 100}%</small>` : ''}
+    ${discount ? `<small>明細値引き −${yen(discount)}</small>` : ''}`;
+}
+
 function renderProductDetails() {
   const item = state.menu.find((product)=>product.id === modal.product && product.enabled !== false);
   if (!item) return '<p class="form-copy order-tip">追加するメニューを選択してください。</p>';
@@ -2575,18 +2678,21 @@ function renderProductDetails() {
       ${label('サービス料の除外理由',`<textarea name="orderServiceReason" maxlength="120"${excluded ? ' required' : ''}>${escape(draft?.serviceExclusionReason ?? '')}</textarea>`)}</div>` : '';
   return `<section class="order-selection"><div class="order-selected"><div><h3>${escape(item.name)}</h3><p>${yen(item.price)} / 点</p></div><label class="field order-qty"><span>数量</span><input name="quantity" type="number" min="1" max="100" step="1" inputmode="numeric" value="${draft?.quantity ?? 1}" required></label></div>
     ${stockInfo ? `<p class="field-help">${icon('box',14)} 在庫引き落とし / 点　${stockInfo}</p>` : ''}
-    ${castChoices}${serviceControl}<div class="ops-actions">${button(draft ? '明細の変更を反映' : '注文リストに追加','order-line-stage',{tone:'secondary',glyph:'plus'})}
+    ${castChoices}${serviceControl}${orderPriceControls(item.taxRate ?? defaultItemTaxRateBps,draft ?? {})}
+    <div class="ops-actions">${button(draft ? '明細の変更を反映' : '注文リストに追加','order-line-stage',{tone:'secondary',glyph:'plus'})}
       ${draft ? button('変更をやめる','order-line-reset',{tone:'quiet'}) : ''}</div></section>`;
 }
 
 function renderOrderCart() {
   if (!modal.orderItems.length) return '';
   return `<section class="order-cart"><h3>注文リスト <small>${modal.orderItems.length}件</small></h3>
-    <ul>${modal.orderItems.map(({menuId,quantity,castIds,serviceExcluded},index) => {
+    <ul>${modal.orderItems.map((draft,index) => {
+      const {menuId,quantity,castIds} = draft;
       const item = state.menu.find(({id})=>id === menuId);
       const name = item?.name ?? '現在選べない商品';
-      return `<li><span><strong>${escape(name)} ×${quantity}</strong>${castIds.length ? `<small>${castIds.map(staffName).map(escape).join('・')}</small>` : ''}${serviceExcluded === true ? '<small>サービス料対象外</small>' : ''}</span>
-        <span class="money">${item ? yen(item.price * quantity) : '—'}</span><div class="ops-actions">
+      const line = {...draft,total:(item?.price ?? 0) * quantity};
+      return `<li><span><strong>${escape(name)} ×${quantity}</strong>${castIds.length ? `<small>${castIds.map(staffName).map(escape).join('・')}</small>` : ''}${orderLineAdjustments(line)}</span>
+        <span class="money">${item ? yen(line.total - getOrderLineDiscountAmount(line)) : '—'}</span><div class="ops-actions">
         ${button('編集','order-line-edit',{id:index,tone:'quiet',data:`aria-label="${escape(name)}の明細を編集"`})}
         ${button('除外','order-line-remove',{id:index,tone:'quiet',data:`aria-label="${escape(name)}を注文リストから除外"`})}</div></li>`;
     }).join('')}</ul></section>`;
@@ -2605,8 +2711,14 @@ function currentOrderLine(form, preview = false) {
   if (serviceExcluded && !preview && (!reason || reason.length > 120)) {
     throw new Error('サービス料の除外理由を120文字以内で入力してください。');
   }
+  const taxRate = data.get('orderTaxRate');
+  const taxOverrideReason = preview ? 'プレビュー' : String(data.get('orderTaxReason') ?? '').trim();
+  if (taxRate && (!taxOverrideReason || taxOverrideReason.length > 120)) throw new Error('税率を変更する理由を120文字以内で入力してください。');
+  const lineDiscount = readOrderLineDiscount(data,preview);
+  if (lineDiscount?.kind === 'amount' && lineDiscount.value > item.price * quantity) throw new Error('値引き額はこの明細の小計以下にしてください。');
   return {menuId:item.id,quantity,castIds,
-    ...(serviceExcluded && {serviceExcluded,serviceExclusionReason:preview ? 'プレビュー' : reason})};
+    ...(serviceExcluded && {serviceExcluded,serviceExclusionReason:preview ? 'プレビュー' : reason}),
+    ...(taxRate && {taxRateOverride:Number(taxRate),taxOverrideReason}), ...(lineDiscount && {lineDiscount})};
 }
 
 function orderItemsFromForm(form, preview = false) {
@@ -2624,17 +2736,22 @@ function editTicketLineCommand(form, preview = false) {
   const line = state.tickets.find(({id}) => id === modal.ticketId)?.lines.find(({id}) => id === modal.lineId);
   const serviceExcluded = data.has('orderServiceExcluded');
   const changeService = form.elements.orderServiceExcluded && serviceExcluded !== (line?.serviceExcluded === true);
+  const taxRate = data.get('orderTaxRate');
+  const taxRateOverride = taxRate ? Number(taxRate) : null;
+  const changeTax = taxRate !== null && taxRateOverride !== (line?.originalTaxRate !== undefined ? line?.taxRate : null);
+  const lineDiscount = data.has('orderDiscountMode') ? readOrderLineDiscount(data,preview,true) : null;
+  const changeDiscount = data.has('orderDiscountMode') && (lineDiscount?.kind !== line?.lineDiscount?.kind || lineDiscount?.value !== line?.lineDiscount?.value);
   return {type:'editTicketLine',ticketId:modal.ticketId,lineId:modal.lineId,quantity:Number(data.get('quantity')),
     price:Number(data.get('linePrice')),castIds:data.getAll('castIds'),reason:preview ? 'プレビュー' : data.get('reason'),
-    ...(changeService && {serviceExcluded})};
+    ...(changeService && {serviceExcluded}), ...(changeTax && {taxRateOverride}), ...(changeDiscount && {lineDiscount})};
 }
 
 function updateOrderServicePreview() {
   const output = dialog.querySelector('#order-service-preview');
   if (!output) return;
   const form = output.closest('form');
-  if (modal.type === 'order' && !form.elements.orderServiceExcluded
-    && !modal.orderItems.some(({serviceExcluded}) => serviceExcluded === true)) {
+  if (modal.type === 'order' && !form.elements.orderServiceExcluded && !form.elements.orderTaxRate && !form.elements.orderDiscountMode
+    && !modal.orderItems.some(({serviceExcluded,taxRateOverride,lineDiscount}) => serviceExcluded === true || taxRateOverride !== undefined || lineDiscount)) {
     output.textContent = '';
     return;
   }
@@ -2643,8 +2760,8 @@ function updateOrderServicePreview() {
       ? {type:'order',ticketId:modal.ticketId,items:orderItemsFromForm(form,true)}
       : editTicketLineCommand(form,true);
     const next = apply(state,command,Date.now(),{role:currentRole(),profileId:currentProfileId()});
-    const {service,total} = quote(next,modal.ticketId);
-    output.innerHTML = `<p class="field-help">伝票見込額 <strong>${yen(total)}</strong>（うちサービス料 ${yen(service)}）</p>`;
+    const {service,total,tax,lineDiscount} = quote(next,modal.ticketId);
+    output.innerHTML = `<p class="field-help">伝票見込額 <strong>${yen(total)}</strong>（サービス料 ${yen(service)}・消費税 ${yen(tax)}${lineDiscount ? `・明細値引き ${yen(lineDiscount)}` : ''}）</p>`;
   } catch {
     output.innerHTML = '<p class="field-help">数量・担当・在庫などの明細を確認すると、伝票見込額を表示します。</p>';
   }
@@ -2698,6 +2815,8 @@ function renderCalculationSettings() {
   const choices = (name,values) => `<select name="${name}">${Object.entries(values).map(([key,label])=>
     `<option value="${key}"${settings[name]===key ? ' selected' : ''}>${label}</option>`).join('')}</select>`;
   const rounding = {floor:'切り捨て',round:'四捨五入',ceil:'切り上げ'};
+  const toggle = (key,title) => `<label class="billing-switch"><span>${title}</span>
+    <input type="checkbox" role="switch" name="${key}"${settings[key] ? ' checked' : ''}></label>`;
   return `<div class="form-grid">
     ${label('サービス料率（%）',`<input type="number" name="serviceRate" min="0" max="100" step="0.01" value="${settings.serviceRateBps / 100}" required inputmode="decimal">`)}
     ${label('メニュー価格',choices('priceMode',{exclusive:'税抜価格',inclusive:'税込価格'}))}
@@ -2705,9 +2824,10 @@ function renderCalculationSettings() {
     ${label('サービス料の端数',choices('serviceRounding',rounding))}
     ${label('消費税の端数',choices('taxRounding',rounding))}
     </div><p class="field-help">計算設定は新しく登録する来店に適用します。税込価格に切り替えると、登録済みのメニュー単価を税込として扱います。</p>
-    <label class="billing-switch"><span>注文明細ごとのサービス料除外を許可する</span>
-      <input type="checkbox" role="switch" name="allowOrderServiceExclusion"${settings.allowOrderServiceExclusion ? ' checked' : ''}></label>
-    <p class="field-help">管理者が理由を入力して、新規注文や会計前の明細でサービス料を除外できます。</p>`;
+    ${toggle('allowOrderServiceExclusion','注文明細ごとのサービス料除外を許可する')}
+    ${toggle('allowOrderTaxOverride','注文明細ごとの消費税率変更を許可する')}
+    ${toggle('allowOrderLineDiscount','注文明細ごとの値引きを許可する')}
+    <p class="field-help">明細ごとの調整は、管理者が理由を入力して新規注文や会計前の明細に適用します。</p>`;
 }
 
 function renderPayment(entry,index) {
@@ -3014,7 +3134,12 @@ function clickAction(target) {
   if (action === 'audit-more') { void loadAuditPage(); return; }
   if (action === 'ops-guide') { void openOperationsGuide(); return; }
   if (action === 'ops-guide-explain') { void explainGuideTopic(id,target); return; }
+  if (action.startsWith('line-notifications')) { void handleLineSettings(action,target); return; }
   if (['ops-settings','print-settings','ops-notices','set-schedule','calculation-settings','role-policy'].includes(action)) { openDialog(action); return; }
+  if (action === 'print-test' && modal?.type === 'print-settings' && permittedAction('print-settings')) {
+    printMarkup(renderPrintTest(dialog.querySelector('[name=printWidth]').value));
+    return;
+  }
   if (modal?.type === 'role-policy' && ['role-custom-add','role-custom-remove'].includes(action)) {
     const draft = readRolePolicy(dialog.querySelector('#dialog-form'));
     if (action === 'role-custom-remove') delete draft.custom[id];
@@ -3579,10 +3704,12 @@ function clickAction(target) {
       if (modal.editingOrderIndex !== undefined && modal.editingOrderIndex !== index) {
         if (modal.editingOrderIndex > index) modal.editingOrderIndex--;
         dialog.querySelector('#order-cart').innerHTML = renderOrderCart();
+        updateOrderServicePreview();
         return;
       }
       if (modal.editingOrderIndex === undefined) {
         dialog.querySelector('#order-cart').innerHTML = renderOrderCart();
+        updateOrderServicePreview();
         return;
       }
     }
@@ -3940,7 +4067,8 @@ function submitDialog(form) {
     case 'calculation-settings':
       commit({type:'saveCalculationSettings',settings:{serviceRateBps:Math.round(numeric('serviceRate')*100),priceMode:value('priceMode'),
         serviceBase:value('serviceBase'),serviceRounding:value('serviceRounding'),taxRounding:value('taxRounding'),
-        allowOrderServiceExclusion:data.has('allowOrderServiceExclusion')}},'計算設定を保存しました。');
+        allowOrderServiceExclusion:data.has('allowOrderServiceExclusion'),allowOrderTaxOverride:data.has('allowOrderTaxOverride'),
+        allowOrderLineDiscount:data.has('allowOrderLineDiscount')}},'計算設定を保存しました。');
       break;
     case 'discount':
       commit({type:'discount',ticketId:id,mode:value('discountMode'),value:numeric('discountValue'),
@@ -3985,6 +4113,9 @@ function submitDialog(form) {
     }
     case 'accounting-settings':
       commit({type:'saveAccountingCsv',mode:modal.csvMode,settings:readAccountingCsvEditor(form)},'会計CSVの設定を保存しました。');
+      break;
+    case 'line-notifications':
+      void handleLineSettings('line-notifications-save',form);
       break;
     case 'role-policy':
       commit({type:'saveRolePolicy',policy:readRolePolicy(form)},'役職と権限を保存しました。');
@@ -4210,12 +4341,30 @@ app.addEventListener('change',(event)=> {
     app.querySelector('[data-report-date]')?.focus({ preventScroll: true });
   }
 });
+dialog.addEventListener('invalid', (event) => {
+  const adjustments = event.target.closest('.order-price-adjustments');
+  if (adjustments) adjustments.open = true;
+}, true);
 dialog.addEventListener('change', (event) => {
-  if (event.target.name === 'orderServiceExcluded') {
-    const reason = dialog.querySelector('#order-service-reason');
+  const {name,value,checked} = event.target;
+  if (['orderServiceExcluded','orderTaxRate','orderDiscountMode'].includes(name)) {
+    const reasonId = {orderServiceExcluded:'order-service-reason',orderTaxRate:'order-tax-reason',orderDiscountMode:'order-discount-reason'}[name];
+    const reason = dialog.querySelector(`#${reasonId}`);
+    const enabled = name === 'orderServiceExcluded' ? checked : Boolean(value);
     if (reason) {
-      reason.hidden = !event.target.checked;
-      reason.querySelector('textarea').required = event.target.checked;
+      reason.hidden = !enabled;
+      reason.querySelector('textarea').required = enabled;
+    }
+    if (name === 'orderDiscountMode') {
+      const holder = dialog.querySelector('#order-discount-value');
+      const control = holder.querySelector('input');
+      const percent = value === 'percent';
+      holder.hidden = !enabled;
+      control.required = enabled;
+      control.disabled = !enabled;
+      control.min = percent ? '0.01' : '1';
+      control.max = percent ? '100' : '100000000';
+      control.step = percent ? '0.01' : '1';
     }
     updateOrderServicePreview();
   }
@@ -4319,7 +4468,7 @@ dialog.addEventListener('change', (event) => {
     const input = dialog.querySelector('[name=discountValue]');
     input.value = '';
     input.step = rate ? '0.01' : '1';
-    input.max = rate ? '100' : String(quote(state,modal.ticketId).subtotal);
+    input.max = rate ? '100' : String(getTicketDiscountableSubtotal(quote(state,modal.ticketId)));
     input.closest('label').querySelector('span').textContent = rate ? '値引き率（%）' : '値引き額（円）';
   }
 });
@@ -4408,7 +4557,7 @@ dialog.addEventListener('input',(event)=> {
   updateGuideSearch(event);
   if (modal?.type === 'settled-ticket-contents') updateSettledContentsPreview(event.target.form);
   if (['order','edit-ticket-line'].includes(modal?.type)
-    && ['quantity','linePrice','castIds'].includes(event.target.name)) updateOrderServicePreview();
+    && ['quantity','linePrice','castIds','orderDiscountValue'].includes(event.target.name)) updateOrderServicePreview();
   if (['extend','extend-overdue'].includes(modal?.type) && event.target.name === 'extensionPlanQuantity') updateExtensionMixPreview();
   if (modal?.type === 'accounting-settings' && event.target.name === 'csvValue') {
     event.target.closest('label').querySelector('[data-accounting-preview]').textContent = '例 ' + accountingCsvPreview(event.target.value);

@@ -5,6 +5,7 @@ import { validateShiftsSnapshot } from './shifts.mjs';
 import { normalizeRolePolicy } from './role-policy.mjs';
 import { normalizeStaffLabor } from './labor-workspace.mjs';
 import { isCustomerAnniversaries } from './customers.mjs';
+import { isValidOrderLineDiscountSnapshot } from './order-line-discount.mjs';
 
 const format = 'np-pos.demo-backup';
 export const demoBackupMaxBytes = 12 * 1024 * 1024;
@@ -33,6 +34,11 @@ function validateDemoSnapshot(state) {
     validateCastAttendanceSnapshot(state);
     normalizeAttendanceSnapshot(state);
     normalizePayrollSnapshot(state);
+    const tickets = [...state.tickets,...state.closedDays.flatMap(({ticketSnapshots})=>ticketSnapshots ?? []),
+      ...(state.cancelledSettlements ?? []).map(({receipt})=>receipt)];
+    if (tickets.some((ticket)=>(ticket?.lines ?? []).some((line)=>!isValidOrderLineDiscountSnapshot(line)))) {
+      throw new Error(invalid);
+    }
     for (const ticket of state.tickets) quote(state,ticket.id);
     summary(state);
   } catch { throw new Error(invalid); }

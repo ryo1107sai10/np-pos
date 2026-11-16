@@ -1,6 +1,7 @@
 import { getPrintAutoKind, getPrintDocumentRules, getPrintTenderReceived, printAutoOptions, printGroupingOptions,
   printInvoiceDateOptions, printItemsOptions } from './print-domain.mjs';
 import { depositGrossAmount } from './card-fee.mjs';
+import { getOrderLineDiscountAmount } from './order-line-discount.mjs';
 
 export const printDocumentTitles = Object.freeze({ check: '会計確認伝票', receipt: 'レシート', invoice: '領収書' });
 
@@ -63,7 +64,22 @@ export function renderPrintSettings(settings, {escape}) {
     ${field('領収書の既定の但し書き',input('printInvoicePurpose','invoicePurpose',120,'placeholder="ご飲食代"'))}</div>
     <section><h3>帳票別の印字設定</h3>
       ${Object.entries(printDocumentTitles).map(([kind,title])=>section(kind,title)).join('')}</section>
+    <section class="np-print-test-tools"><button type="button" class="btn btn-secondary" data-action="print-test">この幅で試し刷り</button>
+      <p class="field-help">用紙を選び、文字の欠けと目盛りの長さを確認できます。</p></section>
     <p class="field-help">印刷ダイアログの用紙も、プリンターのロール幅に合わせてください。</p></div>`;
+}
+
+export function renderPrintTest(width) {
+  const paper = Number(width) === 80 ? 80 : 58;
+  const scale = paper === 80 ? 60 : 40;
+  return `<article class="np-print-paper" data-paper-width="${paper}" data-print-kind="test">
+    <header class="np-print-paper-header"><h3>NP POS 印刷テスト</h3><p>${paper} mm ロール用</p></header>
+    <section class="np-print-section"><h4>文字と金額の確認</h4><dl class="np-print-rows">
+    <div><dt>日本語　漢字・かな・カナ</dt><dd>¥12,345</dd></div><div><dt>ABC abc 0123456789</dt><dd>¥678</dd></div></dl></section>
+    <section class="np-print-section"><h4>印刷倍率の確認</h4>
+      <div class="np-print-test-scale" data-scale="${scale}"></div><p>${scale} mm（左右の縦線間）</p>
+      <p class="np-print-note">印字が欠ける場合は、用紙幅とプリンターの余白を確認してください。</p></section>
+    <p class="np-print-note">試し刷り用。取引記録には追加されません。</p></article>`;
 }
 
 function moneyRows(rows, {yen, escape}) {
@@ -83,23 +99,28 @@ function lineItems(ticket, detailed, grouping, inclusive, {escape, yen}) {
     const productKey = grouping === 'line' ? index
       : JSON.stringify([line.menuId,line.printName ?? line.name,line.price,line.taxRate,line.serviceEligible]);
     const existing = entries.get(productKey);
+    const lineDiscountAmount = getOrderLineDiscountAmount(line);
     if (existing) {
       existing.quantity += line.quantity;
       existing.total += line.total;
+      existing.lineDiscountAmount += lineDiscountAmount;
     } else {
-      entries.set(productKey,{...line});
+      entries.set(productKey,{...line,lineDiscountAmount});
     }
   }
   return `<section class="np-print-section"><h4>会計明細（${inclusive ? '税込' : '税抜'}）</h4>
     ${[...groups.values()].map(({name,entries})=>`${name ? `<p class="np-print-cast">${escape(name)}</p>` : ''}<ul class="np-print-items">${[...entries.values()].map((line) => `
-    <li><span>${escape(line.printName ?? line.name)}<small>${yen(line.price)} × ${quantities.format(line.quantity)}</small></span><strong>${yen(line.total)}</strong></li>`).join('')}
+    <li><span>${escape(line.printName ?? line.name)}<small>${yen(line.price)} × ${quantities.format(line.quantity)}</small>${line.lineDiscountAmount
+      ? `<small>明細値引き −${yen(line.lineDiscountAmount)}</small>` : ''}</span><strong>${yen(line.total)}</strong></li>`).join('')}
     </ul>`).join('')}</section>`;
 }
 
 function chargeDetails(totals, api) {
   const inclusive = totals.priceMode === 'inclusive';
   const rows = [[inclusive ? '小計（税込）' : '小計（税抜）', totals.subtotal]];
-  if (totals.discount) rows.push(['値引き', -totals.discount]);
+  const lineDiscount = totals.lineDiscount ?? 0;
+  if (lineDiscount) rows.push(['明細値引き', -lineDiscount]);
+  if (totals.discount > lineDiscount) rows.push([lineDiscount ? '伝票値引き' : '値引き', lineDiscount - totals.discount]);
   if (totals.service) rows.push(['サービス料', totals.service]);
   const taxLabel = inclusive ? 'うち消費税' : '消費税';
   rows.push([totals.cardFee ? `${taxLabel}（加算前）` : taxLabel, totals.tax - (totals.cardFeeTax ?? 0)]);

@@ -621,6 +621,9 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
       return result;
     },
     listMembers() { return request(`${storePath()}/members`); },
+    lineSettings() { return request(`${storePath()}/line-notifications`); },
+    saveLineSettings(settings) { return request(`${storePath()}/line-notifications`,{method:'PATCH',body:settings}); },
+    queueLineTest() { return request(`${storePath()}/line-notifications/test`,{method:'POST'}); },
     inviteMember(email, role) { return request(`${storePath()}/members`, { method: 'POST', body: { email, role } }); },
     updateMember(uid, role) { return request(`${storePath()}/members/${encodeURIComponent(uid)}`, { method: 'PATCH', body: { role } }); },
     removeMember(uid) { return request(`${storePath()}/members/${encodeURIComponent(uid)}`, { method: 'DELETE' }); },

@@ -9,6 +9,7 @@ import { getPayrollDraft, getPayrollRates, getPayrollSettings, getPayrollTemplat
 import { getStaffLabor, isStaffLaborCommand } from './labor-workspace.mjs';
 import { isCastAttendanceReview, linkedCastForActor } from './cast-self.mjs';
 import { getCalculationSettings } from './calculation-settings.mjs';
+import { getOrderLineDiscountAmount } from './order-line-discount.mjs';
 import { getEmployeeProfile } from './payroll-records.mjs';
 
 const ticketActions = new Set([
@@ -127,9 +128,12 @@ function auditMovements(before, after) {
   }));
 }
 
-function auditLine({id,name,quantity,price,total,castIds,castNames,cancelledAt,providedAt,serviceExcluded}) {
+function auditLine({id,name,quantity,price,total,castIds,castNames,cancelledAt,providedAt,serviceExcluded,taxRate,originalTaxRate,lineDiscount}) {
   return {id,name,quantity,price,amount:total,castNames:castNames ?? castIds,
     ...(cancelledAt && {cancelledAt}),...(providedAt && {providedAt}),
+    ...(originalTaxRate !== undefined && {taxRate,originalTaxRate}),
+    ...(lineDiscount && {lineDiscount:{kind:lineDiscount.kind,amount:getOrderLineDiscountAmount({total,lineDiscount}),
+      ...(lineDiscount.kind === 'percent' && {lineDiscountRateBps:lineDiscount.value})}}),
     ...(serviceExcluded === true && {serviceExcluded:true})};
 }
 
@@ -176,8 +180,12 @@ function auditTicket(before, after, action) {
   if (action.type === 'order' || action.type === 'extend') {
     newValues.lines = current.lines.slice(previous.lines.length).map((line,index) => ({
       ...auditLine(line),
+      ...(action.type === 'order' && line.originalTaxRate !== undefined
+        && {taxOverrideReason:textReason(action.items[index].taxOverrideReason)}),
       ...(action.type === 'order' && line.serviceExcluded === true
         && {serviceExclusionReason:textReason(action.items[index].serviceExclusionReason)}),
+      ...(action.type === 'order' && line.lineDiscount
+        && {lineDiscountReason:textReason(action.items[index].lineDiscount.reason)}),
     }));
     if (action.type === 'extend') {
       oldValues.endsAt = previous.endsAt;
@@ -185,11 +193,22 @@ function auditTicket(before, after, action) {
     }
   }
   if (action.type === 'editTicketLine' || action.type === 'serve') {
-    oldValues.line = auditLine(previous.lines.find(({id}) => id === action.lineId));
-    newValues.line = auditLine(current.lines.find(({id}) => id === action.lineId));
+    const oldLine = previous.lines.find(({id}) => id === action.lineId);
+    const newLine = current.lines.find(({id}) => id === action.lineId);
+    oldValues.line = auditLine(oldLine);
+    newValues.line = auditLine(newLine);
+    if (action.type === 'editTicketLine' && oldLine.taxRate !== newLine.taxRate) {
+      oldValues.line.taxRate = oldLine.taxRate;
+      newValues.line.taxRate = newLine.taxRate;
+    }
     if (action.type === 'editTicketLine' && oldValues.line.serviceExcluded !== newValues.line.serviceExcluded) {
       oldValues.line.serviceExcluded = oldValues.line.serviceExcluded === true;
       newValues.line.serviceExcluded = newValues.line.serviceExcluded === true;
+    }
+    if (action.type === 'editTicketLine' && !sameValue(oldValues.line.lineDiscount,newValues.line.lineDiscount)) {
+      oldValues.line.lineDiscount ??= null;
+      newValues.line.lineDiscount ??= null;
+      newValues.line.lineDiscountReason = textReason(action.lineDiscount?.reason ?? action.reason);
     }
   }
   if (action.type === 'cancelTicketExtension') {

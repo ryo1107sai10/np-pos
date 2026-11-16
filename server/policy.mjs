@@ -1,4 +1,4 @@
-import { exportStoreConfiguration, maxOverdueExtensionCount, parseStoreConfiguration, quote, summary } from '../docs/engine.mjs';
+import { exportStoreConfiguration, isOrderTaxRateOverride, maxOverdueExtensionCount, parseStoreConfiguration, quote, summary } from '../docs/engine.mjs';
 import { isAutoExtensionPauseSource, isValidAutoExtensionSettings, isValidVisitAutoExtensionPause } from '../docs/auto-extension.mjs';
 import { canWaivePaymentFee, depositGrossAmount, normalizeCardFeeSettings } from '../docs/card-fee.mjs';
 import { getMonthlyReportSales } from '../docs/report-period.mjs';
@@ -12,7 +12,8 @@ import { validateShiftsSnapshot } from '../docs/shifts.mjs';
 import { isValidInitialSetSchedule } from '../docs/set-schedule.mjs';
 import { getDailyPayByDate, isDailyPayCommand, isPayrollCommand, isPayrollMonth, normalizeAttendanceSnapshot, normalizePayrollSnapshot } from '../docs/payroll.mjs';
 import { getCastWorkspace, isCastSelfCommand, listCastAttendance, validateCastAttendanceSnapshot } from '../docs/cast-self.mjs';
-import { canExcludeOrderService, isValidCalculationSettings, normalizeCalculationSettings, roundCalculationRate } from '../docs/calculation-settings.mjs';
+import { canApplyOrderLineDiscount, canExcludeOrderService, canOverrideOrderTax, isValidCalculationSettings, normalizeCalculationSettings, roundCalculationRate } from '../docs/calculation-settings.mjs';
+import { isValidOrderLineDiscount, isValidOrderLineDiscountSnapshot } from '../docs/order-line-discount.mjs';
 import { normalizeAttendanceItems } from '../docs/payroll-records.mjs';
 import { normalizeRolePolicy, roleAllowsCommand, roleGroupAllowed } from '../docs/role-policy.mjs';
 import { isPersonalSalesAmount, isPersonalSalesDiscountMode, isValidPersonalSalesHistory } from '../docs/personal-sales.mjs';
@@ -157,16 +158,24 @@ export function verifyCommand(role, command, state, profileId) {
     400, 'invalid-command', '伝票と人数変更の内容を確認してください。');
   }
   if (command.type === 'editTicketLine' || command.type === 'cancelTicketExtension') {
-    const {ticketId,lineId,quantity,castIds,price,serviceExcluded} = command;
+    const {ticketId,lineId,quantity,castIds,price,serviceExcluded,taxRateOverride} = command;
     const validLine = [ticketId,lineId].every((id) => typeof id === 'string' && id.length > 0 && id.length <= 128);
     const validEdit = Number.isInteger(quantity) && quantity > 0 && quantity <= 100 && (price === undefined || validYen(price))
       && (serviceExcluded === undefined || typeof serviceExcluded === 'boolean')
+      && (taxRateOverride == null || isOrderTaxRateOverride(taxRateOverride))
       && (castIds === undefined || (Array.isArray(castIds) && castIds.length <= 100
         && castIds.every((id) => typeof id === 'string' && id.length > 0 && id.length <= 128)));
     requireCondition(validLine && (command.type === 'cancelTicketExtension' || validEdit),
       400,'invalid-command','訂正する明細を確認してください。');
     if (command.type === 'editTicketLine' && serviceExcluded !== undefined) {
       requireCondition(canExcludeOrderService(state,role),403,'forbidden','サービス料の除外には店舗設定と管理者権限が必要です。');
+    }
+    if (command.type === 'editTicketLine' && taxRateOverride !== undefined) {
+      requireCondition(canOverrideOrderTax(state,role),403,'forbidden','明細の税率変更には店舗設定と管理者権限が必要です。');
+    }
+    if (command.type === 'editTicketLine' && command.lineDiscount !== undefined) {
+      requireCondition(canApplyOrderLineDiscount(state,role),403,'forbidden','明細値引きには店舗設定と管理者権限が必要です。');
+      if (command.lineDiscount !== null) verifyOrderLineDiscount(command.lineDiscount,command.reason);
     }
   }
   if (command.type === 'extendOverdue' || (command.type === 'extend' && command.plans !== undefined)) {
@@ -195,10 +204,20 @@ export function verifyCommand(role, command, state, profileId) {
     requireCondition(Array.isArray(command.items) && command.items.length > 0 && command.items.length <= 100
       && command.items.every((item) => isRecord(item) && (item.serviceExcluded === undefined || typeof item.serviceExcluded === 'boolean')),
       400, 'invalid-command', '注文内容を確認してください。');
+    for (const item of command.items.filter(({taxRateOverride}) => taxRateOverride !== undefined)) {
+      requireCondition(canOverrideOrderTax(state,role),403,'forbidden','明細の税率変更には店舗設定と管理者権限が必要です。');
+      requireCondition(isOrderTaxRateOverride(item.taxRateOverride),400,'invalid-command','明細の税率を確認してください。');
+      requireCondition(typeof item.taxOverrideReason === 'string' && item.taxOverrideReason.trim().length > 0
+        && item.taxOverrideReason.trim().length <= 120,400,'reason-required','税率の変更理由を120文字以内で入力してください。');
+    }
     for (const item of command.items.filter(({serviceExcluded}) => serviceExcluded)) {
       requireCondition(canExcludeOrderService(state,role),403,'forbidden','サービス料の除外には店舗設定と管理者権限が必要です。');
       requireCondition(typeof item.serviceExclusionReason === 'string' && item.serviceExclusionReason.trim().length > 0
         && item.serviceExclusionReason.trim().length <= 120,400,'reason-required','サービス料の除外理由を120文字以内で入力してください。');
+    }
+    for (const {lineDiscount} of command.items.filter(({lineDiscount}) => lineDiscount !== undefined)) {
+      requireCondition(canApplyOrderLineDiscount(state,role),403,'forbidden','明細値引きには店舗設定と管理者権限が必要です。');
+      verifyOrderLineDiscount(lineDiscount);
     }
   }
   if (command.type === 'setTableAutoExtension') {
@@ -485,6 +504,13 @@ function validYen(value) {
   return Number.isSafeInteger(value) && value >= 0;
 }
 
+function verifyOrderLineDiscount(discount, editReason) {
+  requireCondition(isValidOrderLineDiscount(discount),400,'invalid-command','明細値引きの金額または割合を確認してください。');
+  const reason = discount.reason ?? editReason;
+  requireCondition(typeof reason === 'string' && reason.trim().length > 0 && reason.trim().length <= 120,
+    400,'reason-required','明細値引きの理由を120文字以内で入力してください。');
+}
+
 function validFeeRate(value) {
   return Number.isSafeInteger(value) && value >= 0 && value <= 10_000;
 }
@@ -576,7 +602,10 @@ function validTicket(ticket) {
       && (line.hideReceiptLine === undefined || (typeof line.hideReceiptLine === 'boolean' && (!line.hideReceiptLine || line.price === 0)))
       && Number.isInteger(line.quantity) && line.quantity > 0
       && nonnegative(line.price) && nonnegative(line.total) && nonnegative(line.taxRate)
+      && (line.originalTaxRate === undefined || (Number.isSafeInteger(line.originalTaxRate) && line.originalTaxRate >= 0
+        && line.originalTaxRate <= 10_000 && line.originalTaxRate !== line.taxRate && isOrderTaxRateOverride(line.taxRate)))
       && (line.serviceExcluded === undefined || (typeof line.serviceExcluded === 'boolean' && (!line.serviceExcluded || line.serviceEligible === true)))
+      && isValidOrderLineDiscountSnapshot(line)
       && (line.autoExtension === undefined || typeof line.autoExtension === 'boolean')
       && Array.isArray(line.castIds) && Array.isArray(line.stockUses)
       && (line.castIds.length === 0 || isRecord(line.commission)))

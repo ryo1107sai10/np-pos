@@ -3,6 +3,7 @@ import { applyCommand, changeMember, createStore, getStoreOverview, inviteMember
 import { changeGroupMember, createStoreGroup, inviteGroupMember, listStoreGroups, renameStoreGroup, revokeGroupInvite, setGroupStore } from './store-groups.mjs';
 import { ApiError, isRecord, requireCondition } from './policy.mjs';
 import { answerGuideTopic, getGuideAccess } from './guide-assistant.mjs';
+import { dispatchLineJobs, getLineSettings, primeLineReminders, queueLineTest, saveLineSettings } from './line-notifications.mjs';
 
 const firebaseKeys = createRemoteJWKSet(new URL(
   'https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com',
@@ -156,7 +157,7 @@ async function route(request, env, url) {
   }
   const overview = method === 'GET' && url.pathname === '/api/stores/overview';
   const groupMatch = /^\/api\/groups(?:\/([^/]+)(?:\/(stores|members|invites)(?:\/([^/]+))?)?)?$/.exec(url.pathname);
-  const match = /^\/api\/stores(?:\/([^/]+)\/(state|commands|migrate|members|invites|audit|guide)(?:\/([^/]+))?)?$/.exec(url.pathname);
+  const match = /^\/api\/stores(?:\/([^/]+)\/(state|commands|migrate|members|invites|audit|guide|line-notifications)(?:\/([^/]+))?)?$/.exec(url.pathname);
   if (!overview && !match && !groupMatch) throw new ApiError(404, 'not-found', 'ページが見つかりません。');
   const actor = await firebaseActor(request, env);
   const db = env.DB.withSession?.('first-primary') ?? env.DB;
@@ -174,6 +175,18 @@ async function route(request, env, url) {
     const access = await getGuideAccess(db,env,actor,storeId);
     if (method === 'GET') return {enabled:access.enabled};
     return answerGuideTopic(db,env,storeId,access,(await jsonBody(request,1024)).topic);
+  }
+  if (section === 'line-notifications') {
+    if (method === 'GET' && !id) return getLineSettings(db,env,actor,storeId);
+    if (method === 'PATCH' && !id) {
+      const settings = await saveLineSettings(db,env,actor,storeId,await jsonBody(request,1024));
+      if (settings.enabled && settings.extension) {
+        try { await primeLineReminders(db,storeId,await readState(db,actor,storeId)); }
+        catch (error) { console.error(JSON.stringify({event:'line_reminder_initialization_failed',name:error.name})); }
+      }
+      return settings;
+    }
+    if (method === 'POST' && id === 'test') return queueLineTest(db,env,actor,storeId);
   }
   if (section === 'state' && method === 'GET' && !id) return readState(db, actor, storeId, sinceRevision(url.searchParams));
   if (section === 'audit' && method === 'GET' && !id) return listAudit(db, actor, storeId, auditPage(url.searchParams));
@@ -200,6 +213,10 @@ async function route(request, env, url) {
 }
 
 export default {
+  async scheduled(_controller,env) {
+    const db = env.DB.withSession?.('first-primary') ?? env.DB;
+    await dispatchLineJobs(db,env);
+  },
   async fetch(request, env) {
     let headers = { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' };
     try {

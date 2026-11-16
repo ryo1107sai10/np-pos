@@ -1,6 +1,7 @@
 import { addCardFeeTax, canWaivePaymentFee, depositGrossAmount, getDepositPaymentTerms, getPaymentFeeGroups, normalizeCardFeeSettings } from './card-fee.mjs';
-import { calculationTaxGroup, canExcludeOrderService, defaultItemTaxRateBps, getCalculationSettings, getTicketCalculationSettings,
+import { calculationTaxGroup, canApplyOrderLineDiscount, canExcludeOrderService, canOverrideOrderTax, defaultItemTaxRateBps, getCalculationSettings, getTicketCalculationSettings,
   normalizeCalculationSettings, roundCalculationRate } from './calculation-settings.mjs';
+import { getOrderLineDiscountAmount, getTicketDiscountableSubtotal, isValidOrderLineDiscount } from './order-line-discount.mjs';
 import { getStoreSettings, normalizeStoreSettings, replaceStoreSettings } from './store-settings.mjs';
 import { buildOperationAudit } from './operational-audit.mjs';
 import { applyPayrollCommand, isPayrollCommand } from './payroll.mjs';
@@ -44,6 +45,12 @@ const demoActor = Object.freeze({ id: 'demo-admin', label: 'デモ管理者', ro
 export const discountReasonCodes = Object.freeze({
   service: 'サービス', coupon: 'クーポン', negotiation: '交渉', other: 'その他',
 });
+
+export const orderTaxOverrideRates = Object.freeze([1_000, 800, 0]);
+
+export function isOrderTaxRateOverride(value) {
+  return orderTaxOverrideRates.includes(value);
+}
 
 export function getManagerDiscountLimit(state) {
   const limit = state.controls?.managerDiscountRateBps;
@@ -326,9 +333,13 @@ function calculateQuote(ticket, frozenFee = null) {
   const inclusive = settings.priceMode === 'inclusive';
   const listedAmounts = lines.map(({ total }) => total);
   const subtotal = listedAmounts.reduce((total, amount) => total + amount, 0);
-  const discount = Math.min(ticket.discount, subtotal);
-  const discountByLine = allocate(discount, listedAmounts);
-  const netByLine = listedAmounts.map((amount, index) => amount - discountByLine[index]);
+  const lineDiscounts = lines.map(getOrderLineDiscountAmount);
+  const lineDiscount = lineDiscounts.reduce((sum, amount) => sum + amount, 0);
+  const afterLineDiscount = listedAmounts.map((amount, index) => amount - lineDiscounts[index]);
+  const ticketDiscount = Math.min(ticket.discount, subtotal - lineDiscount);
+  const discount = lineDiscount + ticketDiscount;
+  const discountByLine = allocate(ticketDiscount, afterLineDiscount);
+  const netByLine = afterLineDiscount.map((amount, index) => amount - discountByLine[index]);
   const serviceBase = settings.serviceBase === 'beforeDiscount' ? listedAmounts : netByLine;
   const serviceWeights = lines.map((line, index) => line.serviceEligible && line.serviceExcluded !== true ? serviceBase[index] : 0);
   const service = roundCalculationRate(serviceWeights.reduce((sum, weight) => sum + weight, 0),
@@ -341,8 +352,8 @@ function calculateQuote(ticket, frozenFee = null) {
     byTaxRate.set(taxRate, indices);
   });
   const commissionSalesByLine = netByLine.slice();
-  const keepPersonalSales = discount > 0 && getPersonalSalesDiscountMode(ticket) === 'keep';
-  const personalSalesByLine = keepPersonalSales ? listedAmounts.slice() : commissionSalesByLine;
+  const keepPersonalSales = ticketDiscount > 0 && getPersonalSalesDiscountMode(ticket) === 'keep';
+  const personalSalesByLine = keepPersonalSales ? afterLineDiscount.slice() : commissionSalesByLine;
   const itemTaxBreakdown = [...byTaxRate].sort(([first], [second]) => second - first).map(([rate, indices]) => {
     const taxable = indices.reduce((sum, index) => sum + netByLine[index] + serviceByLine[index], 0);
     if (inclusive && rate > 0) {
@@ -390,6 +401,7 @@ function calculateQuote(ticket, frozenFee = null) {
   const receivable = totalOf(ticket.payments.filter(({ method }) => method === 'receivable'));
   const paid = totalOf(ticket.payments) - receivable;
   return { subtotal, discount, service, tax, total, deposit, paid, ...(receivable > 0 ? { receivable } : {}),
+    ...(lineDiscount > 0 && {lineDiscount}),
     ...(inclusive ? {priceMode:'inclusive'} : {}),
     ...(depositFee > 0 ? {depositFee} : {}),
     ...(cardFee > 0 ? {cardFee,cardFeeTax,baseTotal,cardFeeRateBps,...(brandedFee && {brandedFee:true})} : {}),
@@ -436,7 +448,8 @@ function newStockMovement(state, stock, amount, kind, reason, now, ticketId = nu
   return movement;
 }
 
-function addLine(state, ticket, menu, quantity, castIds, now, { includeHistoricalCast = false, serviceExcluded = false } = {}) {
+function addLine(state, ticket, menu, quantity, castIds, now,
+  { includeHistoricalCast = false, serviceExcluded = false, taxRateOverride } = {}) {
   const people = includeHistoricalCast
     ? [...(state.archivedCast ?? []), ...state.cast]
     : state.cast.filter((person) => person.enabled !== false);
@@ -445,12 +458,14 @@ function addLine(state, ticket, menu, quantity, castIds, now, { includeHistorica
   assert(Array.isArray(castIds) && new Set(castIds).size === castIds.length
     && castIds.every((id) => castById.has(id)), '歩合対象者を確認してください。');
   assert(!menu.requiresCast || castIds.length > 0, `${menu.name}の担当キャストを選択してください。`);
+  const catalogTaxRate = menu.taxRate ?? defaultItemTaxRateBps;
   const line = {
     id: createId(state, 'line'), menuId: menu.id, name: menu.name, category: menu.category, quantity, price: menu.price,
     ...(menu.printName && {printName:menu.printName}),
     ...(menu.hideReceiptLine === true && menu.price === 0 && {hideReceiptLine:true}),
     total: menu.price * quantity, castIds: castIds.slice(), createdAt: now, stockUses: [], cancelledAt: null,
-    providedAt: null, taxRate: menu.taxRate ?? defaultItemTaxRateBps, serviceEligible: menu.serviceEligible !== false,
+    providedAt: null, taxRate: taxRateOverride ?? catalogTaxRate, serviceEligible: menu.serviceEligible !== false,
+    ...(taxRateOverride !== undefined && taxRateOverride !== catalogTaxRate && { originalTaxRate: catalogTaxRate }),
     ...(serviceExcluded && {serviceExcluded:true}),
     commission: getItemCommission(menu), castNames: castIds.map((id) => castById.get(id).name),
     castCommissions: castIds.map((id) => getItemCommission(menu, castById.get(id))),
@@ -506,12 +521,24 @@ function reconcileEditedLineStock(state, ticket, original, updated, now) {
 
 function assertReducedTicketAmounts(state, ticket, actor, label) {
   const amounts = calculateQuote(ticket);
-  assert(amounts.subtotal >= ticket.discount, `${label}前に値引き額を調整してください。`);
+  const discountableSubtotal = getTicketDiscountableSubtotal(amounts);
+  assert(discountableSubtotal >= ticket.discount, `${label}前に値引き額を調整してください。`);
   assert((amounts.baseTotal ?? amounts.total) >= totalOf(ticket.deposits), `${label}後の請求額が前受金を下回ります。`);
   if (actor.role === 'manager' && ticket.discountDetails?.managerLimitBps !== undefined) {
-    assert(ticket.discount <= exactRate(amounts.subtotal,getManagerDiscountLimit(state)),
+    assert(ticket.discount <= exactRate(discountableSubtotal,getManagerDiscountLimit(state)),
       `${label}後の値引きが承認上限を超えます。先に値引きを調整してください。`);
   }
+}
+
+function assertOrderLineDiscountFits(line) {
+  assert(line.lineDiscount?.kind !== 'amount' || line.lineDiscount.value <= line.total, '明細値引きは明細の小計以下にしてください。');
+}
+
+function orderLineDiscount(state, actor, discount, reason) {
+  assert(canApplyOrderLineDiscount(state,actor.role), '明細値引きには店舗設定と管理者権限が必要です。');
+  assert(isValidOrderLineDiscount(discount), '明細値引きの金額または割合を確認してください。');
+  operationalReason(discount.reason ?? reason,'明細値引きの理由');
+  return {kind:discount.kind,value:discount.value};
 }
 
 function editLiveTicketLine(state, ticket, action, now, actor) {
@@ -523,6 +550,14 @@ function editLiveTicketLine(state, ticket, action, now, actor) {
   assert(line.category !== '延長', '延長の変更は一度取り消してから正しいプランを登録してください。');
   assert(line.category !== 'セット' || !action.castIds?.length, '初回セットには歩合対象者を指定できません。');
   const updated = editTicketLineSnapshot(state,line,action);
+  if (action.taxRateOverride !== undefined) {
+    assert(canOverrideOrderTax(state, actor.role), '明細の税率変更には店舗設定と管理者権限が必要です。');
+    assert(action.taxRateOverride === null || isOrderTaxRateOverride(action.taxRateOverride), '明細の税率を確認してください。');
+    const originalTaxRate = line.originalTaxRate ?? line.taxRate;
+    updated.taxRate = action.taxRateOverride ?? originalTaxRate;
+    if (updated.taxRate === originalTaxRate) delete updated.originalTaxRate;
+    else updated.originalTaxRate = originalTaxRate;
+  }
   const serviceChanged = action.serviceExcluded !== undefined && action.serviceExcluded !== (line.serviceExcluded === true);
   if (action.serviceExcluded !== undefined) assert(typeof action.serviceExcluded === 'boolean', 'サービス料の除外設定を確認してください。');
   if (serviceChanged) {
@@ -531,9 +566,21 @@ function editLiveTicketLine(state, ticket, action, now, actor) {
     if (action.serviceExcluded) updated.serviceExcluded = true;
     else delete updated.serviceExcluded;
   }
+  if (action.lineDiscount === null) {
+    assert(canApplyOrderLineDiscount(state,actor.role), '明細値引きには店舗設定と管理者権限が必要です。');
+    delete updated.lineDiscount;
+  } else if (action.lineDiscount !== undefined) {
+    updated.lineDiscount = orderLineDiscount(state,actor,action.lineDiscount,action.reason);
+  }
+  assertOrderLineDiscountFits(updated);
+  const oldDiscount = getOrderLineDiscountAmount(line);
+  const newDiscount = getOrderLineDiscountAmount(updated);
+  assert(oldDiscount === newDiscount || actor.role === 'admin', '明細値引き額が変わる訂正には管理者権限が必要です。');
   if (line.quantity !== updated.quantity) reconcileEditedLineStock(state,ticket,line,updated,now);
   ticket.lines[index] = updated;
-  if (updated.total < line.total || (serviceChanged && action.serviceExcluded)) assertReducedTicketAmounts(state,ticket,actor,'訂正');
+  if (updated.total < line.total || newDiscount > oldDiscount || updated.taxRate !== line.taxRate || (serviceChanged && action.serviceExcluded)) {
+    assertReducedTicketAmounts(state,ticket,actor,'訂正');
+  }
 }
 
 function extendTicket(state, ticket, menu, now, automatic = false, assignments = [{menu,quantity:ticket.guests}]) {
@@ -888,11 +935,14 @@ export function previewSettledContents(state, ticket, action) {
     if (action.cancelLine) {
       assert(line.category !== 'セット', '初回セットは数量または単価で訂正してください。');
       revised.lines[index] = {...line,cancelledAt:action.at ?? ticket.settledAt};
-    } else revised.lines[index] = editTicketLineSnapshot(state,line,action);
+    } else {
+      revised.lines[index] = editTicketLineSnapshot(state,line,action);
+      assertOrderLineDiscountFits(revised.lines[index]);
+    }
   }
   money(revised.discount,'値引き');
   const totals = calculateQuote(revised,old);
-  assert(revised.discount <= totals.subtotal,'値引き額を小計以下にしてください。');
+  assert(revised.discount <= getTicketDiscountableSubtotal(totals),'値引き額を小計以下にしてください。');
   assert((totals.baseTotal ?? totals.total) >= totalOf(ticket.deposits),'訂正後の合計が前受金を下回っています。');
   return {revised,totals,old,change:totals.total - old.total};
 }
@@ -1298,7 +1348,7 @@ function doDiscount(state, ticket, action, now, actor) {
   const { mode, value, personalSalesMode } = action;
   assert(mode === 'amount' || mode === 'percent', '値引きの単位を選択してください。');
   assert(personalSalesMode === undefined || isPersonalSalesDiscountMode(personalSalesMode), '個人売上への反映方法を選択してください。');
-  const { subtotal } = calculateQuote(ticket);
+  const subtotal = getTicketDiscountableSubtotal(calculateQuote(ticket));
   let amount;
   let rateBps;
   if (mode === 'percent') {
@@ -1334,7 +1384,7 @@ function decideDiscount(ticket, action, now, actor) {
   }
   const note = action.reason == null || (typeof action.reason === 'string' && !action.reason.trim())
     ? '' : operationalReason(action.reason, '承認メモ');
-  const { subtotal } = calculateQuote(ticket);
+  const subtotal = getTicketDiscountableSubtotal(calculateQuote(ticket));
   assert(request.subtotal === subtotal, '申請時から小計が変わりました。値引きの申請を更新してください。');
   validateDiscountAmount(ticket, request.amount, subtotal);
   ticket.discount = request.amount;
@@ -1576,14 +1626,24 @@ function reduce(state, action, now, actor) {
         const menu = next.menu.find((entry) => entry.id === item.menuId);
         assert(menu && !['セット', '延長'].includes(menu.category), '初回セットと延長は専用画面で登録してください。');
         assert(menu.enabled !== false, 'このメニューは提供を停止しています。');
-        const {serviceExcluded,serviceExclusionReason} = item;
+        const {taxRateOverride,taxOverrideReason,serviceExcluded,serviceExclusionReason} = item;
+        if (taxRateOverride !== undefined) {
+          assert(canOverrideOrderTax(next, actor.role), '明細の税率変更には店舗設定と管理者権限が必要です。');
+          assert(isOrderTaxRateOverride(taxRateOverride), '明細の税率を確認してください。');
+          operationalReason(taxOverrideReason, '税率の変更理由');
+        }
         if (serviceExcluded !== undefined) assert(typeof serviceExcluded === 'boolean', 'サービス料の除外設定を確認してください。');
         if (serviceExcluded) {
           assert(canExcludeOrderService(next, actor.role), 'サービス料の除外には店舗設定と管理者権限が必要です。');
           assert(menu.serviceEligible !== false, 'この商品はサービス料の対象外です。');
           operationalReason(serviceExclusionReason, 'サービス料の除外理由');
         }
-        addLine(next, ticket, menu, item.quantity, item.castIds ?? [], now, {serviceExcluded});
+        const lineDiscount = item.lineDiscount === undefined ? undefined : orderLineDiscount(next,actor,item.lineDiscount);
+        const line = addLine(next, ticket, menu, item.quantity, item.castIds ?? [], now, {serviceExcluded,taxRateOverride});
+        if (lineDiscount) {
+          line.lineDiscount = lineDiscount;
+          assertOrderLineDiscountFits(line);
+        }
       }
       break;
     case 'extend':

@@ -23,6 +23,7 @@ export function renderWorkspaceMenu({pages, page, ready, isOpen, hasTables, stor
     {group:'店舗設定', title:'税・サービス料', glyph:'wallet', action:'calculation-settings'},
     {group:'店舗設定', title:'運用設定', glyph:'settings', action:'ops-settings'},
     {group:'店舗設定', title:'役職・権限', glyph:'users', action:'role-policy'},
+    {group:'店舗設定', title:'LINE通知', glyph:'bell', action:'line-notifications'},
     {group:'店舗設定', title:'金庫・出金先', glyph:'wallet', action:'cash-accounts'},
     {group:'店舗設定', title:'印刷設定', glyph:'printer', action:'print-settings'},
     {group:'店舗設定', title:'設定の移行', glyph:'download', action:'layout-transfer'},

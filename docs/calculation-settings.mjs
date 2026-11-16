@@ -11,9 +11,12 @@ const defaults = Object.freeze({
   priceMode: 'exclusive',
 });
 
-function projectSettings({ serviceRateBps, serviceRounding, taxRounding, serviceBase, priceMode, allowOrderServiceExclusion }) {
+function projectSettings({ serviceRateBps, serviceRounding, taxRounding, serviceBase, priceMode,
+  allowOrderServiceExclusion, allowOrderTaxOverride, allowOrderLineDiscount }) {
   return { serviceRateBps, serviceRounding, taxRounding, serviceBase, priceMode,
-    ...(allowOrderServiceExclusion !== undefined && {allowOrderServiceExclusion}) };
+    ...(allowOrderServiceExclusion !== undefined && {allowOrderServiceExclusion}),
+    ...(allowOrderTaxOverride !== undefined && {allowOrderTaxOverride}),
+    ...(allowOrderLineDiscount !== undefined && {allowOrderLineDiscount}) };
 }
 
 export function isValidCalculationSettings(settings) {
@@ -21,7 +24,8 @@ export function isValidCalculationSettings(settings) {
     && Number.isSafeInteger(settings.serviceRateBps) && settings.serviceRateBps >= 0 && settings.serviceRateBps <= rateDivisor
     && roundingModes.has(settings.serviceRounding) && roundingModes.has(settings.taxRounding)
     && serviceBases.has(settings.serviceBase) && priceModes.has(settings.priceMode)
-    && (settings.allowOrderServiceExclusion === undefined || typeof settings.allowOrderServiceExclusion === 'boolean');
+    && ['allowOrderServiceExclusion','allowOrderTaxOverride','allowOrderLineDiscount']
+      .every((key) => settings[key] === undefined || typeof settings[key] === 'boolean');
 }
 
 export function normalizeCalculationSettings(settings) {
@@ -37,6 +41,14 @@ export function getCalculationSettings(state) {
 
 export function canExcludeOrderService(state, role) {
   return role === 'admin' && getCalculationSettings(state).allowOrderServiceExclusion === true;
+}
+
+export function canOverrideOrderTax(state, role) {
+  return role === 'admin' && getCalculationSettings(state).allowOrderTaxOverride === true;
+}
+
+export function canApplyOrderLineDiscount(state, role) {
+  return role === 'admin' && getCalculationSettings(state).allowOrderLineDiscount === true;
 }
 
 export function getTicketCalculationSettings(ticket) {

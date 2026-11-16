@@ -106,7 +106,7 @@ export function createBillingDemo(now = Date.now()) {
   sample = step(sample,{type:'seat',tableIds:['a1'],guests:2,setId:'set60'},seatedAt);
   sample = step(sample,{type:'seat',tableIds:['a2'],guests:1,setId:'set60'},seatedAt);
   return step(sample,{type:'saveCalculationSettings',settings:{
-    ...getCalculationSettings(sample),allowOrderServiceExclusion:true,
+    ...getCalculationSettings(sample),allowOrderServiceExclusion:true,allowOrderTaxOverride:true,allowOrderLineDiscount:true,
   }},now);
 }
 

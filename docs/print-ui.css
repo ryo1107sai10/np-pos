@@ -7,6 +7,9 @@
 .np-print-switches .inline-check { min-height: 36px; align-content: center; }
 .np-print-switches input { accent-color: #5949a2; width: 16px; height: 16px; flex: 0 0 auto; }
 .np-print-settings .field-help { margin: 0; }
+.np-print-test-tools { display: grid; justify-items: start; gap: 5px; }
+.np-print-test-scale { box-sizing: border-box; width: 40mm; max-width: 100%; height: 4mm; border: 1px solid #252525; border-top: 0; margin-block: 2mm 1mm; }
+.np-print-test-scale[data-scale="60"] { width: 60mm; }
 .np-print-preview-frame {
   min-width: 0;
   padding: 16px 11px;

@@ -5,6 +5,7 @@ import { getCustomRole, isCustomRoleId } from '../docs/role-policy.mjs';
 import { ApiError, canOperate, projectState, requireCondition, roles, validateSnapshot, verifyCommand } from './policy.mjs';
 import { emailAddress, prepared, readRows, resultRow } from './db-queries.mjs';
 import { groupInviteAcceptance } from './store-groups.mjs';
+import { captureLineJobs } from './line-notifications.mjs';
 
 const chunkLength = 200_000;
 const maxSnapshotBytes = 7 * 1024 * 1024;
@@ -518,6 +519,9 @@ async function saveOperation(db, actor, storeId, command, observed, observedAt) 
     statements.push(prepared(db, `INSERT INTO np_audit_events (store_id, operation_id, revision, payload)
       SELECT ?, ?, ?, ? WHERE ${currentOperation}`, storeId, operationId, revision, payload, ...conditionArgs));
   }
+  if (operation === 'command') statements.push(...captureLineJobs(db,storeId,current.state,next,{
+    operationId,now,condition:currentOperation,conditionArgs,
+  }));
   statements.push(...writeSnapshot(db,storeId,chunks,current.chunks,revision,conditionArgs));
   const results = await db.batch(statements);
   if (!results[0]?.meta?.changes) {

@@ -10,11 +10,13 @@ import {
 } from './database.mjs';
 import { changeGroupMember, createStoreGroup, inviteGroupMember, listStoreGroups, renameStoreGroup, revokeGroupInvite, setGroupStore } from './store-groups.mjs';
 import { answerGuideTopic, getGuideAccess } from './guide-assistant.mjs';
+import { dispatchLineJobs, getLineSettings, primeLineReminders, queueLineTest, saveLineSettings } from './line-notifications.mjs';
 
 const schema = readFileSync(new URL('schema.sql', import.meta.url), 'utf8');
 const groupMigration = readFileSync(new URL('migrations/20261117-store-groups.sql', import.meta.url), 'utf8');
 const accessMigration = readFileSync(new URL('migrations/20261117-store-access-blocks.sql', import.meta.url), 'utf8');
 const roleMigration = readFileSync(new URL('migrations/20261117-custom-store-roles.sql', import.meta.url), 'utf8');
+const lineMigration = readFileSync(new URL('migrations/20261117-line-notifications.sql', import.meta.url), 'utf8');
 const owner = { uid: 'owner-1', email: 'owner@example.test' };
 const helper = { uid: 'helper-1', email: 'helper@example.test' };
 const outsider = { uid: 'outsider-1', email: 'outsider@example.test' };
@@ -58,6 +60,100 @@ async function store(db, user = owner) {
 
 const command = (db, actor, storeId, expectedRevision, operationId, action) =>
   applyCommand(db, actor, storeId, { expectedRevision, operationId, command: action });
+
+const lineTarget = 'C' + '1'.repeat(32);
+const lineConfig = (tenant,target=lineTarget) => ({
+  LINE_CHANNEL_ACCESS_TOKEN:'synthetic-test-token',LINE_DESTINATIONS_JSON:JSON.stringify({[tenant]:target}),
+});
+
+test('LINE settings are isolated, default off, and test sends retry once with the same secret-scoped recipient', async () => {
+  const db = database();
+  db.migrate(lineMigration);
+  const tenant = await store(db);
+  const other = await store(db,outsider);
+  const group = (await createStoreGroup(db,owner,'LINE テスト')).group.id;
+  await setGroupStore(db,owner,group,tenant,true);
+  await inviteGroupMember(db,owner,group,helper.email,'manager');
+  await listStores(db,helper);
+  const env = lineConfig(tenant);
+  const config = {enabled:true,extension:true,lowStock:true};
+  assert.equal((await getLineSettings(db,env,owner,tenant)).enabled,false);
+  assert.equal((await getLineSettings(db,env,outsider,other)).configured,false);
+  await assert.rejects(saveLineSettings(db,env,helper,tenant,config),{code:'line-forbidden'});
+  await assert.rejects(queueLineTest(db,env,helper,tenant),{code:'line-forbidden'});
+  await assert.rejects(getLineSettings(db,env,owner,other),{code:'line-forbidden'});
+  await assert.rejects(saveLineSettings(db,{},owner,tenant,config),{code:'line-not-configured'});
+  await assert.rejects(queueLineTest(db,env,owner,tenant),{code:'line-disabled'});
+  const enabled = await saveLineSettings(db,env,owner,tenant,{...config,destination:'arbitrary-attacker'});
+  assert.deepEqual(enabled,{configured:true,enabled:true,needsConfirmation:false,extension:true,lowStock:true,history:[]});
+  const base = Date.now();
+  const response = await queueLineTest(db,env,owner,tenant,base);
+  assert.equal(response.history[0].status,'pending');
+  assert.doesNotMatch(JSON.stringify(response),/synthetic-test-token|arbitrary-attacker|C1111/);
+  await assert.rejects(queueLineTest(db,env,owner,tenant,base+1),{code:'line-test-wait'});
+  const outbound = [];
+  const send = async (url,request) => {
+    outbound.push({url,request});
+    return outbound.length === 1 ? new Response(null,{status:503})
+      : new Response(null,{status:409,headers:{'x-line-accepted-request-id':'synthetic-response'}});
+  };
+  await dispatchLineJobs(db,env,{now:base,send});
+  await dispatchLineJobs(db,env,{now:base+1000,send});
+  assert.equal(outbound.length,1);
+  await dispatchLineJobs(db,env,{now:base+60_000,send});
+  await dispatchLineJobs(db,env,{now:base+120_000,send});
+  assert.equal(outbound.length,2);
+  assert.equal(outbound[0].url,'https://api.line.me/v2/bot/message/push');
+  assert.equal(outbound[0].request.headers['X-Line-Retry-Key'],outbound[1].request.headers['X-Line-Retry-Key']);
+  assert.match(outbound[0].request.headers['X-Line-Retry-Key'],/^[0-9a-f-]{36}$/);
+  assert.deepEqual(JSON.parse(outbound[0].request.body),{to:lineTarget,messages:[{type:'text',text:'NP POS｜LINE通知のテストです。'}]});
+  assert.equal((await getLineSettings(db,env,owner,tenant)).history[0].status,'accepted');
+  await queueLineTest(db,env,owner,tenant,base+120_001);
+  const changed = lineConfig(tenant,'C'+'2'.repeat(32));
+  const pending = await getLineSettings(db,changed,owner,tenant);
+  assert.equal(pending.enabled,false);
+  assert.equal(pending.needsConfirmation,true);
+  await dispatchLineJobs(db,changed,{now:base+125_000,send});
+  assert.equal(outbound.length,2);
+  assert.equal((await getLineSettings(db,changed,owner,tenant)).history[0].status,'cancelled');
+});
+
+test('LINE operational jobs use committed stock crossings and live—not cancelled—automatic extension deadlines', async () => {
+  const db = database();
+  const tenant = await store(db);
+  const env = lineConfig(tenant);
+  const events = [];
+  const send = async (_url,request) => { events.push(JSON.parse(request.body).messages[0].text); return new Response(null,{status:200}); };
+  let result = await command(db,owner,tenant,0,'line-open-store-tst1',{type:'open',openingCash:0});
+  result = await command(db,owner,tenant,result.revision,'line-enable-extend1',{type:'saveAutoExtensionSettings',enabled:true,menuId:'extend30'});
+  result = await command(db,owner,tenant,result.revision,'line-first-seat-tst1',{type:'seat',tableIds:['a1'],setId:'set60',guests:1,customer:'内部の顧客名'});
+  const first = result.state.tickets.at(-1);
+  await saveLineSettings(db,env,owner,tenant,{enabled:true,extension:true,lowStock:true});
+  await primeLineReminders(db,tenant,result);
+  result = await command(db,owner,tenant,result.revision,'line-second-seat-ts1',{type:'seat',tableIds:['a2'],setId:'set60',guests:1});
+  const second = result.state.tickets.at(-1);
+  result = await command(db,owner,tenant,result.revision,'line-pause-extended1',{type:'pauseVisitAutoExtension',ticketId:first.id,source:'manual'});
+  const soda = result.state.stock.find(({id})=>id === 'soda');
+  const adjustment = {type:'stockAdjust',stockId:'soda',quantity:soda.minimum - soda.quantity,reason:'内部の在庫理由'};
+  const before = result.revision;
+  result = await command(db,owner,tenant,before,'line-stock-crossing1',adjustment);
+  assert.equal((await command(db,owner,tenant,before,'line-stock-crossing1',adjustment)).revision,result.revision);
+  await dispatchLineJobs(db,env,{now:Date.now(),send});
+  assert.equal(events.length,1);
+  assert.match(events[0],/在庫が設定した下限/);
+  await dispatchLineJobs(db,env,{now:second.endsAt - 6 * 60_000,send});
+  assert.equal(events.length,1);
+  await Promise.all([
+    dispatchLineJobs(db,env,{now:second.endsAt - 4 * 60_000,send}),
+    dispatchLineJobs(db,env,{now:second.endsAt - 4 * 60_000,send}),
+  ]);
+  assert.equal(events.length,2);
+  assert.match(events[1],/自動延長の確認/);
+  assert.doesNotMatch(events.join(' '),/内部|A-01|A-02/);
+  const history = (await getLineSettings(db,env,owner,tenant)).history;
+  assert.equal(history.filter(({kind,status})=>kind === 'extension' && status === 'accepted').length,1);
+  assert.equal(history.filter(({kind,status})=>kind === 'extension' && status === 'cancelled').length,1);
+});
 
 test('optional AI guide scopes access, sends only fixed manual content and enforces an atomic store limit', async () => {
   const db = database();

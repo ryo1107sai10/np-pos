@@ -3,6 +3,7 @@
   "name": "np-pos-cloud",
   "main": "server/index.mjs",
   "compatibility_date": "2026-11-16",
+  "triggers": { "crons": ["* * * * *"] },
   "observability": {
     "enabled": true,
     "head_sampling_rate": 0.05,
