@@ -2,6 +2,12 @@
   width: min(565px, calc(100% - 26px));
 }
 
+.layout-transfer-dialog .modal-head,
+.layout-transfer-dialog .modal-foot { flex: none; }
+
+.layout-transfer-dialog .modal-head .icon-btn { width: 44px; height: 44px; }
+.layout-transfer-dialog .modal-foot .btn { min-height: 44px; }
+
 .layout-transfer-body {
   display: grid;
   min-width: 0;
@@ -206,6 +212,10 @@
 .layout-transfer-error { border-color: #edceda; color: #91334f; background: #fff3f7; }
 .layout-transfer-replace { color: #52607a; line-height: 1.5; }
 
+@media (pointer: coarse) {
+  .floor-heading-actions [data-action="layout-transfer"] { min-height: 44px; }
+}
+
 @media (max-width: 610px) {
   .layout-transfer-dialog[open] {
     position: fixed;
@@ -219,11 +229,10 @@
   }
   .layout-transfer-dialog > form { max-height: 91dvh; }
   .layout-transfer-dialog .modal-head,
-  .layout-transfer-dialog .modal-foot { flex: none; padding-inline: 12px; }
+  .layout-transfer-dialog .modal-foot { padding-inline: 12px; }
   .layout-transfer-dialog .modal-head h2 { min-width: 0; font-size: 16px; line-height: 1.4; }
   .layout-transfer-dialog .modal-body { padding: 12px; overflow-x: hidden; }
   .layout-transfer-dialog .modal-foot { padding-bottom: max(11px, env(safe-area-inset-bottom)); }
-  .layout-transfer-dialog .modal-foot .btn { min-height: 44px; }
   .layout-transfer-export,
   .layout-transfer-import { padding: 10px; }
   .layout-transfer-export { grid-template-columns: auto minmax(0, 1fr); }
