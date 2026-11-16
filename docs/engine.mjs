@@ -9,6 +9,26 @@ const japanDate = new Intl.DateTimeFormat('en-CA', {
 });
 const moneyFormatter = new Intl.NumberFormat('ja-JP');
 
+export const layoutGrid = Object.freeze({ columns: 12, rows: 8, tableWidth: 3, tableHeight: 2 });
+
+function isLayoutPosition(x, y) {
+  return Number.isInteger(x) && x >= 0 && x + layoutGrid.tableWidth <= layoutGrid.columns
+    && Number.isInteger(y) && y >= 0 && y + layoutGrid.tableHeight <= layoutGrid.rows;
+}
+
+export function getLayoutTables(state) {
+  const countByArea = new Map();
+  const columnStep = layoutGrid.tableWidth + 1;
+  const rowStep = layoutGrid.tableHeight + 1;
+  const tablesPerRow = Math.floor(layoutGrid.columns / columnStep);
+  return state.tables.map((table) => {
+    const index = countByArea.get(table.area) ?? 0;
+    countByArea.set(table.area, index + 1);
+    if (isLayoutPosition(table.x, table.y)) return { ...table };
+    return { ...table, x: (index % tablesPerRow) * columnStep, y: Math.floor(index / tablesPerRow) * rowStep };
+  });
+}
+
 export function yen(amount) {
   return `¥${moneyFormatter.format(amount)}`;
 }
@@ -278,8 +298,40 @@ function doStockAdjust(state, action, now) {
   newStockMovement(state, stock, units / movementScale, 'adjust', reason, now);
 }
 
+function doSaveLayout(state, tables) {
+  assert(Array.isArray(tables) && tables.length === state.tables.length,
+    'すべての卓の配置を指定してください。');
+  const areas = new Set([...layoutAreas, ...state.tables.map((table) => table.area)]);
+  const tablesById = new Map(state.tables.map((table) => [table.id, table]));
+  const updatedById = new Map();
+  for (const placement of tables) {
+    const table = tablesById.get(placement?.id);
+    assert(table && !updatedById.has(table.id), '卓の指定が重複しているか、見つかりません。');
+    const { area, x, y, capacity } = placement;
+    assert(areas.has(area), `${table.name}のエリアを確認してください。`);
+    assert(isLayoutPosition(x, y), `${table.name}をフロアの範囲内に配置してください。`);
+    positiveInteger(capacity, `${table.name}の定員`);
+    for (const other of updatedById.values()) {
+      const overlaps = area === other.area && Math.abs(x - other.x) < layoutGrid.tableWidth
+        && Math.abs(y - other.y) < layoutGrid.tableHeight;
+      assert(!overlaps, `${table.name}と${other.name}の配置が重なっています。`);
+    }
+    updatedById.set(table.id, { ...table, area, x, y, capacity });
+  }
+  for (const ticket of state.tickets) {
+    if (!occupiedStatuses.has(ticket.status)) continue;
+    const capacity = ticket.tableIds.reduce((total, id) => total + updatedById.get(id).capacity, 0);
+    assert(capacity >= ticket.guests, `伝票 No. ${ticket.number} の利用人数より合計定員が少なくなります。`);
+  }
+  state.tables = state.tables.map((table) => updatedById.get(table.id));
+}
+
 export function apply(state, action, now = Date.now()) {
   const next = structuredClone(state);
+  if (action.type === 'saveLayout') {
+    doSaveLayout(next, action.tables);
+    return next;
+  }
   if (action.type === 'open') {
     doOpen(next, action, now);
     return next;
@@ -450,6 +502,7 @@ const rooms = [
   ['b', 'フロアB', [4, 6, 4, 2]],
   ['v', 'VIP', [8, 6]],
 ];
+export const layoutAreas = Object.freeze(rooms.map(([, area]) => area));
 const cast = [
   { id: 'cast1', name: '美月', initials: '美', color: 'violet' },
   { id: 'cast2', name: '凛', initials: '凛', color: 'rose' },

@@ -1,12 +1,14 @@
-import { apply, businessDate, createDemo, getTicketForTable, quote, summary, tableStatus, yen } from './engine.mjs';
+import { apply, businessDate, createDemo, getLayoutTables, getTicketForTable, layoutAreas, quote, summary, tableStatus, yen } from './engine.mjs';
 import { icon } from './icons.mjs';
 import { renderReport } from './reports.mjs';
+import { bindLayoutEditor, commitLayoutFields, floorLayoutStage, handleLayoutEditorAction, layoutAreaTabs, newLayoutDraft, renderLayoutEditor } from './floor-layout.mjs';
 
 const app = document.querySelector('#app');
 const dialog = document.querySelector('#dialog');
 const notifications = document.querySelector('#notifications');
 const storageKey = 'np-pos.demo.v1';
 const legacyStorageKey = 'lumi-pos.demo.v1';
+const floorViewStorageKey = 'np-pos.floor-view.v1';
 const pages = {
   floor: { title: 'ホール', icon: 'grid', help: '席を選んで、来店・注文・延長・会計を操作できます。' },
   commission: { title: '歩合・成績', icon: 'users', help: 'キャストごとの歩合を、確定額と見込額で確認できます。' },
@@ -26,6 +28,7 @@ let state = loadState();
 let page = readPage();
 let selected = state.tables.find((table) => getTicketForTable(state, table.id))?.id ?? null;
 let area = 'all';
+let { view: floorView, area: planArea } = loadFloorView();
 let filter = 'all';
 let mobileDetails = false;
 let modal = null;
@@ -52,6 +55,33 @@ function saveState(next) {
   state = next;
   try { localStorage.setItem(storageKey, JSON.stringify(state)); }
   catch { saveAvailable = false; }
+}
+
+function loadFloorView() {
+  try {
+    const preference = JSON.parse(localStorage.getItem(floorViewStorageKey));
+    if (preference?.view === 'plan' && layoutAreas.includes(preference.area)) return preference;
+  } catch { /* The list is available when storage is blocked. */ }
+  return { view: 'list', area: layoutAreas[0] };
+}
+
+function setFloorView(view, nextArea = planArea) {
+  floorView = view;
+  planArea = nextArea;
+  try { localStorage.setItem(floorViewStorageKey, JSON.stringify({ view, area: planArea })); }
+  catch { /* The current view remains available in memory. */ }
+}
+
+function revealTable(id) {
+  selected = id;
+  const table = state.tables.find((entry) => entry.id === id);
+  if (floorView === 'plan' && table && layoutAreas.includes(table.area)) setFloorView('plan', table.area);
+}
+
+function selectVisibleTicket() {
+  if (!state.tables.some((table) => table.id === selected && table.area === planArea)) {
+    selected = state.tables.find((table) => table.area === planArea && getTicketForTable(state,table.id))?.id ?? null;
+  }
 }
 
 function readPage() {
@@ -132,17 +162,20 @@ function renderTable(table) {
   const status = tableStatus(state, table.id);
   const isSelected = table.id === selected;
   const name = escape(table.name);
-  return `<button type="button" class="seat seat-${status}${isSelected ? ' is-selected' : ''}" data-action="table" data-id="${escape(table.id)}" aria-pressed="${isSelected}" aria-label="${name} ${statuses[status]}${ticket?.tableIds.length > 1 ? ' 複数卓' : ''}">
+  return `<button type="button" class="seat seat-${status}${isSelected ? ' is-selected' : ''}" data-action="table" data-id="${escape(table.id)}" aria-pressed="${isSelected}" aria-label="${name} ${statuses[status]}${ticket?.tableIds.length > 1 ? ' 複数卓' : ''} 定員${table.capacity}名">
     <div class="seat-top"><span><span class="seat-name">${name}</span><span class="seat-area">${escape(table.area)}${ticket?.tableIds.length > 1 ? ` <span class="seat-linked">· ${ticket.tableIds.length}卓共有</span>` : ''}</span></span>${pill(status)}</div>
     <div class="seat-timer">${icon(ticket ? (status === 'paid' ? 'check' : 'clock') : 'plus',14)}${ticket ? status === 'paid' ? '退店待ち' : `<time data-ends="${ticket.endsAt}">${timer(ticket.endsAt)}</time>` : '来店登録'}</div>
-    <div class="seat-bottom"><span class="seat-guests">${icon('users',13)}${ticket ? ticket.tableIds.length > 1 ? `${ticket.guests}名` : `${ticket.guests}名` : `定員${table.capacity}名`}</span>
+    <div class="seat-bottom"><span class="seat-guests">${icon('users',13)}${ticket ? `${ticket.guests}名` : `定員${table.capacity}名`}</span>
     ${ticket ? `<span class="seat-price money">${yen(quote(state,ticket.id).total)}</span>` : `<span class="available-price">${icon('arrow-right',14)}</span>`}</div>
   </button>`;
 }
 
 function renderFloor() {
   const isOpen = state.day.status === 'open';
-  const range = state.tables.filter((table) => area === 'all' || area === table.area);
+  const showingPlan = floorView === 'plan';
+  const activeArea = showingPlan ? planArea : area;
+  const range = (showingPlan ? getLayoutTables(state) : state.tables)
+    .filter((table) => activeArea === 'all' || activeArea === table.area);
   const counts = { all: range.length, used: 0, available: 0, urgent: 0 };
   const visible = range.filter((table) => {
     const status = tableStatus(state, table.id);
@@ -150,12 +183,18 @@ function renderFloor() {
     if (status === 'soon' || status === 'overtime') counts.urgent++;
     return filter === 'all' || (filter === 'used' && status !== 'available') || filter === status || (filter === 'urgent' && ['soon','overtime'].includes(status));
   });
-  const areas = [...new Set(state.tables.map((table) => table.area))];
+  const viewSwitch = `<div class="floor-view-switch" role="group" aria-label="ホールの表示形式">
+    <button type="button" data-action="floor-view" data-id="list" aria-pressed="${!showingPlan}">一覧</button>
+    <button type="button" data-action="floor-view" data-id="plan" aria-pressed="${showingPlan}">レイアウト</button></div>`;
+  const areaPicker = showingPlan ? layoutAreaTabs(planArea, 'layout-view-area', escape)
+    : `<label class="area-filter" title="エリア">${icon('filter', 16)}<select id="area-filter" aria-label="エリアで絞り込む"><option value="all">全エリア</option>${layoutAreas.map((name) => `<option ${area === name ? 'selected' : ''}>${escape(name)}</option>`).join('')}</select></label>`;
+  const floorContent = showingPlan ? floorLayoutStage(visible, planArea, { renderSeat: renderTable, escape })
+    : `<div class="table-grid">${visible.length ? visible.map(renderTable).join('') : '<p class="empty-grid">該当する卓はありません。</p>'}</div>`;
   return `${!isOpen ? `<div class="notice"><span>${icon('info',17)}開店すると、空席から来店を登録できます。</span></div>` : ''}${renderMetrics()}
     <div class="floor-layout">
-      <section class="floor" aria-labelledby="floor-title"><div class="floor-heading"><h2 id="floor-title">${icon('grid',17)}座席一覧</h2></div>
-      <div class="seating-toolbar glass"><div class="seg" role="group" aria-label="卓の状態で絞り込む">${[['all','すべて'],['used','使用中'],['available','空席'],['urgent','要対応']].map(([key,text])=>`<button type="button" data-action="filter" data-id="${key}" aria-pressed="${key===filter}">${text}<small>${counts[key]}</small></button>`).join('')}</div><label class="area-filter" title="エリア">${icon('filter', 16)}<select id="area-filter" aria-label="エリアで絞り込む"><option value="all">全エリア</option>${areas.map((name) => `<option ${area === name ? 'selected' : ''}>${escape(name)}</option>`).join('')}</select></label></div>
-      <div class="table-grid">${visible.length ? visible.map(renderTable).join('') : '<p class="empty-grid">該当する卓はありません。</p>'}</div></section>
+      <section class="floor" aria-labelledby="floor-title"><div class="floor-heading"><h2 id="floor-title">${icon('grid',17)}${showingPlan ? '店内レイアウト' : '座席一覧'}</h2><div class="floor-heading-actions">${viewSwitch}${button('レイアウト編集', 'edit-layout', { glyph: 'move' })}</div></div>
+      <div class="seating-toolbar glass${showingPlan ? ' seating-plan-toolbar' : ''}"><div class="seg" role="group" aria-label="卓の状態で絞り込む">${[['all','すべて'],['used','使用中'],['available','空席'],['urgent','要対応']].map(([key,text])=>`<button type="button" data-action="filter" data-id="${key}" aria-pressed="${key===filter}">${text}<small>${counts[key]}</small></button>`).join('')}</div>${areaPicker}</div>
+      ${floorContent}</section>
       ${mobileDetails ? `<button type="button" class="detail-shade" data-action="hide-detail" aria-hidden="true" tabindex="-1"></button>` : ''}${renderDetail()}
     </div>`;
 }
@@ -284,8 +323,11 @@ function paintDialog() {
   const q = ticket ? quote(state,id) : null;
   const headline = ticket ? `<div class="modal-context">${icon('table',16)}<strong>${escape(titles(ticket))}</strong><span>${ticket.guests}名${ticket.customer ? ` · ${escape(ticket.customer)}` : ''}</span></div>` : '';
   switch (modal.type) {
+    case 'edit-layout':
+      present('ホールのレイアウト編集', renderLayoutEditor(modal.layout, escape), 'レイアウトを保存', { style: 'modal-layout' });
+      return;
     case 'demo':
-      present('サンプル操作',`<p class="form-copy">開店前から操作するか、進行中の伝票が入ったホールを確認できます。選ぶと、このブラウザーの操作履歴を初期化します。</p><div class="demo-options">${button('開店から試す','demo-start',{glyph:'power',tone:'primary'})}${button('営業中のサンプルを読み込む','demo-live',{glyph:'refresh'})}</div>`,null);
+      present('サンプル操作',`<p class="form-copy">開店から試すと、現在の卓配置で営業をやり直せます。営業中のサンプルを読み込むと、配置と操作履歴がサンプルの初期状態に戻ります。</p><div class="demo-options">${button('開店から試す','demo-start',{glyph:'power',tone:'primary'})}${button('営業中のサンプルを読み込む','demo-live',{glyph:'refresh'})}</div>`,null);
       return;
     case 'open': {
       const current = businessDate();
@@ -408,7 +450,7 @@ function openTicket(id) {
   if (!ticket) return;
   if (['departed','void'].includes(ticket.status)) { openDialog('receipt',{ticketId:id}); return; }
   if (dialog.open) dialog.close();
-  selected = ticket.tableIds[0];
+  revealTable(ticket.tableIds[0]);
   mobileDetails = true;
   go('floor');
 }
@@ -426,6 +468,28 @@ function clickAction(target) {
   const {action,id} = target.dataset;
   if (action === 'navigate') { mobileDetails = false; go(id); return; }
   if (action === 'filter') { filter=id; render({preserveFocus:true}); return; }
+  if (action === 'floor-view') {
+    const nextArea = area !== 'all' && layoutAreas.includes(area) ? area : planArea;
+    setFloorView(id, nextArea);
+    if (id === 'plan') selectVisibleTicket();
+    render({preserveFocus:true});
+    return;
+  }
+  if (action === 'layout-view-area') {
+    setFloorView('plan', id);
+    selectVisibleTicket();
+    render({preserveFocus:true});
+    return;
+  }
+  if (action === 'edit-layout') {
+    const preferredArea = floorView === 'plan' ? planArea : area;
+    openDialog(action, { layout: newLayoutDraft(state, preferredArea, selected) });
+    return;
+  }
+  if (action.startsWith('layout-editor-') && modal?.layout) {
+    handleLayoutEditorAction(dialog, modal.layout, target, escape);
+    return;
+  }
   if (action === 'hide-detail') { mobileDetails=false; render(); return; }
   if (action === 'dismiss') { dialog.close(); return; }
   if (action === 'open-ticket') { openTicket(id); return; }
@@ -441,9 +505,14 @@ function clickAction(target) {
   }
   if (['demo','open','seat','close'].includes(action)) {openDialog(action); return;}
   if (action === 'demo-start' || action === 'demo-live') {
-    saveState(createDemo(action==='demo-start'?'closed':'live'));
-    selected = action==='demo-live'?'a1':null;
-    area='all'; filter='all'; mobileDetails=false; go('floor');
+    const fromOpening = action === 'demo-start';
+    const sample = createDemo(fromOpening ? 'closed' : 'live');
+    if (fromOpening) sample.tables = structuredClone(state.tables);
+    saveState(sample);
+    selected = fromOpening ? null : 'a1';
+    area='all'; filter='all'; mobileDetails=false;
+    if (!fromOpening) setFloorView('list', layoutAreas[0]);
+    go('floor');
     if (action==='demo-start') openDialog('open');
     else { dialog.close(); toast('営業中のサンプルを読み込みました。'); }
     return;
@@ -493,18 +562,27 @@ function submitDialog(form) {
   const numeric = (key) => Number(value(key));
   const id = modal.ticketId;
   switch(modal.type) {
+    case 'edit-layout': {
+      const layout = modal.layout;
+      if (!commitLayoutFields(dialog, layout).ok) return;
+      commit({type:'saveLayout',tables:layout.tables},'卓のレイアウトを保存しました。',()=>{
+        setFloorView('plan', layout.area);
+        filter='all'; mobileDetails=false; selectVisibleTicket();
+      });
+      break;
+    }
     case 'open':
       commit({type:'open',date:value('date'),openingCash:numeric('openingCash')},'開店しました。空席から来店を登録できます。');
       break;
     case 'seat': {
       const selectedIds=data.getAll('tableIds');
       const tableIds=modal.tableId ? [modal.tableId,...selectedIds] : selectedIds;
-      commit({type:'seat',tableIds,guests:numeric('guests'),customer:value('customer'),setId:value('setId')},'来店を登録しました。',()=>{selected=tableIds[0]; area='all';filter='all';mobileDetails=true;});
+      commit({type:'seat',tableIds,guests:numeric('guests'),customer:value('customer'),setId:value('setId')},'来店を登録しました。',()=>{revealTable(tableIds[0]); area='all';filter='all';mobileDetails=true;});
       break;
     }
     case 'move': {
       const tableIds=data.getAll('tableIds');
-      commit({type:'move',ticketId:id,tableIds},'使用卓を変更しました。',()=>{if (!tableIds.includes(selected)) selected=tableIds[0]; area='all';filter='all';});
+      commit({type:'move',ticketId:id,tableIds},'使用卓を変更しました。',()=>{if (!tableIds.includes(selected)) revealTable(tableIds[0]); area='all';filter='all';});
       break;
     }
     case 'order':
@@ -541,6 +619,8 @@ function submitDialog(form) {
       break;
   }
 }
+
+bindLayoutEditor(dialog, () => modal?.layout, escape);
 
 document.addEventListener('click',(event)=> {
   const target=event.target.closest?.('[data-action]');

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createDemo, apply, quote, summary, getTicketForTable, tableStatus, businessDate } from '../docs/engine.mjs';
+import { createDemo, apply, quote, summary, getTicketForTable, tableStatus, businessDate, getLayoutTables, layoutGrid } from '../docs/engine.mjs';
 
 const now = Date.parse('2026-11-16T14:41:00Z');
 const minutes = (count) => count * 60_000;
@@ -113,4 +113,70 @@ test('rounds consumption tax once per rate and conserves weighted allocation', (
 test('uses Tokyo cutover at six in the morning', () => {
   assert.equal(businessDate(Date.parse('2026-11-16T20:59:59Z')), '2026-11-16');
   assert.equal(businessDate(Date.parse('2026-11-16T21:00:00Z')), '2026-11-17');
+});
+
+function saveLayout(state, changes = {}) {
+  const tables = getLayoutTables(state).map((table) => ({ ...table, ...changes[table.id] }));
+  return apply(state, { type: 'saveLayout', tables }, now);
+}
+
+test('legacy table positions are deterministic and persist on saving', () => {
+  const state = createDemo('closed', now);
+  assert.deepEqual(layoutGrid, { columns: 12, rows: 8, tableWidth: 3, tableHeight: 2 });
+  const positions = getLayoutTables(state).map(({ id, x, y }) => [id, x, y]);
+  assert.deepEqual(positions.slice(0, 7), [
+    ['a1', 0, 0], ['a2', 4, 0], ['a3', 8, 0], ['a4', 0, 3], ['a5', 4, 3], ['a6', 8, 3], ['b1', 0, 0],
+  ]);
+  assert.equal(state.tables[0].x, undefined);
+  assert.deepEqual(saveLayout(state).tables, getLayoutTables(state));
+});
+
+test('layout rejects overlaps, bad coordinates, invalid areas, invalid capacity and missing or duplicate table IDs', () => {
+  const state = createDemo('closed', now);
+  assert.throws(() => saveLayout(state, { a2: { x: 2 } }), /重なっ/);
+  assert.doesNotThrow(() => saveLayout(state, { a2: { x: 3 } }));
+  for (const x of [-1, 10, 2.5, NaN, Infinity, '0']) {
+    assert.throws(() => saveLayout(state, { a1: { x } }), /範囲内/);
+  }
+  assert.throws(() => saveLayout(state, { a1: { y: 7 } }), /範囲内/);
+  assert.doesNotThrow(() => saveLayout(state, { a1: { x: 9, y: 6 } }));
+  assert.throws(() => saveLayout(state, { a1: { area: '未登録' } }), /エリア/);
+  assert.throws(() => saveLayout(state, { a1: { capacity: 0 } }), /定員/);
+  assert.throws(() => saveLayout(state, { a1: { capacity: 101 } }), /定員/);
+  assert.throws(() => apply(state, { type: 'saveLayout', tables: getLayoutTables(state).slice(1) }, now), /すべて/);
+  assert.throws(() => saveLayout(state, { a1: { id: 'a2' } }), /重複/);
+  assert.equal(state.tables[1].x, undefined);
+});
+
+test('editing an occupied seat preserves the attached ticket and inventory', () => {
+  const state = createDemo('live', now);
+  const next = saveLayout(state, { a1: { area: 'フロアB', x: 4, y: 3 } });
+  assert.equal(next.tables.find(({ id }) => id === 'a1').area, 'フロアB');
+  assert.equal(next.tables.find(({ id }) => id === 'a1').name, 'A-01');
+  assert.deepEqual(next.tickets, state.tickets);
+  assert.deepEqual(next.stock, state.stock);
+  assert.deepEqual(next.day, state.day);
+  assert.equal(ticketAt(next).id, ticketAt(state).id);
+  assert.equal(tableStatus(next, 'a1', now), 'active');
+});
+
+test('combined capacity protects open and paid tickets until departure', () => {
+  let state = seatSample(openSample(), ['a1', 'a2'], 6);
+  assert.throws(() => saveLayout(state, { a1: { capacity: 2 }, a2: { capacity: 3 } }), /利用人数/);
+  state = saveLayout(state, { a1: { capacity: 3 }, a2: { capacity: 3 } });
+  const ticketId = ticketAt(state).id;
+  state = apply(state, { type: 'settle', ticketId, payments: [{ method: 'cash', amount: quote(state, ticketId).remaining }] }, now);
+  assert.throws(() => saveLayout(state, { a2: { capacity: 2 } }), /利用人数/);
+  state = apply(state, { type: 'depart', ticketId }, now);
+  assert.equal(saveLayout(state, { a2: { capacity: 2 } }).tables[1].capacity, 2);
+});
+
+test('layout saves while closed and remains through opening and closing', () => {
+  let state = saveLayout(createDemo('closed', now), { a1: { y: 6, capacity: 8 } });
+  assert.equal(state.day.status, 'closed');
+  const layout = getLayoutTables(state);
+  state = apply(state, { type: 'open', openingCash: 20_000 }, now);
+  state = apply(state, { type: 'close', actualCash: 20_000 }, now);
+  assert.equal(state.day.status, 'closed');
+  assert.deepEqual(getLayoutTables(state), layout);
 });
