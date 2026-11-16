@@ -10,6 +10,8 @@ const japanDate = new Intl.DateTimeFormat('en-CA', {
 const moneyFormatter = new Intl.NumberFormat('ja-JP');
 
 export const layoutGrid = Object.freeze({ columns: 12, rows: 8, tableWidth: 3, tableHeight: 2 });
+const layoutNameMaxLength = 24;
+const newTableId = /^table-[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 
 function isLayoutPosition(x, y) {
   return Number.isInteger(x) && x >= 0 && x + layoutGrid.tableWidth <= layoutGrid.columns
@@ -27,6 +29,16 @@ export function getLayoutTables(state) {
     if (isLayoutPosition(table.x, table.y)) return { ...table };
     return { ...table, x: (index % tablesPerRow) * columnStep, y: Math.floor(index / tablesPerRow) * rowStep };
   });
+}
+
+export function getLayoutAreas(state) {
+  return state.layoutAreas?.slice() ?? [...new Set([...layoutAreas, ...state.tables.map((table) => table.area)])];
+}
+
+export function getTableLabel(state, id) {
+  return state.tables.find((table) => table.id === id)?.name
+    ?? state.archivedTables?.find((table) => table.id === id)?.name
+    ?? id;
 }
 
 export function yen(amount) {
@@ -298,38 +310,82 @@ function doStockAdjust(state, action, now) {
   newStockMovement(state, stock, units / movementScale, 'adjust', reason, now);
 }
 
-function doSaveLayout(state, tables) {
-  assert(Array.isArray(tables) && tables.length === state.tables.length,
+function layoutName(value, label) {
+  const name = typeof value === 'string' ? value.trim().normalize('NFC') : '';
+  assert(name.length > 0 && name.length <= layoutNameMaxLength && !/[\p{Cc}\u2028\u2029]/u.test(name),
+    `${label}は1〜${layoutNameMaxLength}文字で入力してください。`);
+  return name;
+}
+
+function layoutNameKey(name) {
+  return name.normalize('NFKC').toLowerCase();
+}
+
+function doSaveLayout(state, { areas, tables }) {
+  const legacySave = areas === undefined;
+  assert(Array.isArray(tables) && (!legacySave || tables.length === state.tables.length),
     'すべての卓の配置を指定してください。');
-  const areas = new Set([...layoutAreas, ...state.tables.map((table) => table.area)]);
-  const tablesById = new Map(state.tables.map((table) => [table.id, table]));
+  const areaList = legacySave ? getLayoutAreas(state) : areas;
+  assert(Array.isArray(areaList) && areaList.length > 0, 'エリアを1つ以上指定してください。');
+  const areasByKey = new Map();
+  for (const entry of areaList) {
+    const area = layoutName(entry, 'エリア名');
+    const key = layoutNameKey(area);
+    assert(!areasByKey.has(key), `エリア名「${area}」が重複しています。`);
+    areasByKey.set(key, area);
+  }
+
+  const existing = getLayoutTables(state);
+  const tablesById = new Map(existing.map((table) => [table.id, table]));
+  const archive = state.archivedTables ?? [];
+  const archivedIds = new Set(archive.map((table) => table.id));
   const updatedById = new Map();
+  const namesByArea = new Map();
   for (const placement of tables) {
-    const table = tablesById.get(placement?.id);
-    assert(table && !updatedById.has(table.id), '卓の指定が重複しているか、見つかりません。');
-    const { area, x, y, capacity } = placement;
-    assert(areas.has(area), `${table.name}のエリアを確認してください。`);
-    assert(isLayoutPosition(x, y), `${table.name}をフロアの範囲内に配置してください。`);
-    positiveInteger(capacity, `${table.name}の定員`);
+    const id = placement?.id;
+    const current = tablesById.get(id);
+    assert(!updatedById.has(id), '卓の指定が重複しています。');
+    assert(current || (!legacySave && typeof id === 'string' && newTableId.test(id) && !archivedIds.has(id)),
+      '卓IDが無効か、削除済みです。');
+    const { x, y, capacity } = placement;
+    const name = layoutName(placement.name === undefined ? current?.name : placement.name, '卓名');
+    const area = areasByKey.get(layoutNameKey(layoutName(placement.area, 'エリア名')));
+    assert(area, `${name}のエリアを確認してください。`);
+    assert(isLayoutPosition(x, y), `${name}をフロアの範囲内に配置してください。`);
+    positiveInteger(capacity, `${name}の定員`);
+    const names = namesByArea.get(area) ?? new Set();
+    const nameKey = layoutNameKey(name);
+    assert(!names.has(nameKey), `${area}の卓名「${name}」が重複しています。`);
+    names.add(nameKey);
+    namesByArea.set(area, names);
     for (const other of updatedById.values()) {
       const overlaps = area === other.area && Math.abs(x - other.x) < layoutGrid.tableWidth
         && Math.abs(y - other.y) < layoutGrid.tableHeight;
-      assert(!overlaps, `${table.name}と${other.name}の配置が重なっています。`);
+      assert(!overlaps, `${name}と${other.name}の配置が重なっています。`);
     }
-    updatedById.set(table.id, { ...table, area, x, y, capacity });
+    updatedById.set(id, { ...current, id, name, area, x, y, capacity });
   }
   for (const ticket of state.tickets) {
     if (!occupiedStatuses.has(ticket.status)) continue;
-    const capacity = ticket.tableIds.reduce((total, id) => total + updatedById.get(id).capacity, 0);
+    let capacity = 0;
+    for (const id of ticket.tableIds) {
+      const table = updatedById.get(id);
+      assert(table, `${getTableLabel(state, id)}は使用中か退店待ちのため削除できません。`);
+      capacity += table.capacity;
+    }
     assert(capacity >= ticket.guests, `伝票 No. ${ticket.number} の利用人数より合計定員が少なくなります。`);
   }
-  state.tables = state.tables.map((table) => updatedById.get(table.id));
+
+  state.layoutAreas = [...areasByKey.values()];
+  state.archivedTables = [...archive, ...existing.filter((table) => !updatedById.has(table.id))];
+  state.tables = [...existing.map((table) => updatedById.get(table.id)).filter(Boolean),
+    ...[...updatedById.values()].filter((table) => !tablesById.has(table.id))];
 }
 
 export function apply(state, action, now = Date.now()) {
   const next = structuredClone(state);
   if (action.type === 'saveLayout') {
-    doSaveLayout(next, action.tables);
+    doSaveLayout(next, action);
     return next;
   }
   if (action.type === 'open') {

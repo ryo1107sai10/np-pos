@@ -76,6 +76,19 @@
   scrollbar-width: thin;
 }
 
+.layout-areas .layout-area-button {
+  flex: 0 0 auto;
+  min-width: 0;
+  max-width: 136px;
+}
+
+.layout-area-button > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .layout-areas button[aria-pressed="true"],
 .layout-areas button[aria-selected="true"],
 .layout-areas button.is-selected,
@@ -124,6 +137,44 @@
   font-size: 11px;
   line-height: 1.5;
 }
+
+.layout-controls {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+  padding: 12px 14px 0;
+}
+
+.layout-controls > .layout-toolbar {
+  margin: 0;
+}
+
+.layout-toolbar-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  min-width: 0;
+  gap: 6px;
+}
+
+.layout-toolbar-actions .btn {
+  min-height: 36px;
+  padding: 5px 8px;
+}
+
+.layout-area-editor {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 8px 12px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid #e4ddf4;
+  border-radius: 11px;
+  background: #f8f5fd;
+}
+
+.layout-area-editor .field > input { background: #fff; }
 
 .layout-editor-main {
   display: grid;
@@ -191,10 +242,22 @@
 }
 
 .layout-tile .seat-name {
-  display: inline-block;
+  display: block;
   font-size: 16px;
   line-height: 1.12;
   letter-spacing: -.027em;
+}
+
+.layout-tile .seat-top > span:first-child,
+.table-grid .seat-top > span:first-child { min-width: 0; }
+
+.layout-tile .seat-name,
+.table-grid .seat-name {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .layout-tile .seat-area:not(:has(.seat-linked)) { display: none; }
@@ -293,7 +356,9 @@
 
 .layout-tile-label {
   max-width: 100%;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 17px;
   line-height: 1.15;
   font-weight: 740;
@@ -307,6 +372,21 @@
   font-size: 11px;
   line-height: 1.2;
   color: #596784;
+}
+
+.layout-tile-status,
+.layout-lock-chip {
+  flex: none;
+  align-self: start;
+  padding: 2px 6px;
+  border: 1px solid #dce2ee;
+  border-radius: 999px;
+  color: #54627e;
+  background: #f0f4fa;
+  font-size: 10px;
+  font-weight: 620;
+  line-height: 1.25;
+  white-space: nowrap;
 }
 
 .layout-inspector {
@@ -340,6 +420,31 @@
 }
 
 .layout-selected strong { font-weight: 720; }
+.layout-selected h3 { min-width: 0; overflow-wrap: anywhere; }
+
+.layout-delete {
+  display: grid;
+  gap: 6px;
+  padding-top: 9px;
+  border-top: 1px solid #e5e8f1;
+}
+
+.layout-delete p {
+  margin: 0;
+  color: #576581;
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.layout-delete .btn { min-height: 35px; }
+
+.layout-delete-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+}
 
 .layout-position {
   display: grid;
@@ -410,10 +515,16 @@
   .floor-view-switch button, .layout-areas button { min-height: 38px; padding-inline: 8px; }
   .layout-editor-head { padding: 10px 11px; flex-wrap: wrap; }
   .layout-editor-head h2, .layout-editor-head h3 { font-size: 15px; }
+  .layout-controls { padding-inline: 9px; }
+  .layout-editor .layout-toolbar { display: grid; justify-content: stretch; }
+  .layout-toolbar-actions .btn { min-height: 42px; }
+  .layout-area-editor { grid-template-columns: minmax(0, 1fr); padding: 8px; }
+  .layout-area-editor .field > input, .layout-inspector .field > input { font-size: 16px; }
   .layout-editor-main { padding: 9px; gap: 9px; }
   .layout-stage-scroll { border-radius: 12px; }
   .layout-inspector { padding: 10px; }
   .layout-position input { min-height: 44px; font-size: 16px; }
+  .layout-delete .btn { min-height: 44px; }
 }
 
 .modal-layout { width: min(1080px, calc(100% - 26px)); }

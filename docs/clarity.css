@@ -231,3 +231,8 @@ body {
   .sidebar,.workspace-top,.glass,.detail-shade,.modal::backdrop { backdrop-filter: none; }
   .sidebar,.workspace-top,.glass { background: #fcfcff; }
 }
+
+.seat-top > span:first-child { min-width: 0; }
+.seat .seat-name, .seat .seat-area { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.layout-stage .layout-tile .seat-name { display: block; }
+.detail-title h3, .choice strong, .choice small { min-width: 0; overflow-wrap: anywhere; }

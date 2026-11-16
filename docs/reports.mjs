@@ -1,3 +1,5 @@
+import { getTableLabel } from './engine.mjs';
+
 const formatDay = new Intl.DateTimeFormat('ja-JP', {
   month: 'short', day: 'numeric', weekday: 'short', timeZone: 'Asia/Tokyo',
 });
@@ -161,7 +163,7 @@ function renderDaily(state, api, result) {
   if (currentClose) cashRows.push(['レジ実残高', currentClose.actualCash], ['差額', currentClose.discrepancy]);
   const receiptRows = settled.slice().sort((a, b) => asNumber(b.settledAt) - asNumber(a.settledAt)).map((ticket) => {
     const amount = typeof api.quote === 'function' ? api.quote(state, ticket.id).total : 0;
-    const seats = ticket.tableIds.map((id) => state.tables.find((item) => item.id === id)?.name || id).join('・');
+    const seats = ticket.tableIds.map((id) => getTableLabel(state, id)).join('・');
     return `<tr><td>${ticketLink(ticket, api)}</td><td>${escape(seats)}</td><td class="lr-muted">${timeLabel(ticket.settledAt)}</td>
       <td class="lr-numeric"><strong>${yen(amount)}</strong></td></tr>`;
   });

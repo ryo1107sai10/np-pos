@@ -23,6 +23,7 @@ const paths = {
   filter: '<path d="M3 6h18M7 12h10m-7 6h4"/>',
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5m0-8h.01"/>',
   alert: '<path d="M10.3 4a2 2 0 0 1 3.4 0l7.5 13a2 2 0 0 1-1.7 3H4.5a2 2 0 0 1-1.7-3l7.5-13ZM12 9v4m0 3h.01"/>',
+  edit: '<path d="m14 5 5 5M4 20l4.5-1 11-11a2.2 2.2 0 0 0 0-3.1l-1.4-1.4a2.2 2.2 0 0 0-3.1 0l-11 11L4 20Z"/>',
   more: '<path d="M5 12h.01m7 0h.01m7 0h.01" stroke-width="3"/>',
   x: '<path d="m6 6 12 12M6 18 18 6"/>',
   check: '<path d="m5 12 4 4L19 6"/>',

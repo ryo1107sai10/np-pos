@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createDemo, apply, quote, summary, getTicketForTable, tableStatus, businessDate, getLayoutTables, layoutGrid } from '../docs/engine.mjs';
+import { createDemo, apply, quote, summary, getTicketForTable, tableStatus, businessDate,
+  getLayoutTables, getLayoutAreas, getTableLabel, layoutGrid } from '../docs/engine.mjs';
 
 const now = Date.parse('2026-11-16T14:41:00Z');
 const minutes = (count) => count * 60_000;
@@ -179,4 +180,93 @@ test('layout saves while closed and remains through opening and closing', () => 
   state = apply(state, { type: 'close', actualCash: 20_000 }, now);
   assert.equal(state.day.status, 'closed');
   assert.deepEqual(getLayoutTables(state), layout);
+});
+
+const newTable = { id: 'table-12345678-1234-4123-8123-123456789abc', name: ' 新卓 ',
+  area: 'テラス', x: 0, y: 0, capacity: 4 };
+
+function saveConfiguration(state, { areas = getLayoutAreas(state), tables = getLayoutTables(state) } = {}) {
+  return apply(state, { type: 'saveLayout', areas, tables }, now);
+}
+
+test('configured areas include empty groups and old states retain their existing groups', () => {
+  const state = createDemo('closed', now);
+  assert.deepEqual(getLayoutAreas(state), ['フロアA', 'フロアB', 'VIP']);
+  const legacy = { ...state, tables: [...state.tables, { id: 'terrace1', area: 'テラス' }] };
+  assert.deepEqual(getLayoutAreas(legacy), ['フロアA', 'フロアB', 'VIP', 'テラス']);
+  const areas = [...getLayoutAreas(state), ' テラス '];
+  const next = saveConfiguration(state, { areas });
+  assert.deepEqual(getLayoutAreas(next), ['フロアA', 'フロアB', 'VIP', 'テラス']);
+  assert.ok(next.tables.every(({ area }) => area !== 'テラス'));
+  const afterOpen = apply(next, { type: 'open', openingCash: 20_000 }, now);
+  assert.deepEqual(getLayoutAreas(afterOpen), getLayoutAreas(next));
+  const tables = getLayoutTables(afterOpen).map(({ name, ...table }) => table);
+  const legacySave = apply(afterOpen, { type: 'saveLayout', tables }, now);
+  assert.deepEqual(legacySave.tables, afterOpen.tables);
+  assert.deepEqual(getLayoutAreas(legacySave), getLayoutAreas(afterOpen));
+});
+
+test('tables can be added, renamed and archived without changing transactions or inventory', () => {
+  const state = createDemo('live', now);
+  state.tables[0].notes = '入口側';
+  const past = state.tickets.find(({ status }) => status === 'departed');
+  const areas = [...getLayoutAreas(state), 'テラス'];
+  const tables = getLayoutTables(state).filter(({ id }) => id !== 'b4')
+    .map((table) => table.id === 'a1' ? { ...table, name: ' 窓際 ' } : table);
+  const next = saveConfiguration(state, { areas, tables: [...tables, newTable] });
+  assert.equal(getTableLabel(next, 'a1'), '窓際');
+  assert.equal(next.tables[0].notes, '入口側');
+  assert.equal(getTableLabel(next, newTable.id), '新卓');
+  assert.equal(next.tables.some(({ id }) => id === 'b4'), false);
+  assert.equal(getTableLabel(next, past.tableIds[0]), 'B-04');
+  assert.deepEqual(next.archivedTables.map(({ id }) => id), ['b4']);
+  assert.deepEqual(next.tickets, state.tickets);
+  assert.deepEqual(next.stock, state.stock);
+  assert.deepEqual(next.movements, state.movements);
+  assert.deepEqual(next.day, state.day);
+  assert.equal(getTableLabel(next, 'unknown'), 'unknown');
+  const reopened = apply(next, { type: 'seat', tableIds: [newTable.id], guests: 2, setId: 'set60' }, now);
+  assert.equal(ticketAt(reopened, newTable.id).tableIds[0], newTable.id);
+});
+
+test('a linked table cannot be removed until it is released even if other tables have enough capacity', () => {
+  let state = seatSample(openSample(), ['a1', 'a2'], 2);
+  const ticketId = ticketAt(state).id;
+  const withoutSecond = getLayoutTables(state).filter(({ id }) => id !== 'a2');
+  assert.throws(() => saveConfiguration(state, { tables: withoutSecond }), /A-02.*削除できません/);
+  state = apply(state, { type: 'settle', ticketId, payments: [{ method: 'cash', amount: quote(state, ticketId).remaining }] }, now);
+  assert.throws(() => saveConfiguration(state, { tables: withoutSecond }), /A-02.*退店待ち/);
+  state = apply(state, { type: 'depart', ticketId }, now);
+  state = saveConfiguration(state, { tables: withoutSecond });
+  assert.equal(state.tables.some(({ id }) => id === 'a2'), false);
+  assert.equal(getTableLabel(state, 'a2'), 'A-02');
+  assert.deepEqual(state.tickets[0].tableIds, ['a1', 'a2']);
+});
+
+test('table identity checks reject malformed IDs, repeats and reinstatement of a removed table', () => {
+  const state = createDemo('closed', now);
+  const areas = [...getLayoutAreas(state), 'テラス'];
+  const tables = getLayoutTables(state);
+  assert.throws(() => saveConfiguration(state, { areas, tables: [...tables, { ...newTable, id: 'old-id' }] }), /卓ID/);
+  assert.throws(() => saveConfiguration(state, { areas, tables: [...tables, newTable, newTable] }), /重複/);
+  const created = saveConfiguration(state, { areas, tables: [...tables, newTable] });
+  const removed = saveConfiguration(created, { areas, tables });
+  assert.equal(getTableLabel(removed, newTable.id), '新卓');
+  assert.throws(() => saveConfiguration(removed, { areas, tables: [...tables, newTable] }), /削除済み/);
+});
+
+test('layout names are bounded and normalized for uniqueness within each area', () => {
+  const state = createDemo('closed', now);
+  const tables = getLayoutTables(state);
+  const rename = (id, name) => tables.map((table) => table.id === id ? { ...table, name } : table);
+  assert.throws(() => saveConfiguration(state, { areas: [] }), /1つ以上/);
+  assert.throws(() => saveConfiguration(state, { areas: [...getLayoutAreas(state), 'フロアＡ'] }), /エリア名.*重複/);
+  assert.throws(() => saveConfiguration(state, { tables: rename('a2', ' Ａ－０１ ') }), /卓名.*重複/);
+  assert.doesNotThrow(() => saveConfiguration(state, { tables: rename('b1', ' Ａ－０１ ') }));
+  for (const invalid of [' ', '卓'.repeat(25), '改\n行']) {
+    assert.throws(() => saveConfiguration(state, { tables: rename('a1', invalid) }), /卓名.*24/);
+  }
+  const japaneseName = 'カ\u3099ーデン';
+  const next = saveConfiguration(state, { tables: rename('a1', japaneseName) });
+  assert.equal(getTableLabel(next, 'a1'), 'ガーデン');
 });
