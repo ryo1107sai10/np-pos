@@ -9,6 +9,7 @@ import { isValidPrintDocument, normalizePrintSettings } from '../docs/print-doma
 import { normalizeAccountingCsv } from '../docs/accounting-csv.mjs';
 import { normalizeRegisterSettings } from '../docs/register-config.mjs';
 import { validateShiftsSnapshot } from '../docs/shifts.mjs';
+import { getCastDutyProjection, normalizeCastDutyMode } from '../docs/cast-duty.mjs';
 import { isValidInitialSetSchedule } from '../docs/set-schedule.mjs';
 import { getDailyPayByDate, isDailyPayCommand, isPayrollCommand, isPayrollMonth, normalizeAttendanceSnapshot, normalizePayrollSnapshot } from '../docs/payroll.mjs';
 import { getCastWorkspace, isCastSelfCommand, listCastAttendance, validateCastAttendanceSnapshot } from '../docs/cast-self.mjs';
@@ -382,6 +383,12 @@ export function projectState(state, role, actorUid, profileId) {
   if (role === 'cast') return getCastWorkspace(state,actorUid);
   if (role !== 'manager' && role !== 'staff') return null;
   const next = structuredClone(state);
+  if (role === 'staff' || !roleGroupAllowed(state,role,'staffing',profileId)) {
+    const canAssign = ['order','editTicketLine'].some((type) => roleCommands[role].has(type)
+      && roleAllowsCommand(state,role,{type},profileId));
+    const eligibility = canAssign ? getCastDutyProjection(state,Date.now()) : null;
+    if (eligibility) next.castDutyProjection = eligibility;
+  }
   delete next.auditLog;
   delete next.payroll;
   delete next.attendances;
@@ -781,6 +788,7 @@ export function validateSnapshot(state) {
     if (state.cashAccounts !== undefined) normalizeCashAccounts(state.cashAccounts);
     requireCondition(validCashAccountHistory(state),400,'invalid-snapshot','金庫と出金先の残高を確認してください。');
     validateShiftsSnapshot(state);
+    if (state.controls?.castDutyMode !== undefined) normalizeCastDutyMode(state.controls.castDutyMode);
     if (state.controls?.register !== undefined) normalizeRegisterSettings(state.controls.register);
     if (state.accountingCsv !== undefined) {
       requireCondition(isRecord(state.accountingCsv) && Object.keys(state.accountingCsv).every((mode) => ['daily','tickets'].includes(mode)),400,'invalid-snapshot',message);
@@ -810,6 +818,7 @@ export function validateSnapshot(state) {
   if (normalizedLabor !== undefined) migrated.staffLabor = normalizedLabor;
   if (migrated.castAttendance !== undefined) migrated.castAttendance = listCastAttendance(state);
   delete migrated.castAccounts;
+  delete migrated.castDutyProjection;
   delete migrated.dailyPayByDate;
   delete migrated.auditLog;
   delete migrated.floorMonthSales;

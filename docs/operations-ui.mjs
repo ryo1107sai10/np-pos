@@ -1,4 +1,5 @@
 import { getPersonalSalesDiscountMode, maxPersonalSalesAdjustment, personalSalesDiscountModes } from './personal-sales.mjs';
+import { castDutyModes } from './cast-duty.mjs';
 
 const timestamp = new Intl.DateTimeFormat('ja-JP', {
   timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit',
@@ -61,6 +62,7 @@ const valueLabels = {
   floor:'切り捨て',round:'四捨五入',ceil:'切り上げ',
   amount: '金額', total: '合計', subtotal: '小計', discount: '値引き額', status: '状態', payments: '支払い',
   deposits: '前受金', quantity: '数量', name: '名称', price: '単価', managerDiscountRateBps: '値引き上限',
+  castDutyMode:'注文の担当キャストの候補',
   discountRequest: '値引き申請', discountDetails: '適用した値引き', commission: '歩合', stockMovements: '在庫の増減',
   menu: 'メニュー・プラン', cast: 'キャスト', stock: '在庫品目', tables: '卓', areas: 'エリア', tableIds: '使用卓',
   changedFields: '変更項目', customerId: '顧客ID', customerName: '顧客名',
@@ -131,6 +133,7 @@ function visibleAuditFields(value) {
 
 function readableValue(value, key) {
   if (value == null) return value;
+  if (key === 'castDutyMode') return castDutyModes[value] ?? value;
   if (['startsAt','endsAt','arrivedAt','providedAt','cancelledAt'].includes(key) && Number.isFinite(new Date(value).getTime())) return timestamp.format(value);
   if (['managerDiscountRateBps','rateBps','dailyPayLimitBps','serviceRateBps','cardFeeRateBps','waivedFeeRate',
     'taxRate','originalTaxRate','lineDiscountRateBps'].includes(key)) return `${value / 100}%`;

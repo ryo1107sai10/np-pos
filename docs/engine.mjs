@@ -4,6 +4,7 @@ import { calculationTaxGroup, canApplyOrderLineDiscount, canExcludeOrderService,
 import { getOrderLineDiscountAmount, getTicketDiscountableSubtotal, isValidOrderLineDiscount } from './order-line-discount.mjs';
 import { getStoreSettings, normalizeStoreSettings, replaceStoreSettings } from './store-settings.mjs';
 import { buildOperationAudit } from './operational-audit.mjs';
+import { assertCastOnDuty, normalizeCastDutyMode } from './cast-duty.mjs';
 import { applyPayrollCommand, isPayrollCommand } from './payroll.mjs';
 import { applyStaffLaborCommand, isStaffLaborCommand } from './labor-workspace.mjs';
 import { applyCustomerCommand, customerForSeat, findCustomer, findSettledCustomerTicket, isAssignedCustomer, setTicketCompanion, setTicketCustomer } from './customers.mjs';
@@ -458,6 +459,7 @@ function addLine(state, ticket, menu, quantity, castIds, now,
   assert(Array.isArray(castIds) && new Set(castIds).size === castIds.length
     && castIds.every((id) => castById.has(id)), '歩合対象者を確認してください。');
   assert(!menu.requiresCast || castIds.length > 0, `${menu.name}の担当キャストを選択してください。`);
+  if (!includeHistoricalCast) assertCastOnDuty(state,castIds,now);
   const catalogTaxRate = menu.taxRate ?? defaultItemTaxRateBps;
   const line = {
     id: createId(state, 'line'), menuId: menu.id, name: menu.name, category: menu.category, quantity, price: menu.price,
@@ -482,7 +484,7 @@ function addLine(state, ticket, menu, quantity, castIds, now,
   return line;
 }
 
-export function editTicketLineSnapshot(state, line, { quantity, castIds = line.castIds, price = line.price }) {
+export function editTicketLineSnapshot(state, line, { quantity, castIds = line.castIds, price = line.price }, assignmentAt = line.createdAt) {
   positiveInteger(quantity, '数量');
   money(price, '単価');
   const currentMenu = state.menu.find(({ id }) => id === line.menuId);
@@ -492,6 +494,7 @@ export function editTicketLineSnapshot(state, line, { quantity, castIds = line.c
   const existing = new Map(line.castIds.map((id,index) => [id,index]));
   const people = new Map(state.cast.filter((person) => person.enabled !== false).map((person) => [person.id,person]));
   assert(castIds.every((id) => existing.has(id) || people.has(id)), '歩合対象者を確認してください。');
+  assertCastOnDuty(state,castIds,assignmentAt,line.castIds);
   return { ...line, ...(price > 0 && line.hideReceiptLine === true && {hideReceiptLine:false}), quantity, price, total:quantity * price, castIds:[...castIds],
     castNames:castIds.map((id) => line.castNames?.[existing.get(id)] ?? people.get(id)?.name
       ?? state.archivedCast?.find((person) => person.id === id)?.name ?? id),
@@ -549,7 +552,7 @@ function editLiveTicketLine(state, ticket, action, now, actor) {
   const line = ticket.lines[index];
   assert(line.category !== '延長', '延長の変更は一度取り消してから正しいプランを登録してください。');
   assert(line.category !== 'セット' || !action.castIds?.length, '初回セットには歩合対象者を指定できません。');
-  const updated = editTicketLineSnapshot(state,line,action);
+  const updated = editTicketLineSnapshot(state,line,action,now);
   if (action.taxRateOverride !== undefined) {
     assert(canOverrideOrderTax(state, actor.role), '明細の税率変更には店舗設定と管理者権限が必要です。');
     assert(action.taxRateOverride === null || isOrderTaxRateOverride(action.taxRateOverride), '明細の税率を確認してください。');
@@ -1479,6 +1482,7 @@ function reduce(state, action, now, actor) {
     const limit = action.managerDiscountRateBps;
     assert(Number.isInteger(limit) && limit >= 0 && limit <= 10_000, '値引き上限を0から100%の範囲で入力してください。');
     next.controls = { ...next.controls, managerDiscountRateBps: limit,
+      ...(action.castDutyMode !== undefined && {castDutyMode:normalizeCastDutyMode(action.castDutyMode)}),
       ...(action.register !== undefined && {register:normalizeRegisterSettings(action.register)}) };
     return next;
   }

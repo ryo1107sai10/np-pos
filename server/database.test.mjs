@@ -624,6 +624,43 @@ test('development engine rules execute server-side and only one conflicting seat
   assert.equal((await readState(db, owner, tenant, null)).revision, 2);
 });
 
+test('an exact checkout retry survives changed write permissions and honors current read access', async () => {
+  const db = database();
+  const storeId = await store(db);
+  await inviteMember(db,owner,storeId,helper.email,'manager');
+  await inviteMember(db,owner,storeId,outsider.email,'staff');
+  await listStores(db,helper);
+  await listStores(db,outsider);
+  const opened = await command(db,owner,storeId,0,'retry-policy-open-1',{type:'open',openingCash:0});
+  const cash = await command(db,owner,storeId,opened.revision,'retry-policy-cash-1',
+    {type:'recordCashMovement',kind:'deposit',amount:500,category:'float',reason:'再送検証の準備金'});
+  const seated = await command(db,owner,storeId,cash.revision,'retry-policy-seat-1',{type:'seat',tableIds:['a1'],setId:'set60',guests:1});
+  const ticketId = seated.state.tickets[0].id;
+  const amount = quote(seated.state,ticketId).total;
+  const checkout = {type:'settle',ticketId,payments:[{method:'cash',amount}]};
+  const requestId = 'retry-policy-checkout-1';
+  const committed = await command(db,helper,storeId,seated.revision,requestId,checkout);
+  assert.equal(committed.state.tickets[0].status,'paid');
+  assert.ok(committed.state.cashMovements?.length);
+  const profileId = 'role-' + crypto.randomUUID();
+  const changed = await command(db,owner,storeId,committed.revision,'retry-policy-custom-1',{
+    type:'saveRolePolicy',policy:{custom:{[profileId]:{base:'manager',label:'注文のみ',allowed:['addOrders']}}},
+  });
+  await changeMember(db,owner,storeId,helper.uid,profileId);
+  await assert.rejects(command(db,helper,storeId,changed.revision,'retry-policy-new-pay-1',checkout),{code:'forbidden'});
+  const acknowledged = await command(db,helper,storeId,seated.revision,requestId,checkout);
+  assert.equal(acknowledged.revision,changed.revision);
+  assert.equal(acknowledged.profileId,profileId);
+  assert.equal(acknowledged.state.cashMovements,undefined);
+  assert.equal(acknowledged.state.tickets[0].status,'paid');
+  assert.equal((await listAudit(db,owner,storeId)).events.filter(({action})=>action === 'settle').length,1);
+  await assert.rejects(command(db,helper,storeId,seated.revision,requestId,
+    {...checkout,payments:[{method:'cash',amount:amount+1}]}),{code:'operation-reused'});
+  await assert.rejects(command(db,outsider,storeId,seated.revision,requestId,checkout),{code:'operation-reused'});
+  await changeMember(db,owner,storeId,helper.uid);
+  await assert.rejects(command(db,helper,storeId,seated.revision,requestId,checkout),{code:'store-access'});
+});
+
 test('offline-safe envelope protects one-time migration and returns complete chunked data', async () => {
   const db = database();
   const tenant = await store(db);

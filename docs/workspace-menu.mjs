@@ -32,6 +32,8 @@ export function renderWorkspaceMenu({pages, page, ready, isOpen, hasTables, stor
     ...(showOverview ? [{group:'分析・レポート',title:'複数店舗の営業状況',glyph:'chart',action:'cloud-overview'}] : []),
     {group:'アカウント', title:'店舗グループ', glyph:'users', action:'cloud-groups'},
     {group:'アカウント', title:'店舗・アカウント', glyph:'user', action:'cloud-open'},
+    {group:'アカウント', title:'この端末の画面ロック', glyph:'settings', action:'device-lock-settings'},
+    {group:'アカウント', title:'今すぐ画面をロック', glyph:'clock', action:'device-lock-now'},
     ...(ready ? [{group:'アカウント', title:'操作ガイド', glyph:'ticket', action:'ops-guide'}] : []),
     ...(!cloud ? [{group:'アカウント', title:'サンプル操作', glyph:'refresh', action:'demo'}] : []),
     ...(!cloud ? [{group:'アカウント', title:'デモデータのバックアップ', glyph:'download', action:'demo-backup'}] : []),

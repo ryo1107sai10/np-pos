@@ -11,6 +11,7 @@ import { isCastAttendanceReview, linkedCastForActor } from './cast-self.mjs';
 import { getCalculationSettings } from './calculation-settings.mjs';
 import { getOrderLineDiscountAmount } from './order-line-discount.mjs';
 import { getEmployeeProfile } from './payroll-records.mjs';
+import { getCastDutyMode } from './cast-duty.mjs';
 
 const ticketActions = new Set([
   'discount', 'approveDiscount', 'rejectDiscount', 'settle', 'cancelSettlement', 'reopenTicket',
@@ -571,11 +572,14 @@ export function buildOperationAudit(before, after, action, at, actor) {
     const current = after.controls.managerDiscountRateBps;
     const registerBefore = before.controls?.register ?? null;
     const registerAfter = after.controls?.register ?? null;
-    if (previous !== current || !sameValue(registerBefore,registerAfter)) {
+    const castDutyBefore = getCastDutyMode(before);
+    const castDutyAfter = getCastDutyMode(after);
+    const castDutyChanged = castDutyBefore !== castDutyAfter;
+    if (previous !== current || !sameValue(registerBefore,registerAfter) || castDutyChanged) {
       details = {
-        target: target('settings', null, '営業と値引きの設定'),
-        before: { managerDiscountRateBps: previous,...(registerBefore && {register:registerBefore}) },
-        after: { managerDiscountRateBps: current,...(registerAfter && {register:registerAfter}) },
+        target: target('settings', null, '営業の運用設定'),
+        before: { managerDiscountRateBps: previous,...(registerBefore && {register:registerBefore}),...(castDutyChanged && {castDutyMode:castDutyBefore}) },
+        after: { managerDiscountRateBps: current,...(registerAfter && {register:registerAfter}),...(castDutyChanged && {castDutyMode:castDutyAfter}) },
         reason: '営業・レジ運用の設定を更新',
       };
     }

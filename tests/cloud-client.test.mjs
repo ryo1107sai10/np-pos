@@ -44,6 +44,11 @@ function service(t, { verified = true, role = 'admin', command, readState, proje
       auth.currentUser = null;
       watch?.(null);
     },
+    EmailAuthProvider: { credential: (email,password) => ({email,password}) },
+    reauthenticateWithCredential: async (user, {email,password}) => {
+      if (email !== user.email || password !== 'valid-password') throw Object.assign(new Error('Invalid credential'), {code:'auth/invalid-credential'});
+      return {user};
+    },
   };
   const client = createCloudClient(cloudConfig, {
     pollMs: 60_000,
@@ -109,6 +114,52 @@ test('verified membership and cloud state remain separate from an offline pendin
   assert.equal(client.snapshot.revision, 1);
   assert.equal(client.snapshot.pending, 0);
   assert.equal(calls.at(-1).payload.operationId, outcome.operationId);
+});
+
+test('duty mode requests an updated staff projection at a time boundary and requires live assignment confirmation', async (t) => {
+  const {client,calls,setOnline,setRevision} = service(t,{role:'staff'});
+  setRevision(1,{controls:{castDutyMode:'shifts'},castDutyProjection:{ids:['cast1'],refreshAt:Date.now() - 1}});
+  await client.start();
+  await client.enterStore('shop');
+  await client.retrySync();
+  assert.equal(calls.at(-1).query.has('since'),false);
+  setOnline(false);
+  const order = {type:'order',ticketId:'tab',items:[{menuId:'castDrink',quantity:1,castIds:['cast1']}]};
+  assert.throws(() => client.submit(order),{code:'offline-command'});
+  assert.equal(client.snapshot.pending,0);
+  const queued = await client.submit({...order,items:[{menuId:'highball',quantity:1,castIds:[]}]});
+  assert.equal(queued.queued,true);
+});
+
+test('device lock pauses authenticated workspace requests and preserves queued orders through account verification', async (t) => {
+  const {client, calls, setOnline} = service(t);
+  await client.setWorkspaceLocked(true);
+  await client.start();
+  assert.equal(client.snapshot.userVerified,true);
+  assert.equal(calls.length,0);
+  await assert.rejects(client.listStores(),{code:'device-locked'});
+  await client.setWorkspaceLocked(false);
+  await client.enterStore('shop');
+  setOnline(false);
+  const queued = await client.submit({type:'order',ticketId:'tab',items:[{menuId:'highball',quantity:1}]});
+  assert.equal(queued.queued,true);
+  await client.setWorkspaceLocked(true);
+  const previous = calls.length;
+  setOnline(true);
+  await assert.rejects(client.retrySync(),{code:'device-locked'});
+  await assert.rejects(client.clearQueue(),{code:'device-locked'});
+  await assert.rejects(client.verifyDeviceLockAccount('another',{method:'email',email:account.email,password:'valid-password'}),
+    {code:'device-account-mismatch'});
+  await assert.rejects(client.verifyDeviceLockAccount(account.uid,{method:'email',email:account.email,password:'incorrect'}),
+    {code:'auth/invalid-credential'});
+  assert.equal(await client.verifyDeviceLockAccount(account.uid,{method:'email',email:account.email,password:'valid-password'}),account.uid);
+  assert.equal(calls.length,previous);
+  assert.equal(client.snapshot.pending,1);
+  assert.equal(client.snapshot.store.id,'shop');
+  await client.setWorkspaceLocked(false);
+  await client.retrySync();
+  assert.equal(client.snapshot.pending,0);
+  assert.equal(calls.at(-1).payload.operationId,queued.operationId);
 });
 
 test('multiple queued orders survive a client restart and replay in the original order at successive revisions', async (t) => {

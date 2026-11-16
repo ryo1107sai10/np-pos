@@ -1,10 +1,11 @@
 import { getOrderLineDiscountAmount } from './order-line-discount.mjs';
+import { getAssignableCast, getCastDutyMode } from './cast-duty.mjs';
 
 export function renderSettledContents(ticket,draft,state,{escape,methodSelect}) {
   const lines = ticket.lines.filter((line)=>line.cancelledAt == null && line.category !== '延長');
   const line = lines.find(({id})=>id === draft.lineId);
-  const cast = [...state.cast.filter((person) => person.enabled !== false || line?.castIds.includes(person.id)),
-    ...(state.archivedCast ?? []).filter(({id}) => line?.castIds.includes(id))];
+  const cast = line ? getAssignableCast(state,line.createdAt,line.castIds) : [];
+  const dutyLimited = getCastDutyMode(state) !== 'all';
   const label = (text,input) => `<label class="field"><span>${text}</span>${input}</label>`;
   return `${label('訂正する明細',`<select name="settledContentLine"><option value="">伝票値引きのみを訂正</option>
       ${lines.map(({id,name})=>`<option value="${escape(id)}"${line?.id === id ? ' selected' : ''}>${escape(name)}</option>`).join('')}</select>`)}
@@ -12,7 +13,8 @@ export function renderSettledContents(ticket,draft,state,{escape,methodSelect}) 
       ${label('単価（円）',`<input name="correctedPrice" type="number" min="0" max="100000000" value="${line.price}" required>`)}</div>
       ${line.category !== 'セット' ? `<fieldset class="choices"><legend>歩合の対象</legend><div class="choice-grid">${cast.map(({id,name})=>
         `<label class="choice"><input name="correctedCast" type="checkbox" value="${escape(id)}"${line.castIds.includes(id) ? ' checked' : ''}>
-          <span>${escape(name)}</span></label>`).join('')}</div></fieldset>
+          <span>${escape(name)}</span></label>`).join('')}</div>${dutyLimited
+    ? '<p class="field-help">担当を追加する場合は、注文した時刻の勤務条件を確認します。</p>' : ''}</fieldset>
         <label class="inline-check"><input name="removeSettledLine" type="checkbox">この注文明細を取り消す</label>` : ''}
       ${line.stockUses?.length && line.providedAt == null ? '<label class="inline-check"><input type="checkbox" name="returnCorrectedStock">未提供分の在庫を戻す</label>' : ''}
       ${line.lineDiscount ? `<p class="field-help">明細値引きの条件を引き継ぎます。訂正前の値引き額は ${getOrderLineDiscountAmount(line).toLocaleString('ja-JP')}円です。</p>` : ''}` : ''}

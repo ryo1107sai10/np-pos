@@ -7,6 +7,8 @@
   <meta name="description" content="卓・伝票・歩合・在庫をつなぐ、ナイトワーク店舗向けPOSのデモ。">
   <title>NP POS | ホール管理</title>
   <link rel="icon" href="np-pos.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="np-pos-192.png">
+  <link rel="manifest" href="np-pos.webmanifest">
   <link rel="stylesheet" href="style.css">
   <link rel="stylesheet" href="clarity.css">
   <link rel="stylesheet" href="reports.css">
@@ -22,11 +24,14 @@
   <link rel="stylesheet" href="auto-extension-ui.css">
   <link rel="stylesheet" href="workspace-menu.css">
   <link rel="stylesheet" href="ticket-history.css">
+  <link rel="stylesheet" href="device-lock.css">
   <script type="module" src="app.mjs"></script>
+  <script type="module" src="public-offline.mjs"></script>
 </head>
 <body>
   <a class="skip-link" href="#workspace">メインへ移動</a>
   <div id="app"></div>
+  <div id="device-lock-screen" hidden></div>
   <dialog id="workspace-menu" class="workspace-menu" aria-labelledby="workspace-menu-title"></dialog>
   <dialog id="dialog" aria-labelledby="dialog-title"></dialog>
   <div id="notifications" aria-live="polite"></div>

@@ -20,6 +20,8 @@ import { commitStoreSettingsEditor, handleStoreSettingsEditorAction, renderStore
 import { openBarcodeScanner } from './barcode-scanner.mjs';
 import { cloudConfig } from './cloud-config.mjs';
 import { createCloudClient } from './cloud-client.mjs';
+import { createDeviceLock, deviceLockStorageKey, memoryLockStorage } from './device-lock.mjs';
+import { renderDeviceLockScreen, renderDeviceLockSettings, updateDeviceLockScreen } from './device-lock-ui.mjs';
 import { renderCloudBanner, renderCloudEntry, renderCloudMigration, renderCloudPanel, renderCloudRestricted, renderStoreOverview } from './cloud-ui.mjs';
 import { createLineDemoSettings, readLineSettings, renderLineSettings } from './line-notification-ui.mjs';
 import { createStoreGroupDemo } from './store-group-demo.mjs';
@@ -31,7 +33,7 @@ import { cashAccountOptions, readCashAccounts, renderCashAccountRow, renderCashA
 import { purchaseCancellationBlocker } from './inventory-operations.mjs';
 import { findPrintableTicket, getPrintAutoKind, getPrintDocuments, getPrintSettings, getPrintTenderReceived } from './print-domain.mjs';
 import { printDocumentTitles, renderExtensionQuote, renderPrintOptions, renderPrintPreview, renderPrintSettings, renderPrintTest } from './print-ui.mjs';
-import { createBillingDemo, createCashDemo, createCustomerNoticeDemo, createLaborDemo, createPayrollDemo, createPhaseTwoDemo, createPeriodReportDemo, createVisitAnalyticsDemo } from './phase-two-demo.mjs';
+import { createBillingDemo, createCashDemo, createCastDutyDemo, createCustomerNoticeDemo, createLaborDemo, createPayrollDemo, createPhaseTwoDemo, createPeriodReportDemo, createVisitAnalyticsDemo } from './phase-two-demo.mjs';
 import * as customerUI from './customer-ui.mjs';
 import { operationReason, renderAuditLog, renderDiscountForm, renderPersonalSalesAdjustment } from './operations-ui.mjs';
 import { getAdjustablePersonalSalesPeople, personalSalesDiscountModes } from './personal-sales.mjs';
@@ -48,6 +50,7 @@ import * as payrollUI from './payroll-ui.mjs';
 import { getPayrollVariables } from './payroll-formula.mjs';
 import { renderTicketHistory, bindTicketHistory } from './ticket-history.mjs';
 import { readShiftForm, renderShiftEditor, renderShifts } from './shifts-ui.mjs';
+import { castDutyModes, getAssignableCast, getCastDutyMode } from './cast-duty.mjs';
 import { buildTeamPerformanceCsv, renderTeamPerformance } from './team-performance.mjs';
 import { getStaffLabor } from './labor-workspace.mjs';
 import { buildLaborCsv, getLaborReport } from './labor-report.mjs';
@@ -66,6 +69,7 @@ const workspaceMenu = document.querySelector('#workspace-menu');
 const notifications = document.querySelector('#notifications');
 const autoExtensionLive = document.querySelector('#auto-extension-live');
 const printOutput = document.querySelector('#print-output');
+const deviceLockScreen = document.querySelector('#device-lock-screen');
 const storageKey = 'np-pos.demo.v1';
 const legacyStorageKey = 'lumi-pos.demo.v1';
 const floorViewStorageKey = 'np-pos.floor-view.v1';
@@ -156,6 +160,123 @@ let cloudMessage = '';
 let cloudActionError = '';
 const cloud = createCloudClient(cloudConfig, { onChange: cloudUpdated, pollMs: 6000 });
 cloudState = cloud.snapshot;
+let visibleDeviceLock;
+let deviceLockBusy = false;
+let deviceLockMessage = '';
+const deviceLockChanged = () => queueMicrotask(syncDeviceLockScreen);
+let deviceStorage;
+try { deviceStorage = window.localStorage; } catch { /* Device storage is unavailable. */ }
+const persistentDeviceLock = createDeviceLock({storage:deviceStorage,onChange:deviceLockChanged,
+  exclusive:(action)=>navigator.locks?.request(deviceLockStorageKey,action) ?? action()});
+const sampleDeviceLock = createDeviceLock({storage:memoryLockStorage(),onChange:deviceLockChanged});
+
+function activeDeviceLock() {
+  return cloudState.userVerified || persistentDeviceLock.snapshot.enabled ? persistentDeviceLock : sampleDeviceLock;
+}
+
+function isDeviceLocked() {
+  return activeDeviceLock().snapshot.locked;
+}
+
+function syncDeviceLockScreen() {
+  const controller = activeDeviceLock();
+  const status = controller.snapshot;
+  if (status.locked) {
+    if (visibleDeviceLock !== controller) {
+      visibleDeviceLock = controller;
+      deviceLockMessage = '';
+      void cloud.setWorkspaceLocked(true);
+      activeBarcodeScan?.close();
+      if (dialog.open) dialog.close();
+      if (workspaceMenu.open) workspaceMenu.close();
+      modal = null;
+      priorFocus = null;
+      workspaceMenuContent = '';
+      for (const root of [app,dialog,workspaceMenu,notifications,autoExtensionLive]) root.replaceChildren();
+      clearPrintOutput();
+      document.body.classList.add('device-screen-locked');
+      deviceLockScreen.innerHTML = renderDeviceLockScreen({sample:controller === sampleDeviceLock,providers:cloudConfig.providers});
+      deviceLockScreen.hidden = false;
+      deviceLockScreen.querySelector('[name=pin]').focus({preventScroll:true});
+    }
+    updateDeviceLockScreen(deviceLockScreen,status,deviceLockBusy,deviceLockMessage || status.error);
+    return;
+  }
+  if (!visibleDeviceLock) return;
+  visibleDeviceLock = undefined;
+  deviceLockMessage = '';
+  deviceLockScreen.hidden = true;
+  deviceLockScreen.replaceChildren();
+  document.body.classList.remove('device-screen-locked');
+  if (!cloudState.store && !demoPractice) state = loadState();
+  syncFloorSelection();
+  render();
+  app.querySelector('#workspace')?.focus({preventScroll:true});
+  void cloud.setWorkspaceLocked(false).then(restoreCloud).catch(()=>{});
+}
+
+function checkDeviceActivity(event) {
+  const active = activeDeviceLock();
+  if (event.isTrusted) active.activity();
+  const status = active.check();
+  if (status.locked) {
+    if (!deviceLockScreen.contains(event.target)) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+  }
+}
+
+async function unlockDeviceScreen(form, method) {
+  if (!visibleDeviceLock || deviceLockBusy) return;
+  const controller = visibleDeviceLock;
+  const {uid} = controller.snapshot;
+  deviceLockBusy = true;
+  deviceLockMessage = '';
+  syncDeviceLockScreen();
+  const values = new FormData(form ?? undefined);
+  try {
+    if (method) {
+      const verifiedUid = await cloud.verifyDeviceLockAccount(uid,{method,
+        email:String(values.get('email') ?? ''),password:String(values.get('password') ?? '')});
+      controller.resetAfterIdentityCheck(verifiedUid);
+    } else {
+      await controller.unlock(String(values.get('pin') ?? ''));
+    }
+  } catch (error) {
+    deviceLockMessage = error.message;
+    const input = form?.querySelector(method ? '[name=password]' : '[name=pin]');
+    if (input) { input.value = ''; input.focus(); }
+  } finally {
+    deviceLockBusy = false;
+    syncDeviceLockScreen();
+  }
+}
+
+async function saveDeviceLockSettings(form) {
+  const active = modal;
+  const controller = activeDeviceLock();
+  const sample = controller === sampleDeviceLock;
+  const values = new FormData(form);
+  const enabled = values.get('deviceLockEnabled') === 'on';
+  const pin = String(values.get('deviceNewPin') ?? '');
+  const submit = form.querySelector('#submit-dialog');
+  submit.disabled = true;
+  try {
+    if (enabled && pin !== String(values.get('deviceConfirmPin') ?? '')) throw new Error('確認用PINが一致していません。');
+    await controller.configure({uid:sample ? 'demo' : cloudState.user?.uid,enabled,pin,
+      minutes:Number(values.get('deviceLockMinutes')),currentPin:String(values.get('deviceCurrentPin') ?? '')});
+    if (modal === active && dialog.open) {
+      dialog.close();
+      render();
+      toast('画面ロックの設定を保存しました。');
+    }
+  } catch (error) {
+    if (modal === active && dialog.open) showError(error.message);
+  } finally {
+    if (submit.isConnected) submit.disabled = false;
+  }
+}
 
 function escape(value = '') {
   return String(value).replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
@@ -277,6 +398,11 @@ function demoActor() {
 }
 
 function permittedAction(action) {
+  if (isDeviceLocked()) return false;
+  if (action === 'device-lock-now') return activeDeviceLock().snapshot.enabled;
+  if (action === 'device-lock-settings') return activeDeviceLock().snapshot.available
+    && (activeDeviceLock() === sampleDeviceLock || cloudState.userVerified && (!persistentDeviceLock.snapshot.enabled
+      || persistentDeviceLock.snapshot.uid === cloudState.user?.uid));
   const store = cloudState.store;
   if (action.startsWith('practice-')) return !store;
   if (demoPractice && (action.startsWith('cloud-') || action.startsWith('demo-'))) return false;
@@ -499,6 +625,8 @@ function renderFloor(notices, now) {
     canCheckout:(id) => !state.tickets.find((ticket) => ticket.id === id)?.discountRequest,
     showPause:permittedAction('auto-extension-pause'),showCheckout:permittedAction('auto-extension-checkout'),
   })}${renderMetrics()}
+    ${isOpen && getCastDutyMode(state) !== 'all' && (permittedAction('order') || permittedAction('edit-ticket-line'))
+      ? `<div class="notice" data-floor-duty>${renderFloorCastDuty(getAssignableCast(state,now))}</div>` : ''}
     <div class="floor-layout">
       <section class="floor" aria-labelledby="floor-title"><div class="floor-heading">
       <div class="floor-heading-main"><h2 id="floor-title">${icon('grid',17)}${showingPlan ? '店内レイアウト' : '座席一覧'}</h2>${viewSwitch}</div>
@@ -507,6 +635,11 @@ function renderFloor(notices, now) {
       ${floorContent}</section>
       ${mobileDetails ? `<button type="button" class="detail-shade" data-action="hide-detail" aria-hidden="true" tabindex="-1"></button>` : ''}${renderDetail(notices,now)}
     </div>`;
+}
+
+function renderFloorCastDuty(people) {
+  return `<span>${icon('users',17)}<strong>現在注文に選べるキャスト ${people.length}名</strong>
+    ${people.length ? escape(people.map(({name}) => name).join('、')) : '勤務条件を満たすキャストがいません。'}</span>`;
 }
 
 function totalRows(q, { settlement = false, large = false } = {}) {
@@ -698,6 +831,7 @@ function renderOperationsNav() {
 }
 
 function render({ preserveFocus = false } = {}) {
+  if (isDeviceLocked()) return;
   const focused = preserveFocus ? document.activeElement : null;
   const focusAction = focused?.dataset.action;
   const focusId = focused?.dataset.id;
@@ -821,6 +955,7 @@ function rememberStore(store) {
 function cloudUpdated(next) {
   const before = cloudState;
   cloudState = next;
+  if (visibleDeviceLock) deviceLockChanged();
   if (next.store && demoPractice) {
     demoRole = demoPractice.role;
     demoPractice = null;
@@ -878,10 +1013,12 @@ async function refreshMembers() {
 }
 
 async function restoreCloud() {
+  if (isDeviceLocked()) { await cloud.start(); return; }
   let hint;
   try { hint = JSON.parse(localStorage.getItem(cloudWorkspaceKey)); } catch { /* Select a store manually. */ }
   if (!hint) return;
   await cloud.start();
+  if (isDeviceLocked()) return;
   if (hint.uid === cloudState.user?.uid && cloudState.stores.some(({id}) => id === hint.id)) {
     await cloud.enterStore(hint.id).catch(() => {});
   }
@@ -1148,6 +1285,7 @@ async function cloudAction(action, target) {
 }
 
 function toast(message, {error = false} = {}) {
+  if (isDeviceLocked()) return;
   const item = document.createElement('div');
   item.className = error ? 'toast toast-error' : 'toast';
   item.innerHTML = `${icon(error ? 'alert' : 'check',17)}<span>${escape(message)}</span>`;
@@ -1240,17 +1378,17 @@ function showError(message) {
 }
 
 async function commit(command, message, after, {fromFloor = false} = {}) {
-  if (committing) return;
+  if (committing || isDeviceLocked()) return;
   committing = true;
   const activeModal = modal;
   const storeId = cloudState.store?.id;
   const revision = fromFloor ? cloudState.revision : activeModal?.revision;
   const floorDate = state.day.date;
   const role = currentRole();
-  const staysActive = () => fromFloor
+  const staysActive = () => !isDeviceLocked() && (fromFloor
     ? !dialog.open && page === 'floor' && cloudState.store?.id === storeId
       && currentRole() === role && state.day.date === floorDate
-    : dialog.open && modal === activeModal;
+    : dialog.open && modal === activeModal);
   const submit = fromFloor ? null : dialog.querySelector('#submit-dialog');
   if (submit) submit.disabled = true;
   const finish = (next, queued = false) => {
@@ -1338,10 +1476,10 @@ function applyDueLocalExtensions(source, now) {
 
 async function syncDueLocalExtensions(now) {
   const deadline = getNextAutoExtensionAt(state);
-  if (cloudState.store || syncingLocalExtensions || committing || deadline == null || deadline > now) return;
+  if (isDeviceLocked() || cloudState.store || syncingLocalExtensions || committing || deadline == null || deadline > now) return;
   syncingLocalExtensions = true;
   const update = () => {
-    if (cloudState.store || committing) return;
+    if (isDeviceLocked() || cloudState.store || committing) return;
     const source = loadLocalData() ?? state;
     const next = applyDueLocalExtensions(source,Date.now());
     if (next === source) return;
@@ -1385,6 +1523,7 @@ function checkCatalogDeletion(kind, id, menu) {
 }
 
 function downloadFile(filename, data, type) {
+  if (isDeviceLocked()) return;
   const url = URL.createObjectURL(data instanceof Blob ? data : new Blob([data], {type}));
   const link = document.createElement('a');
   link.href = url;
@@ -1524,6 +1663,7 @@ async function readStoreFile(input) {
 }
 
 function openDialog(type, data = {}) {
+  if (isDeviceLocked()) return;
   if (!dialog.open) priorFocus = document.activeElement;
   modal = { type, storeId: cloudState.store?.id, revision: cloudState.revision, ...data };
   paintDialog();
@@ -1626,12 +1766,18 @@ async function explainGuideTopic(id,target) {
 }
 
 function paintDialog(layoutFileInput) {
+  if (isDeviceLocked() || !modal) return;
   const ticket = modal.ticketId ? state.tickets.find((item)=>item.id===modal.ticketId) : null;
   const id = modal.ticketId;
   const q = ticket ? quote(state,id) : null;
   const customerName = currentRoleAllows('customers') ? ticket?.customer : '';
   const headline = ticket ? `<div class="modal-context">${icon('table',16)}<strong>${escape(titles(ticket))}</strong><span>${ticket.guests}名${customerName ? ` · ${escape(customerName)}` : ''}</span></div>` : '';
   switch (modal.type) {
+    case 'device-lock-settings': {
+      const controller = activeDeviceLock();
+      present('この端末の画面ロック',renderDeviceLockSettings(controller.snapshot,controller === sampleDeviceLock),'設定を保存',{style:'ops-modal'});
+      return;
+    }
     case 'line-notifications':
       present('LINE通知',renderLineSettings(modal,{escape,button}),
         modal.model?.configured ? '設定を保存' : null,{style:'cloud-dialog'});
@@ -1867,7 +2013,10 @@ function paintDialog(layoutFileInput) {
         ${label('営業時間の開始',`<input name="hoursStart" type="time" value="${register.hoursStart}" required>`)}
         ${label('営業時間の終了',`<input name="hoursEnd" type="time" value="${register.hoursEnd}" required>`)}
         ${label('釣銭準備金の初期値',`<select name="openingMode"><option value="fixed">固定額</option><option value="previous"${register.openingMode === 'previous' ? ' selected' : ''}>前回の実残高</option></select>`)}
-        ${label('固定額・前回がない場合（円）',`<input name="openingDefault" type="number" min="0" max="${cashEntryMaximum}" value="${register.openingCash}" required>`)}</div>`,
+        ${label('固定額・前回がない場合（円）',`<input name="openingDefault" type="number" min="0" max="${cashEntryMaximum}" value="${register.openingCash}" required>`)}</div>
+        ${label('注文の担当キャストの候補',`<select name="castDutyMode">${Object.entries(castDutyModes).map(([mode,text]) =>
+          `<option value="${mode}"${mode === getCastDutyMode(state) ? ' selected' : ''}>${text}</option>`).join('')}</select>`,
+        '確定シフトでは、勤務時間内で欠勤の記録がない人が候補になります。勤怠では、出勤済みで退勤前の人が候補になります。')}`,
       '運用設定を保存',{style:'ops-modal'});
       return;
     }
@@ -2029,7 +2178,7 @@ function paintDialog(layoutFileInput) {
         present('体験クエスト','<p class="form-copy">体験クエストの練習中です。</p>' + button('練習を終了','practice-stop'),null,{style:'ops-modal'});
         return;
       }
-      present('サンプル操作',`${renderPracticeEntry()}<p class="form-copy">開店から試すと、現在の卓配置と店舗設定で営業をやり直せます。ほかのサンプルを選ぶと、店舗設定・卓配置・操作履歴がサンプルの初期状態に戻ります。</p><div class="demo-options">${button('開店から試す','demo-start',{glyph:'power',tone:'primary'})}${button('営業中のサンプルを読み込む','demo-live',{glyph:'refresh'})}${button('入出金と日報を試す','demo-cash',{glyph:'cash'})}${button('期間集計とCSVを試す','demo-reports',{glyph:'download'})}${button('滞在・指名分析を試す','demo-analytics',{glyph:'chart'})}${button('自動延長とカード会計を試す','demo-billing',{glyph:'clock'})}${button('給与・日払いを試す','demo-payroll',{glyph:'wallet'})}${button('勤怠・人件費を試す','demo-labor',{glyph:'users'})}${button('顧客のお知らせを試す','demo-customer-notices',{glyph:'bell'})}</div>
+      present('サンプル操作',`${renderPracticeEntry()}<p class="form-copy">開店から試すと、現在の卓配置と店舗設定で営業をやり直せます。ほかのサンプルを選ぶと、店舗設定・卓配置・操作履歴がサンプルの初期状態に戻ります。</p><div class="demo-options">${button('開店から試す','demo-start',{glyph:'power',tone:'primary'})}${button('営業中のサンプルを読み込む','demo-live',{glyph:'refresh'})}${button('入出金と日報を試す','demo-cash',{glyph:'cash'})}${button('期間集計とCSVを試す','demo-reports',{glyph:'download'})}${button('滞在・指名分析を試す','demo-analytics',{glyph:'chart'})}${button('自動延長とカード会計を試す','demo-billing',{glyph:'clock'})}${button('給与・日払いを試す','demo-payroll',{glyph:'wallet'})}${button('勤怠・人件費を試す','demo-labor',{glyph:'users'})}${button('勤務中キャストで注文を試す','demo-cast-duty',{glyph:'users'})}${button('顧客のお知らせを試す','demo-customer-notices',{glyph:'bell'})}</div>
         <section aria-labelledby="demo-role-label"><h3 id="demo-role-label">デモの権限</h3><p class="form-copy">現在の権限は${escape(currentRoleLabel())}です。同じデモデータで役割を切り替えて確認できます。</p><div class="ops-actions">${['admin','manager','staff','cast'].map((role) =>
           button(`${cloudLabels[role]}で試す`,'demo-role',{id:role,tone:!currentProfileId()&&role===demoRole?'primary':'secondary'})).join('')}
           ${Object.entries(state.rolePolicy?.custom ?? {}).map(([id,{label}]) => button(`${escape(label)}で試す`,'demo-role',
@@ -2213,12 +2362,8 @@ function paintDialog(layoutFileInput) {
       const line = ticket?.lines.find((entry)=>entry.id === modal.lineId && entry.cancelledAt === null);
       if (!line) { present('注文を訂正','<p class="form-copy">最新の伝票を開き直してください。</p>',null); return; }
       const menu = state.menu.find(({id})=>id === line.menuId);
-      const selectedCast = new Set(line.castIds);
-      const available = [...state.cast,...(state.archivedCast ?? [])].filter((person)=>selectedCast.has(person.id)
-        || (person.enabled !== false && state.cast.includes(person)));
-      const options = line.category === 'セット' ? '' : `<fieldset class="choices"><legend>歩合を付けるキャスト</legend><div class="choice-grid">
-        ${available.map((person)=>`<label class="choice"><input type="checkbox" name="castIds" value="${escape(person.id)}"${selectedCast.has(person.id) ? ' checked' : ''}><span>${escape(person.name)}</span></label>`).join('')}
-        </div></fieldset>`;
+      const people = getAssignableCast(state,Date.now(),line.castIds);
+      const options = line.category === 'セット' ? '' : renderDutyPicker(people,renderEditedCastChoices(people,line.castIds));
       const serviceControl = line.serviceEligible === true && canExcludeOrderService(state,currentRole())
         ? orderServiceChoice(line.serviceExcluded === true) : '';
       const priceControls = orderPriceControls(line.originalTaxRate ?? line.taxRate ?? defaultItemTaxRateBps,{
@@ -2461,6 +2606,7 @@ function printWorkspace(html) {
 }
 
 function printMarkup(html) {
+  if (isDeviceLocked()) return;
   printOutput.innerHTML = html;
   document.body.classList.add('np-print-active');
   try { window.print(); }
@@ -2636,16 +2782,9 @@ function orderLineAdjustments(line) {
     ${discount ? `<small>明細値引き −${yen(discount)}</small>` : ''}`;
 }
 
-function renderProductDetails() {
-  const item = state.menu.find((product)=>product.id === modal.product && product.enabled !== false);
-  if (!item) return '<p class="form-copy order-tip">追加するメニューを選択してください。</p>';
-  const draft = modal.editingOrderIndex !== undefined ? modal.orderItems[modal.editingOrderIndex] : null;
-  const initialCast = new Set(draft?.castIds ?? []);
-  const stockInfo = item.recipe?.map((need)=> {
-    const stock = state.stock.find((goods)=>goods.id===need.stockId);
-    return stock ? `${escape(stock.name)} ${number.format(need.quantity)}${escape(stock.unit)}` : '';
-  }).join('・');
-  const availableCast = state.cast.filter((person) => person.enabled !== false);
+function renderOrderCastChoices(item, pickedIds, people) {
+  const selected = new Set(pickedIds);
+  const availableCast = [...people];
   if (item.category === '指名' && canOpenPage('customers')) {
     const customerState = customerWorkspaceState();
     const customerId = state.tickets.find(({id}) => id === modal.ticketId)?.customerId;
@@ -2659,28 +2798,81 @@ function renderProductDetails() {
   }
   const baseCommission = commissionLabel(getItemCommission(item));
   const usesOverrides = availableCast.some((person) => person.commissionOverride);
-  const showChoices = item.requiresCast || item.acceptsCast || availableCast.some((person) => commissionLabel(getItemCommission(item, person)));
-  let castChoices = '';
-  if (showChoices && availableCast.length) {
-    const choices = availableCast.map((person) => {
-      const rule = usesOverrides ? commissionLabel(getItemCommission(item, person)) || '歩合なし' : '';
-      return `<label class="choice"><input name="castIds" type="checkbox" value="${escape(person.id)}"${initialCast.has(person.id) ? ' checked' : ''}><span><strong>${escape(person.name)}</strong>${rule ? `<small>${rule}</small>` : ''}</span></label>`;
-    }).join('');
-    castChoices = `<fieldset class="choices cast-choices"><legend>歩合を付けるキャスト${item.requiresCast ? '（必須）' : '（任意）'}</legend><div class="choice-grid">${choices}</div>${usesOverrides
-      ? '<p class="field-help">複数のキャストを選ぶと、売上・固定額・ポイントを按分します。</p>'
-      : baseCommission ? `<p class="field-help">${icon('users',14)} ${baseCommission}</p>` : ''}</fieldset>`;
-  } else if (item.requiresCast) {
-    castChoices = '<p class="field-help">店舗設定で注文に使うキャストを有効にしてください。</p>';
-  }
+  const showChoices = item.requiresCast || item.acceptsCast || Boolean(baseCommission)
+    || state.cast.some((person) => person.enabled !== false && commissionLabel(getItemCommission(item, person)));
+  if (!showChoices) return '';
+  if (!availableCast.length) return getCastDutyMode(state) !== 'all'
+    ? '<p class="field-help">今は勤務条件を満たすキャストがいません。</p>'
+    : item.requiresCast ? '<p class="field-help">店舗設定で注文に使うキャストを有効にしてください。</p>' : '';
+  const choices = availableCast.map((person) => {
+    const rule = usesOverrides ? commissionLabel(getItemCommission(item, person)) || '歩合なし' : '';
+    return `<label class="choice"><input name="castIds" type="checkbox" value="${escape(person.id)}"${selected.has(person.id) ? ' checked' : ''}><span><strong>${escape(person.name)}</strong>${rule ? `<small>${rule}</small>` : ''}</span></label>`;
+  }).join('');
+  return `<fieldset class="choices cast-choices"><legend>歩合を付けるキャスト${item.requiresCast ? '（必須）' : '（任意）'}</legend><div class="choice-grid">${choices}</div>${usesOverrides
+    ? '<p class="field-help">複数のキャストを選ぶと、売上・固定額・ポイントを按分します。</p>'
+    : baseCommission ? `<p class="field-help">${icon('users',14)} ${baseCommission}</p>` : ''}</fieldset>`;
+}
+
+function renderEditedCastChoices(availableCast, pickedIds) {
+  const selected = new Set(pickedIds);
+  return `<fieldset class="choices"><legend>歩合を付けるキャスト</legend>${availableCast.length ? `<div class="choice-grid">
+    ${availableCast.map(({id,name}) => `<label class="choice"><input type="checkbox" name="castIds" value="${escape(id)}"${selected.has(id) ? ' checked' : ''}><span>${escape(name)}</span></label>`).join('')}</div>`
+    : '<p class="field-help">追加できる担当キャストがいません。</p>'}</fieldset>`;
+}
+
+function castChoicesKey(people) {
+  return JSON.stringify(people.map(({id,name}) => [id,name]));
+}
+
+function renderDutyPicker(people, content) {
+  return `<div data-duty-picker data-people="${escape(castChoicesKey(people))}">${content}</div>`;
+}
+
+function renderProductDetails() {
+  const item = state.menu.find((product)=>product.id === modal.product && product.enabled !== false);
+  if (!item) return '<p class="form-copy order-tip">追加するメニューを選択してください。</p>';
+  const draft = modal.editingOrderIndex !== undefined ? modal.orderItems[modal.editingOrderIndex] : null;
+  const people = getAssignableCast(state);
+  const stockInfo = item.recipe?.map((need)=> {
+    const stock = state.stock.find((goods)=>goods.id===need.stockId);
+    return stock ? `${escape(stock.name)} ${number.format(need.quantity)}${escape(stock.unit)}` : '';
+  }).join('・');
   const excluded = draft?.serviceExcluded === true;
   const serviceControl = item.serviceEligible !== false && canExcludeOrderService(state,currentRole())
     ? `${orderServiceChoice(excluded)}<div id="order-service-reason"${excluded ? '' : ' hidden'}>
       ${label('サービス料の除外理由',`<textarea name="orderServiceReason" maxlength="120"${excluded ? ' required' : ''}>${escape(draft?.serviceExclusionReason ?? '')}</textarea>`)}</div>` : '';
   return `<section class="order-selection"><div class="order-selected"><div><h3>${escape(item.name)}</h3><p>${yen(item.price)} / 点</p></div><label class="field order-qty"><span>数量</span><input name="quantity" type="number" min="1" max="100" step="1" inputmode="numeric" value="${draft?.quantity ?? 1}" required></label></div>
     ${stockInfo ? `<p class="field-help">${icon('box',14)} 在庫引き落とし / 点　${stockInfo}</p>` : ''}
-    ${castChoices}${serviceControl}${orderPriceControls(item.taxRate ?? defaultItemTaxRateBps,draft ?? {})}
+    ${renderDutyPicker(people,renderOrderCastChoices(item,draft?.castIds ?? [],people))}${serviceControl}${orderPriceControls(item.taxRate ?? defaultItemTaxRateBps,draft ?? {})}
     <div class="ops-actions">${button(draft ? '明細の変更を反映' : '注文リストに追加','order-line-stage',{tone:'secondary',glyph:'plus'})}
       ${draft ? button('変更をやめる','order-line-reset',{tone:'quiet'}) : ''}</div></section>`;
+}
+
+function refreshDutyPanels(now) {
+  const display = app.querySelector('[data-floor-duty]');
+  if (display) {
+    const people = getAssignableCast(state,now);
+    const key = castChoicesKey(people);
+    if (display.dataset.people !== key) {
+      display.dataset.people = key;
+      display.innerHTML = renderFloorCastDuty(people);
+    }
+  }
+  const picker = dialog.querySelector('[data-duty-picker]');
+  if (!dialog.open || !picker || getCastDutyMode(state) === 'all' || committing || modal.stale) return;
+  const line = modal.type === 'edit-ticket-line'
+    ? state.tickets.find(({id}) => id === modal.ticketId)?.lines.find(({id}) => id === modal.lineId) : null;
+  const people = getAssignableCast(state,now,line?.castIds);
+  const key = castChoicesKey(people);
+  if (picker.dataset.people === key) return;
+  picker.dataset.people = key;
+  const picked = [...picker.querySelectorAll('input:checked')].map(({value}) => value);
+  const focus = picker.contains(document.activeElement) ? document.activeElement.value : undefined;
+  const item = modal.type === 'order' ? state.menu.find(({id}) => id === modal.product) : null;
+  if (!line && !item) return;
+  picker.innerHTML = item ? renderOrderCastChoices(item,picked,people) : renderEditedCastChoices(people,picked);
+  if (focus) [...picker.querySelectorAll('input')].find(({value}) => value === focus)?.focus({preventScroll:true});
+  updateOrderServicePreview();
 }
 
 function renderOrderCart() {
@@ -3111,6 +3303,8 @@ function updatePractice(action) {
 function clickAction(target) {
   const {action,id} = target.dataset;
   if (!permittedAction(action)) return;
+  if (action === 'device-lock-now') { activeDeviceLock().lock(); return; }
+  if (action === 'device-lock-settings') { openDialog(action); return; }
   if (['customer-anniversary-add','customer-anniversary-remove'].includes(action)
     && ['customer-new','customer-edit'].includes(modal?.type) && permittedAction('customer-edit')) {
     if (action === 'customer-anniversary-remove') {
@@ -3622,7 +3816,7 @@ function clickAction(target) {
     return;
   }
   if (['demo','open','seat','close','record-cash'].includes(action)) {openDialog(action); return;}
-  if (['demo-start','demo-live','demo-cash','demo-reports','demo-analytics','demo-billing','demo-payroll','demo-labor','demo-customer-notices'].includes(action)) {
+  if (['demo-start','demo-live','demo-cash','demo-reports','demo-analytics','demo-billing','demo-payroll','demo-labor','demo-cast-duty','demo-customer-notices'].includes(action)) {
     const fromOpening = action === 'demo-start';
     const cashSample = action === 'demo-cash';
     const reportSample = action === 'demo-reports';
@@ -3630,10 +3824,11 @@ function clickAction(target) {
     const billingSample = action === 'demo-billing';
     const payrollSample = action === 'demo-payroll';
     const laborSample = action === 'demo-labor';
+    const dutySample = action === 'demo-cast-duty';
     const customerNoticeSample = action === 'demo-customer-notices';
-    let sample = analyticsSample ? createVisitAnalyticsDemo() : customerNoticeSample ? createCustomerNoticeDemo() : laborSample ? createLaborDemo() : payrollSample ? createPayrollDemo() : billingSample ? createBillingDemo() : reportSample ? createPeriodReportDemo()
+    let sample = analyticsSample ? createVisitAnalyticsDemo() : customerNoticeSample ? createCustomerNoticeDemo() : laborSample ? createLaborDemo() : dutySample ? createCastDutyDemo() : payrollSample ? createPayrollDemo() : billingSample ? createBillingDemo() : reportSample ? createPeriodReportDemo()
       : cashSample ? createCashDemo() : createPhaseTwoDemo(fromOpening ? 'closed' : 'live');
-    if (cashSample || reportSample || analyticsSample || billingSample || payrollSample || laborSample || customerNoticeSample) demoRole = 'admin';
+    if (cashSample || reportSample || analyticsSample || billingSample || payrollSample || laborSample || dutySample || customerNoticeSample) demoRole = 'admin';
     if (fromOpening) {
       sample.tables = structuredClone(state.tables);
       sample.layoutAreas = getLayoutAreas(state);
@@ -3665,7 +3860,7 @@ function clickAction(target) {
     if (fromOpening) openDialog('open');
     else {
       dialog.close();
-      toast(analyticsSample ? '滞在・指名分析のサンプルを読み込みました。' : customerNoticeSample ? '顧客のお知らせのサンプルを読み込みました。' : laborSample ? '役職別の勤怠と人件費のサンプルを読み込みました。' : payrollSample ? '給与と日払いのサンプルを読み込みました。' : billingSample ? 'A-01は約30秒後に自動延長。A-02の自動延長はオフです。'
+      toast(analyticsSample ? '滞在・指名分析のサンプルを読み込みました。' : customerNoticeSample ? '顧客のお知らせのサンプルを読み込みました。' : laborSample ? '役職別の勤怠と人件費のサンプルを読み込みました。' : dutySample ? 'A-01の注文では、勤務中の美月を担当に選べます。' : payrollSample ? '給与と日払いのサンプルを読み込みました。' : billingSample ? 'A-01は約30秒後に自動延長。A-02の自動延長はオフです。'
         : reportSample ? '期間集計のサンプルを読み込みました。'
         : cashSample ? '入出金と日報のサンプルを読み込みました。' : '営業中のサンプルを読み込みました。');
     }
@@ -3781,11 +3976,15 @@ async function downloadPayrollZip({records,storeName,start,end,control,periodRef
 }
 
 function submitDialog(form) {
+  if (isDeviceLocked() || !modal) return;
   const data = new FormData(form);
   const value = (key) => data.get(key);
   const numeric = (key) => Number(value(key));
   const id = modal.ticketId;
   switch(modal.type) {
+    case 'device-lock-settings':
+      if (permittedAction('device-lock-settings')) void saveDeviceLockSettings(form);
+      break;
     case 'cast-clock-in':
       commit({type:'castClockIn'},'出勤を記録しました。');
       break;
@@ -4061,6 +4260,7 @@ function submitDialog(form) {
       break;
     case 'ops-settings':
       commit({type:'saveControls',managerDiscountRateBps:Math.round(numeric('managerDiscountLimit')*100),
+        castDutyMode:value('castDutyMode'),
         register:{cutoff:value('registerCutoff'),hoursStart:value('hoursStart'),hoursEnd:value('hoursEnd'),
           openingMode:value('openingMode'),openingCash:numeric('openingDefault')}},'運用設定を保存しました。');
       break;
@@ -4229,6 +4429,7 @@ function submitDialog(form) {
 bindLayoutEditor(dialog, () => modal?.layout, escape);
 
 document.addEventListener('click',(event)=> {
+  if (isDeviceLocked()) return;
   if (modal?.type === 'set-schedule' && handleInitialSetScheduleClick(event)) return;
   if (event.target === workspaceMenu) { workspaceMenu.close(); return; }
   const target=event.target.closest?.('[data-action]');
@@ -4601,18 +4802,42 @@ document.addEventListener('keydown', (event) => {
 });
 window.addEventListener('hashchange',()=>{page=readPage(); render();});
 window.addEventListener('storage',(event)=>{
+  if (event.key===deviceLockStorageKey || event.key===null) {
+    persistentDeviceLock.check({shared:true});
+    syncDeviceLockScreen();
+  }
   if (event.key!==storageKey && event.key!==legacyStorageKey) return;
   if (cloudState.store || demoPractice) return;
   if (dialog.open) { pendingStorage = true; return; }
   state=loadState(); syncFloorSelection(); render({preserveFocus:true});
 });
 
+for (const name of ['pointerdown','keydown','wheel','click','submit']) {
+  document.addEventListener(name,checkDeviceActivity,{capture:true,passive:false});
+}
+const checkDeviceReturn = () => {
+  activeDeviceLock().check({shared:true});
+  syncDeviceLockScreen();
+};
+document.addEventListener('visibilitychange',checkDeviceReturn);
+window.addEventListener('pageshow',checkDeviceReturn);
+window.addEventListener('beforeprint',()=>{ if (isDeviceLocked()) clearPrintOutput(); });
+deviceLockScreen.addEventListener('submit',(event)=> {
+  event.preventDefault();
+  void unlockDeviceScreen(event.target,event.target.id === 'device-recovery-form' ? 'email' : undefined);
+});
+deviceLockScreen.addEventListener('click',(event)=> {
+  if (event.target.closest?.('[data-device-google]')) void unlockDeviceScreen(undefined,'google');
+});
+checkDeviceReturn();
 syncFloorSelection();
 render();
 void restoreCloud();
 setInterval(()=> {
+  if (activeDeviceLock().check().locked) { syncDeviceLockScreen(); return; }
   if (document.hidden) return;
   const now=Date.now();
+  refreshDutyPanels(now);
   if (!cloudState.store && currentRole() !== 'cast') void syncDueLocalExtensions(now).catch((error) => {
     if (dialog.open) showError(error.message);
   });

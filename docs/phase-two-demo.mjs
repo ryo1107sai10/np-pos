@@ -110,6 +110,22 @@ export function createBillingDemo(now = Date.now()) {
   }},now);
 }
 
+export function createCastDutyDemo(now = Date.now()) {
+  let state = createPhaseTwoDemo('live',now);
+  const {date} = state.day;
+  const minute = 60_000;
+  const midnight = Date.parse(`${date}T00:00:00+09:00`);
+  const elapsed = Math.floor((now - midnight) / minute);
+  const step = (command) => { state = apply(state,command,now,demoAdmin); };
+  const times = {date,startMinute:Math.min(1_439,Math.max(0,elapsed - 30)),endMinute:elapsed + 180};
+  step({type:'saveShift',castId:'cast2',status:'confirmed',...times});
+  step({type:'saveShift',castId:'cast3',status:'requested',...times});
+  step({type:'saveManagedAttendance',castId:'cast1',date,classification:'worked',
+    clockInAt:Math.max(midnight,now - 20 * minute),clockOutAt:null,reason:'勤務中キャストのサンプル'});
+  step({type:'saveControls',managerDiscountRateBps:1_000,castDutyMode:'attendance'});
+  return state;
+}
+
 export function createPayrollDemo(now = Date.now()) {
   let state = createPhaseTwoDemo('live',now);
   const date = state.day.date;

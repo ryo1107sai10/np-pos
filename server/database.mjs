@@ -435,10 +435,14 @@ async function saveOperation(db, actor, storeId, command, observed, observedAt) 
   requireCondition(Number.isSafeInteger(expectedRevision) && expectedRevision >= 0,
     400, 'invalid-revision', '保存番号が無効です。');
   const current = observed ?? await snapshot(db, actor, storeId);
-  if (operation === 'migrate') adminRequired(current);
-  else verifyCommand(current.role, value, current.state, current.profileId);
+  const recorded = await operationLog(db, storeId, operationId);
+  // Acknowledging a committed retry uses the operator's current store read access.
+  if (!recorded || recorded.actor_uid !== actor.uid) {
+    if (operation === 'migrate') adminRequired(current);
+    else verifyCommand(current.role, value, current.state, current.profileId);
+  }
   const fingerprint = await getFingerprint(operation, value);
-  if (matchingOperation(await operationLog(db, storeId, operationId), actor, fingerprint)) {
+  if (matchingOperation(recorded, actor, fingerprint)) {
     return readVisibleState(db, actor, storeId);
   }
   const syncExtensions = operation === 'command' && value.type === 'syncAutoExtensions';

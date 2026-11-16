@@ -1,10 +1,12 @@
 import { getNextAutoExtensionAt } from './auto-extension.mjs';
 import { offlineCommands, offlineLimit, openOperationQueue, orderCanWait } from './offline-operations.mjs';
+import { getCastDutyMode } from './cast-duty.mjs';
 
 const authSDK = 'https://www.gstatic.com/firebasejs/13.3.0/';
 const conflictMessage = '別の端末でデータが更新されました。最新の内容を確認し、操作をやり直してください。';
 const lockedMessage = '送信結果を確認中の操作があります。同期状況を確認してください。';
 const offlineOrderMessage = '同じ伝票や卓に送信待ちの操作があります。同期後に最新の内容を確認してください。';
+const dutyOfflineMessage = '担当キャストの勤務状況を確認するため、接続が回復してから注文を確定してください。';
 const authMessages = {
   'auth/invalid-credential': 'メールアドレスまたはパスワードを確認してください。',
   'auth/wrong-password': 'メールアドレスまたはパスワードを確認してください。',
@@ -87,6 +89,7 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
   let writingQueue = false;
   let polling = false;
   let ended = false;
+  let workspaceLocked = false;
 
   const patch = (next) => {
     if (Object.keys(next).every((key) => current[key] === next[key])) return;
@@ -116,12 +119,18 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
     }
   }
 
+  function assertWorkspaceUnlocked() {
+    if (workspaceLocked) throw new CloudError('device-locked', '画面ロックを解除してから操作してください。', 423);
+  }
+
   async function request(path, { method = 'GET', body, actor = requireActor() } = {}) {
+    assertWorkspaceUnlocked();
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
     let response;
     try {
       const idToken = await actor.getIdToken();
+      assertWorkspaceUnlocked();
       if (auth?.currentUser?.uid !== actor.uid) throw new CloudError('auth-required', 'ログインし直してください。');
       response = await fetchImpl(`${endpoint}${path}`, {
         method,
@@ -234,10 +243,12 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
       ...(!activeScope && { status: !actor ? 'signed-out' : actor.emailVerified ? 'ready' : 'needs-verification' }),
       ...(actor?.uid !== previous && { stores: [] }),
     });
-    if (!actor?.emailVerified) return;
+    if (!actor?.emailVerified || workspaceLocked) return;
     try { await listStores(); }
     catch (error) {
-      if (current.user?.uid === actor.uid) patch({ error: error.message, status: transient(error) ? 'offline' : 'error' });
+      if (current.user?.uid === actor.uid && error.code !== 'device-locked') {
+        patch({ error: error.message, status: transient(error) ? 'offline' : 'error' });
+      }
     }
   }
 
@@ -286,7 +297,9 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
     const serial = ++scope.sequence;
     const deadline = current.state?.day ? getNextAutoExtensionAt(current.state) : null;
     const autoDue = deadline != null && deadline <= Date.now();
-    const since = current.revision === null || current.restricted || !current.state || autoDue ? '' : `?since=${current.revision}`;
+    const dutyRefresh = current.state?.castDutyProjection?.refreshAt;
+    const since = current.revision === null || current.restricted || !current.state || autoDue || (dutyRefresh != null && dutyRefresh <= Date.now())
+      ? '' : `?since=${current.revision}`;
     const result = await request(`${storePath(scope)}/state${since}`);
     if (acceptState(scope, result, serial)) return refreshStore(scope);
     return currentStoreResult();
@@ -299,7 +312,7 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
   }
 
   function topicDenied(scope, error) {
-    if (scope !== activeScope) return;
+    if (scope !== activeScope || error.code === 'device-locked') return;
     if (error.status === 401 || error.status === 403 || error.status === 404) {
       clearStore();
       patch({ status: 'ready', error: 'この店舗にアクセスできなくなりました。店舗を選び直してください。' });
@@ -311,18 +324,19 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
 
   function schedule(delay = pollMs) {
     clearTimeout(timer);
-    if (!activeScope || ended || globalThis.document?.hidden || !isOnline()) return;
+    if (!activeScope || ended || workspaceLocked || globalThis.document?.hidden || !isOnline()) return;
     timer = setTimeout(() => void tick(), delay);
   }
 
   async function tick() {
     const scope = activeScope;
     if (!scope || polling || takingOrder || writingQueue) { schedule(); return; }
-    if (globalThis.document?.hidden || !isOnline()) return;
+    if (workspaceLocked || globalThis.document?.hidden || !isOnline()) return;
     polling = true;
     let sent = false;
     try {
       await refreshQueue(scope);
+      if (workspaceLocked) return;
       if (scope.queue.length && !current.conflict) {
         const result = await sendPending(scope);
         sent = Boolean(result && !result.queued);
@@ -337,6 +351,7 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
   }
 
   function onConnectivity() {
+    if (workspaceLocked) return;
     if (!activeScope) {
       if (isOnline() && current.userVerified && current.status === 'offline') void listStores().catch(() => {});
       return;
@@ -352,6 +367,7 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
   }
 
   async function enterStore(storeId) {
+    assertWorkspaceUnlocked();
     const actor = requireActor();
     const store = current.stores.find(({ id }) => id === storeId);
     if (!store) throw new CloudError('store-unknown', '店舗一覧を更新してから選び直してください。');
@@ -380,6 +396,7 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
     assertScope(scope);
     const operation = scope.queue[0];
     if (!operation || current.conflict) return null;
+    if (workspaceLocked) return { queued: true, operationId: operation.body.operationId };
     if (takingOrder) throw new CloudError('sync-pending', lockedMessage);
     takingOrder = true;
     const serial = ++scope.sequence;
@@ -397,7 +414,7 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
         void refreshStore(scope).catch(() => {});
         throw new CloudError(error.code, conflictMessage, error.status);
       }
-      if (transient(error)) {
+      if (transient(error) || error.code === 'device-locked') {
         patch({ status: 'offline', error: '' });
         return { queued: true, operationId: operation.body.operationId };
       }
@@ -420,12 +437,13 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
   }
 
   async function queueOrSend(route, data) {
+    assertWorkspaceUnlocked();
     const scope = activeScope;
     assertScope(scope);
     requireActor();
     const operationId = globalThis.crypto.randomUUID();
     if (takingOrder || writingQueue || current.conflict) throw new CloudError('sync-pending', lockedMessage);
-    const durable = route === 'commands' && offlineCommands.has(data.command?.type);
+    const durable = route === 'commands' && offlineCommands.has(data.command?.type) && !isDutyOrder(data.command);
     const operation = {route,body:{...data,operationId},createdAt:Date.now()};
     const append = (rows) => {
       if (rows.length >= offlineLimit) throw new CloudError('queue-full','送信待ちが30件あります。同期後に操作してください。');
@@ -466,12 +484,18 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
     }
   }
 
+  function isDutyOrder(command) {
+    return command?.type === 'order' && getCastDutyMode(current.state) !== 'all'
+      && command.items?.some(({castIds}) => castIds?.length);
+  }
+
   function submit(command, expectedRevision = current.revision) {
     assertScope(activeScope);
     if (current.restricted || !current.state) throw new CloudError('store-restricted', 'この権限では営業データを変更できません。');
     if (!Number.isSafeInteger(expectedRevision) || expectedRevision !== current.revision) {
       throw new CloudError('revision-conflict', conflictMessage, 409);
     }
+    if (!isOnline() && isDutyOrder(command)) throw new CloudError('offline-command',dutyOfflineMessage);
     if (!isOnline() && !offlineCommands.has(command?.type)) throw new CloudError('offline-command', 'この操作にはインターネット接続が必要です。');
     return queueOrSend('commands', { command: structuredClone(command), expectedRevision });
   }
@@ -498,6 +522,7 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
   }
 
   async function clearQueue() {
+    assertWorkspaceUnlocked();
     if (takingOrder || writingQueue) throw new CloudError('sync-pending', lockedMessage);
     const scope = activeScope;
     assertScope(scope);
@@ -524,6 +549,42 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
     get snapshot() { return current; },
     start,
     dispose,
+    async setWorkspaceLocked(locked) {
+      if (workspaceLocked === locked) return;
+      workspaceLocked = locked;
+      schedule(0);
+      if (locked || activeScope || !current.userVerified) return;
+      if (!isOnline()) { patch({status:'offline'}); return; }
+      try { await listStores(); }
+      catch (error) {
+        if (error.code !== 'device-locked') patch({error:error.message,status:transient(error) ? 'offline' : 'error'});
+      }
+    },
+    async verifyDeviceLockAccount(uid, { method, email, password }) {
+      if (!workspaceLocked) throw new CloudError('not-device-locked', '画面はすでにロック解除されています。');
+      return login(async () => {
+        const account = auth.currentUser;
+        if (account && account.uid !== uid) {
+          throw new CloudError('device-account-mismatch', '画面ロックを設定したアカウントで本人確認してください。');
+        }
+        let result;
+        if (method === 'google') {
+          const provider = new sdk.GoogleAuthProvider();
+          provider.setCustomParameters({ prompt: 'select_account' });
+          result = account ? await sdk.reauthenticateWithPopup(account, provider) : await sdk.signInWithPopup(auth,provider);
+        } else {
+          const address = email.trim();
+          result = account ? await sdk.reauthenticateWithCredential(account, sdk.EmailAuthProvider.credential(address, password))
+            : await sdk.signInWithEmailAndPassword(auth, address, password);
+        }
+        if (result.user.uid !== uid || !result.user.emailVerified) {
+          if (!account) await sdk.signOut(auth);
+          throw new CloudError('device-account-mismatch', '画面ロックを設定したアカウントで本人確認してください。');
+        }
+        await handleAuth(result.user);
+        return result.user.uid;
+      });
+    },
     async signInGoogle() {
       return login(async () => {
         const provider = new sdk.GoogleAuthProvider();
@@ -630,6 +691,7 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
     restoreGroupMember(uid) { return request(`${storePath()}/members/${encodeURIComponent(uid)}`, { method: 'PUT' }); },
     cancelInvite(id) { return request(`${storePath()}/invites/${encodeURIComponent(id)}`, { method: 'DELETE' }); },
     async retrySync() {
+      assertWorkspaceUnlocked();
       const scope = activeScope;
       assertScope(scope);
       await refreshQueue(scope);

@@ -1,0 +1,37 @@
+.device-screen-locked .skip-link { display: none; }
+#device-lock-screen[hidden] { display: none; }
+#device-lock-screen {
+  display: grid;
+  align-items: start;
+  justify-items: center;
+  min-height: 100vh;
+  min-height: 100dvh;
+  padding: max(28px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(28px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+  background: radial-gradient(ellipse at 20% 10%, #f5f0ff 0, transparent 58%), linear-gradient(145deg, #ecf4fd, #f8f9fd);
+}
+.device-lock-card {
+  display: grid;
+  gap: 20px;
+  width: min(100%, 415px);
+  margin-top: clamp(16px, 9vh, 100px);
+  padding: clamp(22px, 5vw, 34px);
+  background: #fff;
+  border: 1px solid #d9dfe9;
+  border-radius: 24px;
+  color: #15203b;
+  box-shadow: 0 18px 60px #25265d16;
+}
+.device-lock-card h1 { margin: 0 0 8px; font-size: clamp(23px, 6vw, 30px); line-height: 1.25; }
+.device-lock-card p { margin: 0; color: #485574; line-height: 1.55; }
+.device-lock-card form, .device-lock-settings { display: grid; gap: 12px; }
+.device-lock-card input { min-width: 0; min-height: 44px; width: 100%; font-size: 16px; }
+.device-lock-card .btn { justify-content: center; min-height: 44px; white-space: normal; }
+.device-lock-card .device-lock-error { color: #9f234d; }
+.device-lock-error, .device-lock-message { font-size: 14px; overflow-wrap: anywhere; }
+.device-lock-hint, .device-lock-recovery { font-size: 14px; }
+.device-lock-recovery summary { width: fit-content; color: #254394; cursor: pointer; }
+.device-lock-recovery p { margin: 12px 0; }
+.device-lock-recovery form + button { margin-top: 10px; }
+@media print {
+  .device-screen-locked #device-lock-screen { display: none; }
+}
