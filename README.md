@@ -51,7 +51,11 @@
 
 店舗管理者は「メニュー → 店舗設定 → LINE通知」で、自動延長の約5分前と在庫数量が下限に達したときの通知を選べます。送信先には店舗の確認を促す定型文を送ります。設定を保存してからテスト通知を実行し、通知履歴で「LINEが受理」と表示されるか確認してください。LINEアプリへの到達は、送信先のアカウントでも確認してください。サインインなしのデモでは、設定・テスト・延長前と在庫通知の文面・履歴を画面内で試せます。[LINEのプッシュメッセージ](https://developers.line.biz/ja/reference/messaging-api/#send-push-message)
 
-本番ではLINE公式アカウントのMessaging APIチャネルを用意し、Workerシークレット `LINE_CHANNEL_ACCESS_TOKEN` にチャネルアクセストークンを登録してください。`LINE_DESTINATIONS_JSON` には店舗IDをキー、同じチャネルで確認済みのLINE送信先IDを値とするJSONを登録します。グループを使う場合は、その公式アカウントを店舗スタッフのグループに参加させ、信頼できるWebhookのイベントからグループIDを確認します。シークレット登録後、店舗管理者がPOSで有効にします。送信先を変更した場合は、店舗管理者が設定を確認して再び有効にします。[グループへの送信](https://developers.line.biz/ja/docs/messaging-api/group-chats/) [アクセストークン](https://developers.line.biz/ja/docs/basics/channel-access-token/)
+初回は、NP POS用のLINE公式アカウントでMessaging APIを有効にします。同じチャネルの基本設定の「チャネルシークレット」とMessaging API設定の「チャネルアクセストークン」を、CloudflareダッシュボードのWorker `np-pos-cloud` →「設定」→「変数とシークレット」に、種類「シークレット」で登録します。登録名は `LINE_CHANNEL_SECRET` と `LINE_CHANNEL_ACCESS_TOKEN` です。CLIを使う場合は、対象のWorkerで `wrangler secret put LINE_CHANNEL_SECRET` と `wrangler secret put LINE_CHANNEL_ACCESS_TOKEN` を実行し、それぞれの入力欄に値を入力します。[LINE Developersコンソール](https://developers.line.biz/console/) [アクセストークン](https://developers.line.biz/ja/docs/basics/channel-access-token/) [Cloudflareのシークレット設定](https://developers.cloudflare.com/workers/configuration/secrets/)
+
+LINE DevelopersコンソールのMessaging API画面で、Webhook URLに `https://np-pos-cloud.sai10ryo.workers.dev/api/line/webhook` を登録し、「検証」の成功を確認してWebhookを有効にします。LINEグループを使う場合は公式アカウントのグループ参加を許可し、受信するグループに招待します。個別トークで受け取る場合は公式アカウントを友だち追加します。[Webhookの検証](https://developers.line.biz/ja/docs/messaging-api/verify-webhook-url/) [グループへの参加](https://developers.line.biz/ja/docs/messaging-api/group-chats/)
+
+NP POSの店舗管理者がLINE通知画面で接続コードを発行し、10分以内に表示されたメッセージを通知先のトークに送ります。「送信先を確認」で取得した名前を確認し、「このトークを送信先にする」を押します。続いて使う通知を選び、通知を有効にして設定を保存します。通知先や接続用のシークレットを変更した場合も、この手順で再確認します。従来の `LINE_DESTINATIONS_JSON` で設定済みの店舗は、画面で新しい送信先を登録するまで従来の設定を引き継ぎます。
 
 ## クラウド店舗を使う
 
@@ -64,7 +68,9 @@
 
 PCとスマホは店舗ごとの保存先を共有します。通信断中の注文・会計などはブラウザー内の送信待ちに保存し、再読み込み後も同じアカウント・店舗で接続すると順番に送信します。「送信待ちを確認」で内訳と競合を確認できます。送信待ちの注文がある伝票の会計は、同期後に金額を確認して進めます。競合時は当該操作と後続を保留し、最新の営業データを確認してからやり直せます。
 
-公開版は、対応ブラウザーからホーム画面に追加できます。一度オンラインで開いて画面の保存が完了すると、通信断で再読み込みしても公開デモを開けます。クラウド店舗の初回表示や、通信断で再読み込みした後の店舗データの取得には接続が必要です。営業中の送信待ちは同じアカウント・店舗で再接続すると再開します。
+公開版は、対応ブラウザーからホーム画面に追加できます。一度オンラインで開いて画面の保存が完了すると、通信断で再読み込みしても公開デモを開けます。クラウド店舗では、オンライン時に「この端末の画面ロック」を有効にすると、そのアカウント・店舗の卓、利用中と退店待ちの伝票、営業に必要な設定を端末に保存します。通信断で再読み込みしたら端末PINで解除し、最後の保存から8時間以内はホールを開いて注文などを送信待ちにできます。顧客・給与・監査ログの閲覧には再接続が必要です。
+
+接続が戻ると同じアカウントの最新の店舗権限と保存番号を確認してから、送信待ちを同期します。他端末で伝票が先に変更された場合は、最新の内容を確認してからやり直してください。同じ伝票の注文が送信待ちにある間は同期後に会計額を確認します。
 
 共有端末では「メニュー → この端末の画面ロック」で6桁のPINと自動ロックまでの時間を設定できます。「今すぐ画面をロック」も使えます。クラウド利用中は同じブラウザーのタブで状態を共有し、再読み込み後もロックが続きます。PINを忘れた場合は、そのアカウントで本人確認すると端末のPINをリセットできます。送信待ちの営業操作は端末に残ります。デモのPIN設定はタブを再読み込みするとリセットされます。
 
@@ -208,7 +214,22 @@ Node.jsとWranglerを利用できる開発環境で `npm --prefix server run ver
 
 本番DBにはCloudflare D1のTime Travelが適用されます。復元ポイントの保持期間は契約プランに従います。実際の復元時は、接続先と対象時刻を照合し、営業中の書き込みと端末の送信待ちを整理してから切り替えます。D1を復元すると、同じデータベース内の全店舗がその時点に戻ります。FirebaseのアカウントとWorkerのシークレットは別に管理します。[Cloudflare D1の復元手順](https://developers.cloudflare.com/d1/reference/time-travel/)
 
-LINE通知の設定と送信履歴はD1に保存されます。デモデータや店舗設定のJSON復元では移行しません。LINEを設定した本番D1を復元するときは、復元前にLINEの定期送信を止め、復元直後に `np_line_settings` の `enabled` を無効にし、`np_line_jobs` の送信待ちを取り消してください。対象店舗が送信先を確認して再設定した後、定期送信を再開してください。[定期送信の設定](https://developers.cloudflare.com/workers/configuration/cron-triggers/)
+LINE通知の設定、送信先、送信履歴はD1に保存されます。デモデータや店舗設定のJSON復元では移行しません。LINEを設定した本番D1を復元するときは、復元前にLINEの定期送信を止め、復元直後に `np_line_settings` の `enabled` を無効にし、`np_line_jobs` の送信待ちを取り消し、`np_line_pairings` の接続コードを削除してください。対象店舗が送信先を確認して再設定した後、定期送信を再開してください。[定期送信の設定](https://developers.cloudflare.com/workers/configuration/cron-triggers/)
+
+### 独立した日次バックアップ
+
+有効化したWorkerは毎日06:15（日本時間）以降に、店舗ごとに営業データ、店舗・グループの権限、監査ログと再送記録を暗号化して別の保管先へ保存します。各店舗の営業データと権限は同じ取得時点で記録し、操作履歴もその時点の保存番号までを含めます。通常のD1トランザクションで読み取り、CloudflareのSQLエクスポートによる停止を避けます。全店舗を同時点に戻す復旧にはD1 Time Travelを使います。[D1のトランザクション](https://developers.cloudflare.com/d1/worker-api/d1-database/#batch) [D1 Time Travel](https://developers.cloudflare.com/d1/reference/time-travel/)
+
+1. 本番の保存先は営業用DBとは別の非公開D1 `np-pos-backup-vault` です。日次バックアップを30日分保持します。新規環境では `NP_POS_BACKUP_VAULT` に専用D1を割り当て、`server/backup-vault.sql` を適用します。Workerの `NP_POS_BACKUP_RUN=1` と、ランダムな32バイトを16進数64文字にした `NP_POS_BACKUP_KEY` を設定します。復元用の鍵の控えは保管先とは別に管理します。R2を使う環境では非公開バケットを `NP_POS_BACKUPS` に設定できます。[D1のバインド](https://developers.cloudflare.com/d1/worker-api/d1-database/) [Workerのシークレット](https://developers.cloudflare.com/workers/configuration/secrets/)
+2. 保管先の `np-pos/daily/v1/YYYY-MM-DD/` を確認します。店舗の `manifest.npb` が復元に使う完了マーカーです。当日の対象店舗すべてに完了マーカーが付くと、日付の直下に `complete.npb` が作られます。D1の `np_backup_jobs` で進捗・最終状態を確認できます。途中で記録できなかった場合は後の定期実行で再試行し、日付をさかのぼって作成しません。バケットで保持期間を設定する場合は、同じプレフィックスの分割ファイルと完了マーカーに同一のルールを適用してください。鍵を切り替える際は未完了の作業を確認し、保持中のバックアップに対応する旧鍵も保管してください。[R2の保持期間設定](https://developers.cloudflare.com/r2/buckets/object-lifecycles/)
+3. 復元用の端末に該当日の鍵を `NP_POS_BACKUP_KEY` 環境変数で渡します。空のD1への取り込み前に、次の復元ツールで分割ファイルの認証、店舗と保存番号、外部キーを検証します。複数の店舗は `--store` を繰り返して指定できます。同じグループに属する店舗をまとめる場合は、取得時点のグループ権限が一致する組み合わせを選んでください。LINEの接続・通知待ち、Firebaseのアカウント、Workerのシークレットは別管理です。
+
+```sh
+node server/export-backup-vault.mjs --day YYYY-MM-DD --directory ./encrypted-backup
+npm --prefix server run restore:daily-backup -- --day YYYY-MM-DD --store STORE_ID --directory ./encrypted-backup --out restored.sql
+```
+
+R2から直接復元する場合は `--directory` の代わりに `--bucket BACKUP_BUCKET` を指定できます。検証済みSQLには営業情報が含まれるため、非公開の保存先で扱ってください。別の空のD1に取り込んだ後、店舗の権限と監査ログ、締め済みの会計・給与を確認してから切り替えます。[D1のインポート](https://developers.cloudflare.com/d1/best-practices/import-export-data/)
 
 ## ソースを編集する
 
@@ -233,4 +254,4 @@ node --test tests/*.test.mjs server/*.test.mjs
 
 公開画面を変更したら `node scripts/update-offline-assets.mjs` を実行し、オフライン用の一覧もコミットします。新しい版は一式を取得できた時点で準備され、開いている旧版のNP POSタブを閉じて開き直すと切り替わります。
 
-GitHub Pages は `main` の `docs/` を配信します。`docs/cloud-config.mjs` はブラウザー向けのFirebase設定とクラウドAPIの接続先です。Workerは `server/` のAPIでFirebaseのログイン情報と店舗・グループの権限を検証し、D1に保存します。`server/schema.sql` が初期テーブル定義で、`wrangler.jsonc` がWorkerの接続設定です。既存のD1では、Workerを更新する前に `server/migrations/` の `20261117-store-groups.sql`、`20261117-guide-assistant.sql`、`20261117-store-access-blocks.sql`、`20261117-custom-store-roles.sql`、`20261117-line-notifications.sql` を順に適用してください。
+GitHub Pages は `main` の `docs/` を配信します。`docs/cloud-config.mjs` はブラウザー向けのFirebase設定とクラウドAPIの接続先です。Workerは `server/` のAPIでFirebaseのログイン情報と店舗・グループの権限を検証し、D1に保存します。`server/schema.sql` が初期テーブル定義で、`wrangler.jsonc` がWorkerの接続設定です。既存のD1では、Workerを更新する前に `server/migrations/` の `20261117-store-groups.sql`、`20261117-guide-assistant.sql`、`20261117-store-access-blocks.sql`、`20261117-custom-store-roles.sql`、`20261117-line-notifications.sql`、`20261117-line-pairing.sql`、`20261117-daily-backups.sql` を順に適用してください。

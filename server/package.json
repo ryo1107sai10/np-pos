@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "test": "node --test *.test.mjs",
-    "verify:restore": "node restore-drill.mjs"
+    "verify:restore": "node restore-drill.mjs",
+    "restore:daily-backup": "node restore-backup.mjs"
   },
   "dependencies": {
     "jose": "6.1.3"

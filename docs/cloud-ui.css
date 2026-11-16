@@ -18,6 +18,7 @@
   background: linear-gradient(105deg,#f6f1fd,#fff 72%);
 }
 .np-cloud-banner-warning { border-color: #e9d9b7; background: linear-gradient(105deg,#fff7e6,#fff 72%); }
+.np-cloud-banner-recovery { flex: 1 0 100%; margin: 0; color: #72471b; font-size: 12px; }
 .np-cloud-symbol {
   flex: 0 0 36px;
   display: grid;

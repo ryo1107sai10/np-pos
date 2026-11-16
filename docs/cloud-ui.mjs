@@ -1,6 +1,7 @@
 import {roleLabel,roleLabels} from './role-policy.mjs';
 
 const integer = new Intl.NumberFormat('ja-JP');
+const offlineTime = new Intl.DateTimeFormat('ja-JP',{timeZone:'Asia/Tokyo',month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit',hourCycle:'h23'});
 
 function roleName(role, cloud, profileId) {
   return roleLabel(cloud,role,profileId) || '権限未設定';
@@ -31,6 +32,7 @@ function isCloudMode(cloud) {
 }
 
 export function renderCloudEntry(cloud, api) {
+  if (cloud.coldOffline) return '';
   const label = isCloudMode(cloud) ? '店舗・アカウント' : cloud.user ? 'クラウド店舗を開く' : 'クラウドにサインイン';
   return `<span class="np-cloud-entry">${button(label, 'cloud-open', api, { glyph: 'user' })}</span>`;
 }
@@ -48,6 +50,7 @@ export function renderCloudBanner(cloud, api) {
   if (connected) caption = '同期済み';
   if (connected && waiting) caption = '送信を確認しています';
   if (offline) caption = waiting ? `オフライン · ${integer.format(waiting)}件の送信待ち` : 'オフライン';
+  if (cloud.coldOffline) caption = waiting ? `端末データで営業中 · ${integer.format(waiting)}件の送信待ち` : '端末データで営業中';
   if (failed) caption = status === 'conflict' ? '操作内容を確認してください' : '接続を確認してください';
   if (connected && store?.hasState === false) caption = '営業データの準備が必要です';
   return `<section class="np-cloud-banner${failed || offline ? ' np-cloud-banner-warning' : ''}" aria-label="クラウド店舗">
@@ -57,6 +60,7 @@ export function renderCloudBanner(cloud, api) {
     ${waiting ? button('送信待ちを確認', 'cloud-sync-review', api, {glyph:'history',tone:'quiet'}) : ''}
     ${status !== 'conflict' && (failed || offline)
       ? button('再接続', 'cloud-sync-retry', api, {glyph:'refresh',tone:'quiet'}) : ''}
+    ${cloud.coldOffline && Number.isFinite(cloud.offlineSavedAt) ? `<p class="np-cloud-banner-recovery">${escape(offlineTime.format(cloud.offlineSavedAt))}に保存した営業データです。接続後に操作を同期します。</p>` : ''}
   </section>`;
 }
 

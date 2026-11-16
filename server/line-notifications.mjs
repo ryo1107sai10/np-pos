@@ -1,6 +1,7 @@
 import { getAutoExtensionNotices } from '../docs/auto-extension.mjs';
 import { lineNotifications } from '../docs/line-notification-content.mjs';
 import { prepared, readRows, resultRow } from './db-queries.mjs';
+import { canPairLine, lineCredentialId } from './line-pairing.mjs';
 import { requireCondition } from './policy.mjs';
 
 const minute = 60_000;
@@ -27,6 +28,18 @@ function destinations(env) {
 function destinationFor(config,storeId) {
   const destination = Object.hasOwn(config,storeId) ? config[storeId] : null;
   return typeof destination === 'string' && destinationPattern.test(destination) ? destination : null;
+}
+
+async function recipientFor(db,storeId,credentialId,legacy) {
+  const linked = await resultRow(db,'SELECT destination_id,label,credential_id FROM np_line_destinations WHERE store_id = ?',storeId);
+  if (linked) return credentialId === linked.credential_id && destinationPattern.test(linked.destination_id)
+    ? {destination:linked.destination_id,hash:await destinationHash(`${linked.destination_id}:${credentialId}`),label:linked.label} : null;
+  const destination = destinationFor(legacy,storeId);
+  return destination ? {destination,hash:await destinationHash(destination)} : null;
+}
+
+async function currentRecipient(db,env,storeId) {
+  return recipientFor(db,storeId,await lineCredentialId(env),destinations(env));
 }
 
 async function destinationHash(destination) {
@@ -91,8 +104,10 @@ export async function getLineSettings(db,env,actor,storeId) {
   ]);
   const row = settings.results?.[0];
   requireCondition(row,403,'line-forbidden','LINE通知の設定には店舗管理者の権限が必要です。');
-  const hash = await destinationHash(destinationFor(destinations(env),storeId));
-  return {configured:Boolean(hash),enabled:Boolean(hash && row.enabled && row.destination_hash === hash),
+  const recipient = await currentRecipient(db,env,storeId);
+  const hash = recipient?.hash;
+  return {configured:Boolean(hash),canPair:canPairLine(env),destinationLabel:recipient?.label ?? null,
+    enabled:Boolean(hash && row.enabled && row.destination_hash === hash),
     needsConfirmation:Boolean(hash && row.enabled && row.destination_hash !== hash),extension:Boolean(row.extension),lowStock:Boolean(row.low_stock),
     history:(history.results ?? []).map(({kind,status,created_at,finished_at}) => ({kind,status,createdAt:created_at,finishedAt:finished_at}))};
 }
@@ -101,7 +116,7 @@ export async function saveLineSettings(db,env,actor,storeId,input) {
   await getLineSettings(db,env,actor,storeId);
   requireCondition(input && ['enabled','extension','lowStock'].every((key) => typeof input[key] === 'boolean'),
     400,'line-settings-invalid','LINE通知の設定を確認してください。');
-  const hash = await destinationHash(destinationFor(destinations(env),storeId));
+  const hash = (await currentRecipient(db,env,storeId))?.hash ?? null;
   requireCondition(!input.enabled || hash,409,'line-not-configured','LINEの接続情報がまだ登録されていません。');
   const now = Date.now();
   const [settings] = await db.batch([
@@ -131,7 +146,7 @@ export async function primeLineReminders(db,storeId,{state,revision},now = Date.
 export async function queueLineTest(db,env,actor,storeId,now = Date.now()) {
   const settings = await getLineSettings(db,env,actor,storeId);
   requireCondition(settings.enabled,409,'line-disabled','LINE通知をオンにして保存してください。');
-  const hash = await destinationHash(destinationFor(destinations(env),storeId));
+  const hash = (await currentRecipient(db,env,storeId))?.hash ?? null;
   const id = crypto.randomUUID();
   const queued = await resultRow(db,`INSERT INTO np_line_jobs (id,store_id,event_key,configuration_id,kind,created_at,available_at,expires_at)
     SELECT ?,store_id,?,configuration_id,'test',?,?,? FROM np_line_settings
@@ -159,11 +174,13 @@ export async function sendLineMessage({token,destination,kind,retryKey},send = g
 
 export async function dispatchLineJobs(db,env,{now=Date.now(),send=globalThis.fetch}={}) {
   const config = destinations(env);
-  if (!Object.keys(config).length) return;
+  const credentialId = await lineCredentialId(env);
+  if (!credentialId && !Object.keys(config).length) return;
   await db.batch([
     prepared(db,`UPDATE np_line_jobs SET status = 'expired', finished_at = ?
       WHERE status = 'pending' AND expires_at <= ? AND lease_until <= ?`,now,now,now),
     prepared(db,`DELETE FROM np_line_jobs WHERE finished_at < ?`,now - historyWindow),
+    prepared(db,`DELETE FROM np_line_pairings WHERE expires_at <= ?`,now),
   ]);
   const rows = await readRows(db,`SELECT j.id FROM np_line_jobs j WHERE j.status = 'pending' AND j.available_at <= ? AND j.expires_at > ?
     AND j.lease_until <= ? ORDER BY j.expires_at,j.created_at LIMIT ?`,now,now,now,readyLimit);
@@ -172,11 +189,11 @@ export async function dispatchLineJobs(db,env,{now=Date.now(),send=globalThis.fe
       WHERE id = ? AND status = 'pending' AND available_at <= ? AND expires_at > ? AND lease_until <= ?
       RETURNING store_id, configuration_id, kind, attempts, expires_at`,now + minute,id,now,now,now);
     if (!job) return;
-    const destination = destinationFor(config,job.store_id);
-    const hash = await destinationHash(destination);
+    const recipient = await recipientFor(db,job.store_id,credentialId,config);
+    const hash = recipient?.hash;
     const current = hash && await resultRow(db,`SELECT 1 AS enabled FROM np_line_jobs j JOIN np_line_settings s ON s.store_id = j.store_id
       WHERE j.id = ? AND j.status = 'pending' AND j.attempts = ? AND s.destination_hash = ? AND ${activeJob}`,id,job.attempts,hash);
-    const outcome = current && await sendLineMessage({token:env.LINE_CHANNEL_ACCESS_TOKEN,destination,kind:job.kind,retryKey:id},send);
+    const outcome = current && await sendLineMessage({token:env.LINE_CHANNEL_ACCESS_TOKEN,destination:recipient.destination,kind:job.kind,retryKey:id},send);
     const retryAt = now + minute * 2 ** (job.attempts - 1);
     const retry = Boolean(outcome?.retry && job.attempts < retryLimit && retryAt < job.expires_at);
     const status = !outcome ? 'cancelled' : outcome.accepted ? 'accepted' : retry ? 'pending' : 'failed';

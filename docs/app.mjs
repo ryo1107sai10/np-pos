@@ -158,7 +158,16 @@ let cloudMembers = { members: [], invites: [] };
 let cloudBusy = false;
 let cloudMessage = '';
 let cloudActionError = '';
-const cloud = createCloudClient(cloudConfig, { onChange: cloudUpdated, pollMs: 6000 });
+let offlineVerifiedUid;
+let offlineRestartError = '';
+let restoringOffline;
+const cloud = createCloudClient(cloudConfig, { onChange: cloudUpdated, pollMs: 6000,
+  offlineAccessAllowed: (uid, storeId) => {
+    const lock = persistentDeviceLock.snapshot;
+    const hint = rememberedCloudStore();
+    return lock.enabled && lock.uid === uid && hint?.uid === uid && hint.id === storeId;
+  },
+});
 cloudState = cloud.snapshot;
 let visibleDeviceLock;
 let deviceLockBusy = false;
@@ -184,6 +193,7 @@ function syncDeviceLockScreen() {
   if (status.locked) {
     if (visibleDeviceLock !== controller) {
       visibleDeviceLock = controller;
+      offlineVerifiedUid = undefined;
       deviceLockMessage = '';
       void cloud.setWorkspaceLocked(true);
       activeBarcodeScan?.close();
@@ -202,7 +212,7 @@ function syncDeviceLockScreen() {
     updateDeviceLockScreen(deviceLockScreen,status,deviceLockBusy,deviceLockMessage || status.error);
     return;
   }
-  if (!visibleDeviceLock) return;
+  if (!visibleDeviceLock || deviceLockBusy) return;
   visibleDeviceLock = undefined;
   deviceLockMessage = '';
   deviceLockScreen.hidden = true;
@@ -240,8 +250,10 @@ async function unlockDeviceScreen(form, method) {
       const verifiedUid = await cloud.verifyDeviceLockAccount(uid,{method,
         email:String(values.get('email') ?? ''),password:String(values.get('password') ?? '')});
       controller.resetAfterIdentityCheck(verifiedUid);
+      if (controller === persistentDeviceLock) await cloud.clearOfflineSnapshot().catch(() => {});
     } else {
       await controller.unlock(String(values.get('pin') ?? ''));
+      if (controller === persistentDeviceLock) offlineVerifiedUid = uid;
     }
   } catch (error) {
     deviceLockMessage = error.message;
@@ -266,6 +278,10 @@ async function saveDeviceLockSettings(form) {
     if (enabled && pin !== String(values.get('deviceConfirmPin') ?? '')) throw new Error('確認用PINが一致していません。');
     await controller.configure({uid:sample ? 'demo' : cloudState.user?.uid,enabled,pin,
       minutes:Number(values.get('deviceLockMinutes')),currentPin:String(values.get('deviceCurrentPin') ?? '')});
+    if (!sample) {
+      if (enabled) await cloud.saveOfflineSnapshot().catch(() => {});
+      else await cloud.clearOfflineSnapshot().catch(() => {});
+    }
     if (modal === active && dialog.open) {
       dialog.close();
       render();
@@ -371,6 +387,7 @@ function timer(endsAt, now = Date.now()) {
 
 function canOpenPage(key) {
   const role = currentRole();
+  if (cloudState?.coldOffline && key !== 'floor') return false;
   return Object.hasOwn(pages,key) && roleAllowsPage(state,role,key,currentProfileId())
     && (key === 'floor' ? role !== 'cast' : (pages[key].roles ?? ['admin','manager']).includes(role));
 }
@@ -389,6 +406,7 @@ function currentRoleLabel() {
 }
 
 function currentRoleAllows(group) {
+  if (cloudState?.coldOffline && ['reports','customers','staffing','inventory'].includes(group)) return false;
   return roleGroupAllowed(state,currentRole(),group,currentProfileId());
 }
 
@@ -397,12 +415,21 @@ function demoActor() {
   return { id: `demo-${profileId ?? demoRole}`, label: `デモの${currentRoleLabel()}`, role: demoRole, ...(profileId && {profileId}) };
 }
 
+const offlineWorkspaceActions = new Set([
+  'dismiss','navigate','open-workspace-menu','close-workspace-menu','floor-view','layout-view-area','table','filter','hide-detail','open','seat','order',
+  'move','extend','settle','depart','serve','receipt','category','product','order-line-stage','order-line-edit',
+  'order-line-remove','order-line-reset','add-payment','remove-payment','cloud-sync-review','cloud-sync-retry',
+  'cloud-sync-discard','cloud-sync-close',
+]);
+
 function permittedAction(action) {
   if (isDeviceLocked()) return false;
   if (action === 'device-lock-now') return activeDeviceLock().snapshot.enabled;
   if (action === 'device-lock-settings') return activeDeviceLock().snapshot.available
+    && !cloudState.coldOffline
     && (activeDeviceLock() === sampleDeviceLock || cloudState.userVerified && (!persistentDeviceLock.snapshot.enabled
       || persistentDeviceLock.snapshot.uid === cloudState.user?.uid));
+  if (cloudState.coldOffline && !offlineWorkspaceActions.has(action)) return false;
   const store = cloudState.store;
   if (action.startsWith('practice-')) return !store;
   if (demoPractice && (action.startsWith('cloud-') || action.startsWith('demo-'))) return false;
@@ -840,7 +867,7 @@ function render({ preserveFocus = false } = {}) {
   lastStatuses = state.tables.map((table)=>tableStatus(state,table.id)).join('|');
   lastMinute = dateTime.format(Date.now());
   const model = cloudModel();
-  const banner = renderCloudBanner(model, {escape, icon});
+  const banner = renderCloudBanner(model, {escape, icon}) + offlineRestartNotice();
   const now = Date.now();
   let floorNotices = [];
   let content;
@@ -858,7 +885,7 @@ function render({ preserveFocus = false } = {}) {
       ${button('監査ログ','audit-log',{glyph:'history'})}${button('運用設定','ops-settings',{glyph:'settings'})}${button('印刷設定','print-settings',{glyph:'printer'})}${button('会計CSV設定','accounting-settings',{glyph:'download'})}</div>` : '';
     let view;
     if (page === 'floor') {
-      floorNotices = getAutoExtensionNotices(state,now);
+      if (!cloudState.coldOffline) floorNotices = getAutoExtensionNotices(state,now);
       view = renderFloor(floorNotices,now);
     }
     else if (page === 'customers') view = customerUI.renderCustomers(customerWorkspaceState(),
@@ -950,6 +977,22 @@ function rememberStore(store) {
     if (store && cloudState.user) localStorage.setItem(cloudWorkspaceKey, JSON.stringify({ uid: cloudState.user.uid, id: store.id }));
     else localStorage.removeItem(cloudWorkspaceKey);
   } catch { /* The workspace selection can still be made for this session. */ }
+  if (store && !cloudState.coldOffline) void cloud.saveOfflineSnapshot().catch(() => {});
+}
+
+function rememberedCloudStore() {
+  try {
+    const hint = JSON.parse(localStorage.getItem(cloudWorkspaceKey));
+    return typeof hint?.uid === 'string' && typeof hint.id === 'string' ? hint : null;
+  } catch { return null; }
+}
+
+function offlineRestartNotice() {
+  if (navigator.onLine !== false || cloudState.store || !rememberedCloudStore()) return '';
+  const message = offlineRestartError || (persistentDeviceLock.snapshot.enabled
+    ? '通信が切断されています。端末PINで再開できる営業データを確認しています。'
+    : 'クラウド店舗を再開するには接続が必要です。接続後に「この端末の画面ロック」を設定すると、次の通信断に備えられます。');
+  return `<p class="notice" role="status"><span>${icon('info',17)}${escape(message)}</span></p>`;
 }
 
 function cloudUpdated(next) {
@@ -993,7 +1036,7 @@ function cloudUpdated(next) {
     laborRange = {};
     const view = next.store ? {view: 'list', area: null} : loadFloorView();
     floorView = view.view; planArea = view.area;
-    if (before.store && !next.store) rememberStore(null);
+    if (before.store && !next.store && !before.coldOffline) rememberStore(null);
   }
   if (contextChanged || before.state !== next.state) syncFloorSelection();
   if ((contextChanged || accountChanged) && dialog.open && modal?.type === 'cloud') paintDialog();
@@ -1013,10 +1056,20 @@ async function refreshMembers() {
 }
 
 async function restoreCloud() {
-  if (isDeviceLocked()) { await cloud.start(); return; }
-  let hint;
-  try { hint = JSON.parse(localStorage.getItem(cloudWorkspaceKey)); } catch { /* Select a store manually. */ }
+  const hint = rememberedCloudStore();
   if (!hint) return;
+  if (navigator.onLine === false) {
+    if (isDeviceLocked() || cloudState.store || restoringOffline || hint.uid !== offlineVerifiedUid) return;
+    restoringOffline = cloud.restoreOfflineStore({uid:hint.uid,storeId:hint.id});
+    try { await restoringOffline; }
+    catch (error) {
+      offlineRestartError = error.message || 'この端末に保存した営業データを開けません。通信が戻ってから店舗を開いてください。';
+      render();
+    } finally { restoringOffline = undefined; }
+    return;
+  }
+  if (isDeviceLocked()) { await cloud.start(); return; }
+  if (cloudState.coldOffline) return;
   await cloud.start();
   if (isDeviceLocked()) return;
   if (hint.uid === cloudState.user?.uid && cloudState.stores.some(({id}) => id === hint.id)) {
@@ -1296,7 +1349,8 @@ function toast(message, {error = false} = {}) {
 async function handleLineSettings(action,target) {
   if (action === 'line-notifications') {
     const demo = !cloudState.store;
-    openDialog('line-notifications',{demo,loading:!demo,model:demo ? demoLineSettings : null});
+    openDialog('line-notifications',{demo,loading:!demo,model:demo ? demoLineSettings : null,
+      ...(!demo && {webhookUrl:new URL('/api/line/webhook',cloudConfig.apiBase).toString()})});
     if (demo) return;
   }
   const active = modal;
@@ -1316,6 +1370,20 @@ async function handleLineSettings(action,target) {
         demoLineSettings = {...demoLineSettings,history};
       }
       active.model = demoLineSettings;
+    } else if (action === 'line-notifications-pair-start') {
+      active.pairing = await cloud.beginLinePairing();
+    } else if (action === 'line-notifications-pair-copy') {
+      if (active.pairing?.sendText) await navigator.clipboard.writeText(active.pairing.sendText);
+      if (modal === active && dialog.open) toast('LINEに送るメッセージをコピーしました。');
+    } else if (action === 'line-notifications-pair-check') {
+      const {pairing} = await cloud.linePairing();
+      active.pairing = pairing && {...(active.pairing?.id === pairing.id && active.pairing),...pairing};
+      if (modal === active && dialog.open && !pairing?.label) toast(pairing ? 'LINEからの接続メッセージを待っています。' : '接続コードを発行してください。');
+    } else if (action === 'line-notifications-pair-confirm') {
+      const {id,label} = active.pairing ?? {};
+      active.model = await cloud.confirmLinePairing({id,label});
+      active.pairing = null;
+      if (modal === active && dialog.open) toast('送信先を登録しました。通知を使う場合は有効にして保存してください。');
     } else {
       active.model = save ? await cloud.saveLineSettings(input) : test ? await cloud.queueLineTest() : await cloud.lineSettings();
     }
@@ -4801,11 +4869,13 @@ document.addEventListener('keydown', (event) => {
   }
 });
 window.addEventListener('hashchange',()=>{page=readPage(); render();});
+window.addEventListener('online',()=> { offlineRestartError = ''; void restoreCloud(); });
 window.addEventListener('storage',(event)=>{
   if (event.key===deviceLockStorageKey || event.key===null) {
     persistentDeviceLock.check({shared:true});
     syncDeviceLockScreen();
   }
+  if (event.key===cloudWorkspaceKey || event.key===deviceLockStorageKey || event.key===null) cloud.checkOfflineAccess();
   if (event.key!==storageKey && event.key!==legacyStorageKey) return;
   if (cloudState.store || demoPractice) return;
   if (dialog.open) { pendingStorage = true; return; }
@@ -4829,6 +4899,10 @@ deviceLockScreen.addEventListener('submit',(event)=> {
 deviceLockScreen.addEventListener('click',(event)=> {
   if (event.target.closest?.('[data-device-google]')) void unlockDeviceScreen(undefined,'google');
 });
+if (navigator.onLine === false && persistentDeviceLock.snapshot.enabled
+  && rememberedCloudStore()?.uid === persistentDeviceLock.snapshot.uid) {
+  persistentDeviceLock.lock();
+}
 checkDeviceReturn();
 syncFloorSelection();
 render();

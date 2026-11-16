@@ -3,7 +3,10 @@ import { applyCommand, changeMember, createStore, getStoreOverview, inviteMember
 import { changeGroupMember, createStoreGroup, inviteGroupMember, listStoreGroups, renameStoreGroup, revokeGroupInvite, setGroupStore } from './store-groups.mjs';
 import { ApiError, isRecord, requireCondition } from './policy.mjs';
 import { answerGuideTopic, getGuideAccess } from './guide-assistant.mjs';
+import { runDailyBackup } from './daily-backup.mjs';
+import { openBackupVault } from './backup-vault.mjs';
 import { dispatchLineJobs, getLineSettings, primeLineReminders, queueLineTest, saveLineSettings } from './line-notifications.mjs';
+import { beginLinePairing, confirmLinePairing, getLinePairing, processLineWebhook } from './line-pairing.mjs';
 
 const firebaseKeys = createRemoteJWKSet(new URL(
   'https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com',
@@ -155,6 +158,10 @@ async function route(request, env, url) {
     const row = await env.DB.prepare('SELECT 1 AS ready').first();
     return { ok: row?.ready === 1 };
   }
+  if (method === 'POST' && url.pathname === '/api/line/webhook') {
+    const db = env.DB.withSession?.('first-primary') ?? env.DB;
+    return processLineWebhook(db,env,request);
+  }
   const overview = method === 'GET' && url.pathname === '/api/stores/overview';
   const groupMatch = /^\/api\/groups(?:\/([^/]+)(?:\/(stores|members|invites)(?:\/([^/]+))?)?)?$/.exec(url.pathname);
   const match = /^\/api\/stores(?:\/([^/]+)\/(state|commands|migrate|members|invites|audit|guide|line-notifications)(?:\/([^/]+))?)?$/.exec(url.pathname);
@@ -178,6 +185,14 @@ async function route(request, env, url) {
   }
   if (section === 'line-notifications') {
     if (method === 'GET' && !id) return getLineSettings(db,env,actor,storeId);
+    if (id === 'pairing') {
+      if (method === 'GET') return getLinePairing(db,env,actor,storeId);
+      if (method === 'POST') return beginLinePairing(db,env,actor,storeId);
+      if (method === 'PATCH') {
+        await confirmLinePairing(db,env,actor,storeId,await jsonBody(request,1024));
+        return getLineSettings(db,env,actor,storeId);
+      }
+    }
     if (method === 'PATCH' && !id) {
       const settings = await saveLineSettings(db,env,actor,storeId,await jsonBody(request,1024));
       if (settings.enabled && settings.extension) {
@@ -215,7 +230,11 @@ async function route(request, env, url) {
 export default {
   async scheduled(_controller,env) {
     const db = env.DB.withSession?.('first-primary') ?? env.DB;
-    await dispatchLineJobs(db,env);
+    const backupEnv = env.NP_POS_BACKUP_VAULT && !env.NP_POS_BACKUPS
+      ? {...env,NP_POS_BACKUPS:openBackupVault(env.NP_POS_BACKUP_VAULT)} : env;
+    const [line,backup] = await Promise.allSettled([dispatchLineJobs(db,env),runDailyBackup(backupEnv)]);
+    if (backup.status === 'rejected') console.error(JSON.stringify({event:'daily_backup_failed',name:backup.reason?.name ?? 'Error'}));
+    if (line.status === 'rejected') throw line.reason;
   },
   async fetch(request, env) {
     let headers = { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' };

@@ -1,12 +1,17 @@
 import { getNextAutoExtensionAt } from './auto-extension.mjs';
 import { offlineCommands, offlineLimit, openOperationQueue, orderCanWait } from './offline-operations.mjs';
 import { getCastDutyMode } from './cast-duty.mjs';
+import { createOfflineWorkspace, offlineWorkspaceLifetime, openOfflineWorkspaceCache, usableOfflineWorkspace } from './offline-snapshot.mjs';
+import { roleAllowsCommand } from './role-policy.mjs';
 
 const authSDK = 'https://www.gstatic.com/firebasejs/13.3.0/';
 const conflictMessage = '別の端末でデータが更新されました。最新の内容を確認し、操作をやり直してください。';
 const lockedMessage = '送信結果を確認中の操作があります。同期状況を確認してください。';
 const offlineOrderMessage = '同じ伝票や卓に送信待ちの操作があります。同期後に最新の内容を確認してください。';
 const dutyOfflineMessage = '担当キャストの勤務状況を確認するため、接続が回復してから注文を確定してください。';
+const coldOfflineUnavailable = 'この端末に利用できる店舗データがありません。オンラインで店舗を開き直してください。';
+const workspaceRoles = new Set(['admin','manager','staff','cast','trainee']);
+const invalidSessionCodes = new Set(['auth/user-token-expired','auth/invalid-user-token','auth/user-disabled','auth/user-not-found']);
 const authMessages = {
   'auth/invalid-credential': 'メールアドレスまたはパスワードを確認してください。',
   'auth/wrong-password': 'メールアドレスまたはパスワードを確認してください。',
@@ -71,19 +76,27 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
   fetchImpl = globalThis.fetch,
   isOnline = networkAvailable,
   operationQueue = openOperationQueue(globalThis.indexedDB),
+  offlineCache = openOfflineWorkspaceCache(globalThis.indexedDB),
+  offlineAccessAllowed = () => false,
+  now = Date.now,
 } = {}) {
   const endpoint = endpointFor(apiBase);
   const configured = Boolean(endpoint && firebase?.apiKey && firebase.projectId);
+  const cacheKey = JSON.stringify([endpoint,firebase?.projectId]);
   let current = {
     status: configured ? 'idle' : 'unavailable', cloudConfigured: configured,
     user: null, userVerified: false, stores: [], store: null, state: null, revision: null,
     restricted: false, pending: 0, waiting: [], pendingVolatile: false, conflict: '', error: '',
+    coldOffline: false, offlineSavedAt: null, offlineExpiresAt: null,
   };
   let sdk;
   let auth;
   let startPromise;
   let detachAuth;
   let timer;
+  let leaseTimer;
+  let listening = false;
+  let cacheWrites = Promise.resolve();
   let activeScope;
   let takingOrder = false;
   let writingQueue = false;
@@ -99,7 +112,58 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
 
   function clearStore() {
     activeScope = undefined;
-    patch({ store: null, state: null, revision: null, restricted: false, pending: 0, waiting: [], pendingVolatile: false, conflict: '' });
+    clearTimeout(leaseTimer);
+    patch({ store: null, state: null, revision: null, restricted: false, pending: 0, waiting: [], pendingVolatile: false, conflict: '',
+      coldOffline:false, offlineSavedAt:null, offlineExpiresAt:null });
+  }
+
+  function writeOfflineCache(record) {
+    cacheWrites = cacheWrites.catch(() => {}).then(() => offlineCache.write(cacheKey,record));
+    return cacheWrites;
+  }
+
+  function clearOfflineSnapshot() {
+    if (activeScope) activeScope.cachedAt = undefined;
+    return writeOfflineCache(null).catch(() => {});
+  }
+
+  async function saveOfflineSnapshot() {
+    const scope = activeScope;
+    if (!scope || scope.cold || !isOnline() || current.userVerified !== true || !offlineAccessAllowed(scope.uid,scope.storeId)) return false;
+    const savedAt = now();
+    if (scope.cachedAt !== undefined && current.revision === scope.cachedRevision && current.store.role === scope.cachedRole
+      && current.store.profileId === scope.cachedProfileId && savedAt >= scope.cachedAt && savedAt - scope.cachedAt < 300_000) return true;
+    try {
+      const record = createOfflineWorkspace({ uid:scope.uid, store:current.store, state:current.state, revision:current.revision, savedAt });
+      if (!record) { await clearOfflineSnapshot(); return false; }
+      await writeOfflineCache(record);
+      scope.cachedAt = savedAt;
+      scope.cachedRevision = record.revision;
+      scope.cachedRole = record.store.role;
+      scope.cachedProfileId = record.store.profileId;
+      return true;
+    } catch { return false; }
+  }
+
+  function stillAuthorizedOffline(scope) {
+    return scope?.cold && now() >= scope.savedAt && now() < scope.expiresAt && offlineAccessAllowed(scope.uid,scope.storeId);
+  }
+
+  function expireOfflineScope(scope) {
+    if (scope !== activeScope || !scope?.cold || stillAuthorizedOffline(scope)) return;
+    void clearOfflineSnapshot();
+    clearStore();
+    patch({ user:auth?.currentUser ? summaryUser(auth.currentUser) : null, error:coldOfflineUnavailable,
+      status:'offline', userVerified:auth?.currentUser?.emailVerified === true });
+  }
+
+  function attachEvents() {
+    if (listening) return;
+    listening = true;
+    globalThis.addEventListener?.('online', onConnectivity);
+    globalThis.addEventListener?.('offline', onConnectivity);
+    globalThis.addEventListener?.('beforeunload', onPendingExit);
+    globalThis.document?.addEventListener('visibilitychange', onConnectivity);
   }
 
   function assertNoPending(discard = false) {
@@ -116,6 +180,10 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
   function assertScope(scope) {
     if (!scope || scope !== activeScope || current.user?.uid !== scope.uid) {
       throw new CloudError('store-changed', '操作中の店舗が変わりました。店舗を選び直してください。');
+    }
+    if (scope.cold && !stillAuthorizedOffline(scope)) {
+      expireOfflineScope(scope);
+      throw new CloudError('offline-snapshot-expired',coldOfflineUnavailable);
     }
   }
 
@@ -203,6 +271,9 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
     let store = current.store;
     const changedRole = result.role && (store.role !== result.role || store.profileId !== result.profileId);
     if (serial < scope.roleSerial) return false;
+    if (scope.cold && (result.unchanged || !workspaceRoles.has(result.role) || (!restricted && !result.state))) {
+      throw new CloudError('invalid-response','クラウドから最新の営業データを受け取れませんでした。');
+    }
     if (changedRole) {
       scope.roleSerial = serial;
       store = { ...store, role: result.role, profileId:result.profileId };
@@ -211,8 +282,13 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
         return true;
       }
     }
-    if (!changedRole && current.revision !== null && result.revision < current.revision) return false;
+    if (!scope.cold && !changedRole && current.revision !== null && result.revision < current.revision) return false;
     if (store.hasState !== true && result.revision > 0) store = { ...store, hasState: true };
+    const cold = scope.cold;
+    if (cold) {
+      scope.cold = false;
+      clearTimeout(leaseTimer);
+    }
     patch({
       store,
       state: restricted ? null : result.unchanged ? current.state : (result.state ?? null),
@@ -220,6 +296,7 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
       restricted,
       status: current.conflict ? 'conflict' : scope.queue.length ? 'offline' : 'synced',
       error: '',
+      ...(cold && {coldOffline:false,offlineSavedAt:null,offlineExpiresAt:null}),
     });
     return false;
   }
@@ -237,6 +314,7 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
     if (ended) return;
     const previous = current.user?.uid;
     const actor = summaryUser(user);
+    if (previous && (previous !== actor?.uid || !actor.emailVerified)) void clearOfflineSnapshot();
     if (!actor || actor.uid !== previous || !actor.emailVerified) clearStore();
     patch({
       user: actor, userVerified: actor?.emailVerified ?? false, error: '',
@@ -254,8 +332,10 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
 
   async function start() {
     if (!configured || ended) return current;
+    attachEvents();
+    if (!isOnline() && !startPromise) return current;
     if (startPromise) return startPromise;
-    patch({ status: 'connecting', error: '' });
+    if (!activeScope?.cold) patch({ status: 'connecting', error: '' });
     startPromise = (async () => {
       try {
         sdk = await firebaseLoader();
@@ -271,14 +351,10 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
             void handleAuth(user).finally(resolve);
           });
         });
-        globalThis.addEventListener?.('online', onConnectivity);
-        globalThis.addEventListener?.('offline', onConnectivity);
-        globalThis.addEventListener?.('beforeunload', onPendingExit);
-        globalThis.document?.addEventListener('visibilitychange', onConnectivity);
         return current;
       } catch (error) {
         startPromise = undefined;
-        patch({ status: 'error', error: authError(error).message });
+        patch({ status: activeScope?.cold ? 'offline' : 'error', error: authError(error).message });
         return current;
       }
     })();
@@ -298,10 +374,11 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
     const deadline = current.state?.day ? getNextAutoExtensionAt(current.state) : null;
     const autoDue = deadline != null && deadline <= Date.now();
     const dutyRefresh = current.state?.castDutyProjection?.refreshAt;
-    const since = current.revision === null || current.restricted || !current.state || autoDue || (dutyRefresh != null && dutyRefresh <= Date.now())
+    const since = scope.cold || current.revision === null || current.restricted || !current.state || autoDue || (dutyRefresh != null && dutyRefresh <= Date.now())
       ? '' : `?since=${current.revision}`;
     const result = await request(`${storePath(scope)}/state${since}`);
     if (acceptState(scope, result, serial)) return refreshStore(scope);
+    await saveOfflineSnapshot();
     return currentStoreResult();
   }
 
@@ -314,6 +391,7 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
   function topicDenied(scope, error) {
     if (scope !== activeScope || error.code === 'device-locked') return;
     if (error.status === 401 || error.status === 403 || error.status === 404) {
+      void clearOfflineSnapshot();
       clearStore();
       patch({ status: 'ready', error: 'この店舗にアクセスできなくなりました。店舗を選び直してください。' });
       void listStores().catch(() => {});
@@ -335,6 +413,7 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
     polling = true;
     let sent = false;
     try {
+      if (scope.cold) await revalidateOfflineScope(scope);
       await refreshQueue(scope);
       if (workspaceLocked) return;
       if (scope.queue.length && !current.conflict) {
@@ -351,6 +430,7 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
   }
 
   function onConnectivity() {
+    expireOfflineScope(activeScope);
     if (workspaceLocked) return;
     if (!activeScope) {
       if (isOnline() && current.userVerified && current.status === 'offline') void listStores().catch(() => {});
@@ -366,6 +446,53 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
     event.returnValue = '';
   }
 
+  async function restoreOfflineStore({ uid, storeId }) {
+    assertWorkspaceUnlocked();
+    if (activeScope?.cold && activeScope.uid === uid && activeScope.storeId === storeId && stillAuthorizedOffline(activeScope)) return current;
+    if (isOnline() || ended || !uid || !storeId || !offlineAccessAllowed(uid,storeId) || activeScope
+      || (auth && (!auth.currentUser || auth.currentUser.uid !== uid || !auth.currentUser.emailVerified))) {
+      throw new CloudError('offline-snapshot-unavailable',coldOfflineUnavailable);
+    }
+    await cacheWrites.catch(() => {});
+    let record;
+    try { record = await offlineCache.read(cacheKey); } catch { /* Report the same user-facing cache message. */ }
+    assertWorkspaceUnlocked();
+    if (isOnline() || activeScope || !offlineAccessAllowed(uid,storeId)
+      || (auth && (!auth.currentUser || auth.currentUser.uid !== uid || !auth.currentUser.emailVerified))
+      || !usableOfflineWorkspace(record,{uid,storeId,now:now()})) {
+      throw new CloudError('offline-snapshot-unavailable',coldOfflineUnavailable);
+    }
+    attachEvents();
+    const expiresAt = record.savedAt + offlineWorkspaceLifetime;
+    const scope = {
+      uid, storeId, key:JSON.stringify([endpoint,uid,storeId]), sequence:0,roleSerial:0,queue:[],
+      cold:true,fromOffline:true,savedAt:record.savedAt,expiresAt,
+    };
+    activeScope = scope;
+    patch({user:{uid},userVerified:false,stores:[],store:record.store,state:record.state,revision:record.revision,restricted:false,
+      status:'offline',coldOffline:true,offlineSavedAt:record.savedAt,offlineExpiresAt:expiresAt,conflict:'',error:''});
+    leaseTimer = setTimeout(() => expireOfflineScope(scope),Math.max(0,expiresAt - now()));
+    await refreshQueue(scope);
+    return current;
+  }
+
+  async function revalidateOfflineScope(scope) {
+    assertScope(scope);
+    if (!scope.cold) return;
+    await start();
+    assertScope(scope);
+    const actor = auth?.currentUser;
+    if (!actor || actor.uid !== scope.uid || !actor.emailVerified) {
+      throw new CloudError('network-unavailable','オンラインで店舗への接続を確認しています。');
+    }
+    try { await actor.getIdToken(true); }
+    catch (error) {
+      if (invalidSessionCodes.has(error.code)) throw new CloudError('auth-required','アカウントにサインインし直してください。',401);
+      throw new CloudError('network-unavailable','オンラインで店舗への接続を確認しています。');
+    }
+    await refreshStore(scope);
+  }
+
   async function enterStore(storeId) {
     assertWorkspaceUnlocked();
     const actor = requireActor();
@@ -373,6 +500,7 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
     if (!store) throw new CloudError('store-unknown', '店舗一覧を更新してから選び直してください。');
     if (activeScope?.storeId === storeId && current.revision !== null) return current;
     assertNoPending();
+    if (activeScope) await clearOfflineSnapshot();
     const scope = { uid: actor.uid, storeId, key:JSON.stringify([endpoint,actor.uid,storeId]), sequence:0,roleSerial:0,queue:[] };
     activeScope = scope;
     patch({ store, state: null, revision: null, restricted: false, status: 'connecting', conflict: '', error: '' });
@@ -396,7 +524,12 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
     assertScope(scope);
     const operation = scope.queue[0];
     if (!operation || current.conflict) return null;
-    if (workspaceLocked) return { queued: true, operationId: operation.body.operationId };
+    if (workspaceLocked || scope.cold) return { queued: true, operationId: operation.body.operationId };
+    if (scope.fromOffline && (current.restricted || !offlineRoleAllows(operation.body.command))) {
+      const reason = '現在の店舗権限では送信待ちの操作を処理できません。管理者に確認してください。';
+      patch({status:'conflict',conflict:reason,error:''});
+      throw new CloudError('forbidden',reason,403);
+    }
     if (takingOrder) throw new CloudError('sync-pending', lockedMessage);
     takingOrder = true;
     const serial = ++scope.sequence;
@@ -406,6 +539,7 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
       acceptState(scope, result, serial);
       await removePending(scope,operation);
       patch({ status: scope.queue.length ? 'offline' : 'synced', conflict: '', error: '' });
+      await saveOfflineSnapshot();
       return currentStoreResult();
     } catch (error) {
       if (scope !== activeScope) throw error;
@@ -440,7 +574,7 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
     assertWorkspaceUnlocked();
     const scope = activeScope;
     assertScope(scope);
-    requireActor();
+    if (!scope.cold) requireActor();
     const operationId = globalThis.crypto.randomUUID();
     if (takingOrder || writingQueue || current.conflict) throw new CloudError('sync-pending', lockedMessage);
     const durable = route === 'commands' && offlineCommands.has(data.command?.type) && !isDutyOrder(data.command);
@@ -473,7 +607,7 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
       }
       setPending(scope,rows);
       patch({error:''});
-      if (!isOnline() || rows[0].body.operationId !== operationId) {
+      if (!isOnline() || scope.cold || rows[0].body.operationId !== operationId) {
         patch({ status: 'offline' });
         return { queued: true, operationId };
       }
@@ -495,9 +629,25 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
     if (!Number.isSafeInteger(expectedRevision) || expectedRevision !== current.revision) {
       throw new CloudError('revision-conflict', conflictMessage, 409);
     }
+    if (activeScope.cold) validateColdCommand(command);
     if (!isOnline() && isDutyOrder(command)) throw new CloudError('offline-command',dutyOfflineMessage);
     if (!isOnline() && !offlineCommands.has(command?.type)) throw new CloudError('offline-command', 'この操作にはインターネット接続が必要です。');
     return queueOrSend('commands', { command: structuredClone(command), expectedRevision });
+  }
+
+  function offlineRoleAllows(command) {
+    const {role,profileId} = current.store;
+    return ['admin','manager','staff'].includes(role) && offlineCommands.has(command?.type) && (role !== 'staff' || command.type !== 'open')
+      && roleAllowsCommand(current.state,role,command,profileId);
+  }
+
+  function validateColdCommand(command) {
+    if (isOnline()) throw new CloudError('offline-reauthenticating','店舗への接続を確認してから操作してください。');
+    if (!offlineRoleAllows(command) || (command.type === 'seat' && (command.customer || command.customerId || command.newCustomer || command.companionCustomerIds?.length))
+      || (command.type === 'settle' && (command.payments?.some(({method}) => method === 'receivable')
+        || (getNextAutoExtensionAt(current.state) ?? Infinity) <= now()))) {
+      throw new CloudError('offline-command','この操作は、店舗に再接続してから行ってください。');
+    }
   }
 
   function migrate(snapshot) {
@@ -516,6 +666,8 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
       await operationQueue.update(scope.key,()=>[]);
     }
     if (scope !== activeScope) return;
+    await clearOfflineSnapshot();
+    if (scope !== activeScope) return;
     clearTimeout(timer);
     clearStore();
     patch({ status: current.userVerified ? 'ready' : 'signed-out', error: '' });
@@ -523,6 +675,7 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
 
   async function clearQueue() {
     assertWorkspaceUnlocked();
+    if (activeScope?.cold) throw new CloudError('offline-command','店舗に再接続してから送信待ちを変更してください。');
     if (takingOrder || writingQueue) throw new CloudError('sync-pending', lockedMessage);
     const scope = activeScope;
     assertScope(scope);
@@ -549,6 +702,10 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
     get snapshot() { return current; },
     start,
     dispose,
+    restoreOfflineStore,
+    saveOfflineSnapshot,
+    clearOfflineSnapshot,
+    checkOfflineAccess() { expireOfflineScope(activeScope); },
     async setWorkspaceLocked(locked) {
       if (workspaceLocked === locked) return;
       workspaceLocked = locked;
@@ -683,6 +840,9 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
     },
     listMembers() { return request(`${storePath()}/members`); },
     lineSettings() { return request(`${storePath()}/line-notifications`); },
+    linePairing() { return request(`${storePath()}/line-notifications/pairing`); },
+    beginLinePairing() { return request(`${storePath()}/line-notifications/pairing`,{method:'POST'}); },
+    confirmLinePairing(pairing) { return request(`${storePath()}/line-notifications/pairing`,{method:'PATCH',body:pairing}); },
     saveLineSettings(settings) { return request(`${storePath()}/line-notifications`,{method:'PATCH',body:settings}); },
     queueLineTest() { return request(`${storePath()}/line-notifications/test`,{method:'POST'}); },
     inviteMember(email, role) { return request(`${storePath()}/members`, { method: 'POST', body: { email, role } }); },
@@ -694,6 +854,11 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
       assertWorkspaceUnlocked();
       const scope = activeScope;
       assertScope(scope);
+      if (scope.cold) {
+        if (!isOnline()) throw new CloudError('network-unavailable','インターネット接続を確認してください。');
+        try { await revalidateOfflineScope(scope); }
+        catch (error) { topicDenied(scope,error); throw error; }
+      }
       await refreshQueue(scope);
       if (current.conflict) return refreshStore(scope);
       if (scope.queue.length) return sendPending(scope);

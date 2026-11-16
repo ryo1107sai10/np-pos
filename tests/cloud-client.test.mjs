@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createCloudClient } from '../docs/cloud-client.mjs';
+import { createDemo } from '../docs/engine.mjs';
+import { offlineWorkspaceLifetime } from '../docs/offline-snapshot.mjs';
 
 const account = {
   uid: 'user-a',
@@ -22,8 +24,19 @@ function testQueue() {
   }};
 }
 
+function testOfflineCache() {
+  const records = new Map();
+  return {
+    async read(key) { return structuredClone(records.get(key)); },
+    async write(key,record) {
+      if (record) records.set(key,structuredClone(record));
+      else records.delete(key);
+    },
+  };
+}
+
 function service(t, { verified = true, role = 'admin', command, readState, project = (value) => value,
-  queue = testQueue(), identity = account } = {}) {
+  queue = testQueue(), identity = account, offlineCache, offlineAccessAllowed, now } = {}) {
   let online = true;
   let revision = 0;
   let state = { revision: 0 };
@@ -55,6 +68,7 @@ function service(t, { verified = true, role = 'admin', command, readState, proje
     firebaseLoader: async () => sdk,
     isOnline: () => online,
     operationQueue:queue,
+    offlineCache, offlineAccessAllowed, now,
     onChange: (snapshot) => snapshots.push(snapshot),
     fetchImpl: async (url, options) => {
       const path = new URL(url).pathname;
@@ -160,6 +174,124 @@ test('device lock pauses authenticated workspace requests and preserves queued o
   await client.retrySync();
   assert.equal(client.snapshot.pending,0);
   assert.equal(calls.at(-1).payload.operationId,queued.operationId);
+});
+
+test('cold offline restores only the device-bound operational data and revalidates before replay', async (t) => {
+  const offlineCache = testOfflineCache();
+  const queue = testQueue();
+  const fixedTime = Date.parse('2026-11-17T20:00:00+09:00');
+  let time = fixedTime;
+  const options = {offlineCache,queue,offlineAccessAllowed:(uid) => uid === account.uid,now:() => time};
+  const {client:online,setRevision} = service(t,options);
+  const state = createDemo('live',fixedTime);
+  state.customers = [{id:'private-customer',name:'private-client-name'}];
+  state.receivables = [{amount:1000,customerId:'private-customer'}];
+  state.payroll = {salary:'private-salary'};
+  state.auditLog = [{action:'private-audit'}];
+  state.closedDays = [{date:'2026-11-15',sales:99_999,private:'private-day'}];
+  state.stock[0].unitCost = 743;
+  const ticket = state.tickets.find(({status}) => status === 'open');
+  Object.assign(ticket,{customer:'private-client-name',customerId:'private-customer',note:'private-guest-note'});
+  setRevision(7,state);
+  await online.start();
+  await online.enterStore('shop');
+  online.dispose();
+
+  const {client,calls,setOnline,setRevision: currentRevision} = service(t,options);
+  currentRevision(7,state);
+  setOnline(false);
+  await client.start();
+  assert.equal(client.snapshot.user,null);
+  await assert.rejects(client.restoreOfflineStore({uid:'different-user',storeId:'shop'}),{code:'offline-snapshot-unavailable'});
+  await assert.rejects(client.restoreOfflineStore({uid:account.uid,storeId:'different-store'}),{code:'offline-snapshot-unavailable'});
+  await client.setWorkspaceLocked(true);
+  await assert.rejects(client.restoreOfflineStore({uid:account.uid,storeId:'shop'}),{code:'device-locked'});
+  await client.setWorkspaceLocked(false);
+  await client.restoreOfflineStore({uid:account.uid,storeId:'shop'});
+  assert.equal(client.snapshot.coldOffline,true);
+  assert.equal(client.snapshot.userVerified,false);
+  assert.deepEqual(client.snapshot.user,{uid:account.uid});
+  assert.equal(client.snapshot.offlineSavedAt,time);
+  assert.equal(client.snapshot.offlineExpiresAt,time + offlineWorkspaceLifetime);
+  assert.equal(client.snapshot.state.stock[0].unitCost,0);
+  assert.equal(client.snapshot.state.tickets.find(({id})=>id===ticket.id).customer,'');
+  assert(!JSON.stringify(client.snapshot).includes('private-'));
+  assert.equal(calls.length,0);
+  assert.throws(()=>client.submit({type:'seat',tableIds:['a3'],customer:'offline-name'}),{code:'offline-command'});
+  assert.throws(()=>client.submit({type:'settle',ticketId:ticket.id,payments:[{method:'receivable',amount:1000}]}),{code:'offline-command'});
+  const order = {type:'order',ticketId:ticket.id,items:[{menuId:'highball',quantity:1}]};
+  const queued = await client.submit(order);
+  assert.equal(queued.queued,true);
+  assert.equal(calls.length,0);
+  assert.equal(client.snapshot.pending,1);
+  setOnline(true);
+  time += 60_000;
+  await client.retrySync();
+  assert.equal(client.snapshot.coldOffline,false);
+  assert.equal(client.snapshot.userVerified,true);
+  assert.equal(client.snapshot.revision,8);
+  assert.equal(client.snapshot.pending,0);
+  const readIndex = calls.findIndex(({path})=>path.endsWith('/state'));
+  const writeIndex = calls.findIndex(({path})=>path.endsWith('/commands'));
+  assert(readIndex >= 0 && readIndex < writeIndex);
+  assert.equal(calls[readIndex].query.get('since'),null);
+  assert.deepEqual(calls[writeIndex].payload,{command:order,operationId:queued.operationId,expectedRevision:7});
+});
+
+test('expired, revoked and signed-out browser workspaces never reuse the offline lease', async (t) => {
+  const offlineCache = testOfflineCache();
+  let time = Date.parse('2026-11-17T20:00:00+09:00');
+  let deviceUnlocked = true;
+  const options = {offlineCache,offlineAccessAllowed:(uid)=>uid === account.uid && deviceUnlocked,now:() => time};
+  const online = service(t,options);
+  online.setRevision(4,createDemo('live',time));
+  await online.client.start();
+  await online.client.enterStore('shop');
+  const offline = service(t,options);
+  offline.setOnline(false);
+  time += offlineWorkspaceLifetime;
+  await assert.rejects(offline.client.restoreOfflineStore({uid:account.uid,storeId:'shop'}),{code:'offline-snapshot-unavailable'});
+  await online.client.saveOfflineSnapshot();
+  deviceUnlocked = false;
+  await assert.rejects(offline.client.restoreOfflineStore({uid:account.uid,storeId:'shop'}),{code:'offline-snapshot-unavailable'});
+  deviceUnlocked = true;
+  await offline.client.restoreOfflineStore({uid:account.uid,storeId:'shop'});
+  deviceUnlocked = false;
+  offline.client.checkOfflineAccess();
+  assert.equal(offline.client.snapshot.state,null);
+  assert.equal(offline.client.snapshot.coldOffline,false);
+  deviceUnlocked = true;
+  time += 300_001;
+  await online.client.saveOfflineSnapshot();
+  await online.client.signOut();
+  await assert.rejects(offline.client.restoreOfflineStore({uid:account.uid,storeId:'shop'}),{code:'offline-snapshot-unavailable'});
+});
+
+test('reconnect replaces cached permissions and does not replay orders after losing authorization', async (t) => {
+  const offlineCache = testOfflineCache();
+  const queue = testQueue();
+  const options = {offlineCache,queue,offlineAccessAllowed:(uid)=>uid === account.uid};
+  const online = service(t,options);
+  const state = createDemo('live');
+  online.setRevision(3,state);
+  await online.client.start();
+  await online.client.enterStore('shop');
+  online.client.dispose();
+  const {client,calls,setOnline,setRevision} = service(t,{...options,role:'trainee'});
+  setRevision(3,state);
+  setOnline(false);
+  await client.restoreOfflineStore({uid:account.uid,storeId:'shop'});
+  await client.submit({type:'order',ticketId:state.tickets.find(({status})=>status==='open').id,items:[{menuId:'highball',quantity:1}]});
+  setOnline(true);
+  await assert.rejects(client.retrySync(),{code:'forbidden'});
+  assert.equal(client.snapshot.store.role,'trainee');
+  assert.equal(client.snapshot.restricted,true);
+  assert.equal(client.snapshot.state,null);
+  assert.equal(client.snapshot.pending,1);
+  assert.equal(calls.some(({path})=>path.endsWith('/commands')),false);
+  const another = service(t,options);
+  another.setOnline(false);
+  await assert.rejects(another.client.restoreOfflineStore({uid:account.uid,storeId:'shop'}),{code:'offline-snapshot-unavailable'});
 });
 
 test('multiple queued orders survive a client restart and replay in the original order at successive revisions', async (t) => {

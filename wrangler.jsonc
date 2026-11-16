@@ -11,13 +11,19 @@
   },
   "vars": {
     "FIREBASE_PROJECT_ID": "np-pos-cloud-20261116",
-    "ALLOWED_ORIGINS": "https://ryo1107sai10.github.io"
+    "ALLOWED_ORIGINS": "https://ryo1107sai10.github.io",
+    "NP_POS_BACKUP_RUN": "1"
   },
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "np-pos-cloud",
       "database_id": "a98244d4-0ea9-473e-a511-ab2538827435"
+    },
+    {
+      "binding": "NP_POS_BACKUP_VAULT",
+      "database_name": "np-pos-backup-vault",
+      "database_id": "c92e624d-7d35-47fc-9cc3-0ef44adc4c0a"
     }
   ]
 }

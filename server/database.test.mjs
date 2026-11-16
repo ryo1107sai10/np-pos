@@ -11,6 +11,7 @@ import {
 import { changeGroupMember, createStoreGroup, inviteGroupMember, listStoreGroups, renameStoreGroup, revokeGroupInvite, setGroupStore } from './store-groups.mjs';
 import { answerGuideTopic, getGuideAccess } from './guide-assistant.mjs';
 import { dispatchLineJobs, getLineSettings, primeLineReminders, queueLineTest, saveLineSettings } from './line-notifications.mjs';
+import { beginLinePairing, confirmLinePairing, getLinePairing, processLineWebhook } from './line-pairing.mjs';
 
 const schema = readFileSync(new URL('schema.sql', import.meta.url), 'utf8');
 const groupMigration = readFileSync(new URL('migrations/20261117-store-groups.sql', import.meta.url), 'utf8');
@@ -85,7 +86,7 @@ test('LINE settings are isolated, default off, and test sends retry once with th
   await assert.rejects(saveLineSettings(db,{},owner,tenant,config),{code:'line-not-configured'});
   await assert.rejects(queueLineTest(db,env,owner,tenant),{code:'line-disabled'});
   const enabled = await saveLineSettings(db,env,owner,tenant,{...config,destination:'arbitrary-attacker'});
-  assert.deepEqual(enabled,{configured:true,enabled:true,needsConfirmation:false,extension:true,lowStock:true,history:[]});
+  assert.deepEqual(enabled,{configured:true,canPair:false,destinationLabel:null,enabled:true,needsConfirmation:false,extension:true,lowStock:true,history:[]});
   const base = Date.now();
   const response = await queueLineTest(db,env,owner,tenant,base);
   assert.equal(response.history[0].status,'pending');
@@ -116,6 +117,77 @@ test('LINE settings are isolated, default off, and test sends retry once with th
   await dispatchLineJobs(db,changed,{now:base+125_000,send});
   assert.equal(outbound.length,2);
   assert.equal((await getLineSettings(db,changed,owner,tenant)).history[0].status,'cancelled');
+});
+
+async function lineWebhook(payload,secret,body = JSON.stringify(payload)) {
+  const bytes = new TextEncoder();
+  const key = await crypto.subtle.importKey('raw',bytes.encode(secret),{name:'HMAC',hash:'SHA-256'},false,['sign']);
+  const signed = await crypto.subtle.sign('HMAC',key,bytes.encode(JSON.stringify(payload)));
+  return new Request('https://worker.example/api/line/webhook',{method:'POST',body,
+    headers:{'X-Line-Signature':Buffer.from(signed).toString('base64')}});
+}
+
+test('LINE pairing requires the signed official-account message and deliberate store-admin confirmation', async () => {
+  const db = database();
+  const tenant = await store(db);
+  const other = await store(db,outsider);
+  const groupId = 'C'+'2'.repeat(32);
+  const botId = 'U'+'3'.repeat(32);
+  const env = {LINE_CHANNEL_ACCESS_TOKEN:'test-pair-token',LINE_CHANNEL_SECRET:'test-pair-secret'};
+  const now = Date.now();
+  const send = async (url,options) => {
+    assert.equal(options.headers.Authorization,'Bearer test-pair-token');
+    if (url === 'https://api.line.me/v2/bot/info') return Response.json({userId:botId,displayName:'NP POS 公式'});
+    if (url === `https://api.line.me/v2/bot/group/${groupId}/summary`) return Response.json({groupId,groupName:'営業連絡用'});
+    assert.fail(`Unexpected LINE API endpoint ${url}`);
+  };
+  await assert.rejects(beginLinePairing(db,env,outsider,tenant,{now,send}),{code:'line-forbidden'});
+  assert.equal((await getLineSettings(db,env,owner,tenant)).configured,false);
+  const pairing = await beginLinePairing(db,env,owner,tenant,{now,send});
+  assert.equal(pairing.officialAccount,'NP POS 公式');
+  assert.match(pairing.sendText,/^NP POS 接続 [a-f\d]{32}$/);
+  await assert.rejects(beginLinePairing(db,env,owner,tenant,{now:now+1,send}),{code:'line-pairing-wait'});
+  assert.deepEqual(await getLinePairing(db,env,outsider,other,{now,send}),{pairing:null});
+  const event = {type:'message',mode:'active',timestamp:now,source:{type:'group',groupId,userId:'U'+'4'.repeat(32)},
+    message:{type:'text',text:pairing.sendText}};
+  const payload = {destination:botId,events:[event]};
+  const webhook = (payload) => lineWebhook(payload,env.LINE_CHANNEL_SECRET);
+  await assert.rejects(processLineWebhook(db,env,await lineWebhook(payload,env.LINE_CHANNEL_SECRET,JSON.stringify(payload)+' '),now),
+    {code:'line-signature-invalid'});
+  await processLineWebhook(db,env,await webhook({...payload,destination:'U'+'5'.repeat(32)}),now);
+  await processLineWebhook(db,env,await webhook({...payload,events:[{...event,timestamp:now-10_000}]}),now);
+  assert.deepEqual((await getLinePairing(db,env,owner,tenant,{now,send})).pairing,{id:pairing.id,expiresAt:pairing.expiresAt,label:null});
+  await assert.rejects(confirmLinePairing(db,env,owner,tenant,pairing,{now,send}),{code:'line-pairing-unconfirmed'});
+  assert.deepEqual(await processLineWebhook(db,env,await webhook(payload),now),{ok:true});
+  await processLineWebhook(db,env,await webhook({...payload,events:[{...event,source:{type:'group',groupId:lineTarget}}]}),now);
+  const received = (await getLinePairing(db,env,owner,tenant,{now,send})).pairing;
+  assert.equal(received.label,'グループ「営業連絡用」');
+  assert.doesNotMatch(JSON.stringify(received),/test-pair|C2222|U4444|NP POS 接続/);
+  await assert.rejects(confirmLinePairing(db,env,owner,tenant,{...received,label:'別の送信先'},{now,send}),{code:'line-destination-changed'});
+  await assert.rejects(confirmLinePairing(db,env,owner,tenant,received,{now:pairing.expiresAt,send}),{code:'line-pairing-unconfirmed'});
+  await confirmLinePairing(db,env,owner,tenant,received,{now,send});
+  assert.deepEqual(await getLinePairing(db,env,owner,tenant,{now,send}),{pairing:null});
+  const linked = await getLineSettings(db,env,owner,tenant);
+  assert.equal(linked.configured,true);
+  assert.equal(linked.enabled,false);
+  assert.equal(linked.destinationLabel,received.label);
+  await assert.rejects(queueLineTest(db,env,owner,tenant),{code:'line-disabled'});
+  await saveLineSettings(db,env,owner,tenant,{enabled:true,extension:false,lowStock:true});
+  const queuedAt = Date.now();
+  await queueLineTest(db,env,owner,tenant,queuedAt);
+  const pushed = [];
+  await dispatchLineJobs(db,env,{now:queuedAt,send:async (url,options) => {
+    assert.equal(url,'https://api.line.me/v2/bot/message/push');
+    pushed.push(JSON.parse(options.body));
+    return new Response(null,{status:200});
+  }});
+  assert.equal(pushed[0].to,groupId);
+  assert.equal(pushed.length,1);
+  await queueLineTest(db,env,owner,tenant,queuedAt+61_000);
+  const rotated = {...env,LINE_CHANNEL_SECRET:'rotated',LINE_DESTINATIONS_JSON:JSON.stringify({[tenant]:lineTarget})};
+  assert.equal((await getLineSettings(db,rotated,owner,tenant)).configured,false);
+  await dispatchLineJobs(db,rotated,{now:queuedAt+62_000,send:() => assert.fail('New credentials must not send to an old verified destination')});
+  assert.equal((await getLineSettings(db,rotated,owner,tenant)).history[0].status,'cancelled');
 });
 
 test('LINE operational jobs use committed stock crossings and live—not cancelled—automatic extension deadlines', async () => {

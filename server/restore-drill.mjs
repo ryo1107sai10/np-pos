@@ -19,7 +19,7 @@ const sampleActors = {
 const fixtureName = 'np-pos-recovery-demo';
 const schema = () => readFileSync(new URL('./schema.sql',import.meta.url),'utf8');
 
-function databaseAdapter(sqlite) {
+export function databaseAdapter(sqlite) {
   return {
     prepare(sql) {
       const bind = (...parameters) => {
@@ -122,22 +122,25 @@ export async function verifyRecovery(sqlite,expected) {
 const identifier = (name) => `"${name.replaceAll('"','""')}"`;
 const literal = (value) => value == null ? 'NULL' : typeof value === 'number' ? String(value) : `'${value.replaceAll("'","''")}'`;
 
-export function d1SeedSql(sqlite) {
+export function* d1RestoreStatements(sqlite) {
   const objects = sqlite.prepare(`SELECT type,name,sql FROM sqlite_schema
     WHERE sql IS NOT NULL AND (tbl_name GLOB 'np_*' OR tbl_name = 'd1_migrations') ORDER BY rowid`).all();
   const tables = objects.filter(({type})=>type === 'table');
-  const definition = ({sql}) => `${sql.trimEnd().replace(/;$/,'')};`;
-  const statements = tables.map(definition);
+  const statement = (sql) => {
+    assert.ok(Buffer.byteLength(sql)<100_000,'D1 import statement is too long');
+    return `${sql.trimEnd().replace(/;$/,'')};`;
+  };
+  for (const {sql} of tables) yield statement(sql);
   for (const {name} of tables) {
     const table = identifier(name);
     const columns = sqlite.prepare(`PRAGMA table_info(${table})`).all();
     const keys = columns.filter(({pk})=>pk).map(({name})=>name);
     const fields = columns.map(({name})=>identifier(name)).join(', ');
-    for (const row of sqlite.prepare(`SELECT * FROM ${table}`).all()) {
+    for (const row of sqlite.prepare(`SELECT * FROM ${table}`).iterate()) {
       const splitFields = columns.filter(({name})=>!keys.includes(name) && typeof row[name] === 'string'
         && Buffer.byteLength(literal(row[name])) > 24_000).map(({name})=>name);
       const values = columns.map(({name})=>literal(splitFields.includes(name) ? '' : row[name])).join(', ');
-      statements.push(`INSERT INTO ${table} (${fields}) VALUES (${values});`);
+      yield statement(`INSERT INTO ${table} (${fields}) VALUES (${values});`);
       const condition = keys.map((key)=>`${identifier(key)} = ${literal(row[key])}`).join(' AND ');
       for (const field of splitFields) {
         assert.ok(condition,'A large field needs a primary key for the split restore');
@@ -145,17 +148,19 @@ export function d1SeedSql(sqlite) {
         const characters = Array.from(row[field]);
         for (let offset=0;offset<characters.length;offset+=12_000) {
           const text = literal(characters.slice(offset,offset+12_000).join(''));
-          statements.push(`UPDATE ${table} SET ${column} = ${column} || ${text} WHERE ${condition};`);
+          yield statement(`UPDATE ${table} SET ${column} = ${column} || ${text} WHERE ${condition};`);
         }
       }
     }
   }
-  statements.push(...objects.filter(({type})=>type !== 'table').map(definition));
-  assert.ok(statements.every((line)=>Buffer.byteLength(line)<100_000),'D1 import statement is too long');
-  return statements.join('\n');
+  for (const {type,sql} of objects) if (type !== 'table') yield statement(sql);
 }
 
-function isolatedProject(parent,name) {
+export function d1SeedSql(sqlite) {
+  return [...d1RestoreStatements(sqlite)].join('\n');
+}
+
+export function isolatedProject(parent,name) {
   const cwd = join(parent,name);
   mkdirSync(cwd);
   writeFileSync(join(cwd,'wrangler.jsonc'),JSON.stringify({name:fixtureName,compatibility_date:'2026-11-16',
