@@ -1016,6 +1016,169 @@ test('settled ticket correction keeps receivable collections and reports intact 
   assert.deepEqual(migrated.state.receivables, [entry]);
 });
 
+test('only an admin can correct settled tenders, preserving the gross amount and updating the archived till', async (t) => {
+  const db = database();
+  const tenant = await store(db);
+  for (const [person, role] of [[helper, 'manager'], [outsider, 'staff']]) {
+    await inviteMember(db, owner, tenant, person.email, role);
+    await listStores(db, person);
+  }
+  const date = '2026-11-16';
+  let now = Date.parse(`${date}T20:00:00+09:00`);
+  t.mock.method(Date, 'now', () => now);
+  const run = (actor, revision, suffix, action) => command(db, actor, tenant, revision, `payments-correction-${suffix}`, action);
+  await run(owner, 0, 'fee', { type: 'saveCardFeeSettings', settings: { enabled: true, rateBps: 1_000 } });
+  await run(owner, 1, 'open', { type: 'open', date, openingCash: 500 });
+  const seated = await run(outsider, 2, 'seat', { type: 'seat', tableIds: ['a1'], setId: 'set60', guests: 1 });
+  const [{ id: ticketId }] = seated.state.tickets;
+  const correction = { type: 'correctSettledTicketPayments', ticketId, reason: '  端末の控えを照合  ',
+    payments: [{ method: 'cash', amount: 3_700 }, { method: 'qr', amount: 2_900 }] };
+  await assert.rejects(run(owner, 3, 'unpaid', correction), { code: 'rejected-command' });
+  await run(outsider, 3, 'deposit', { type: 'deposit', ticketId, method: 'cash', amount: 600 });
+  const settled = await run(outsider, 4, 'settle-card', { type: 'settle', ticketId,
+    payments: [{ method: 'card', amount: 6_000 }], expectedCardFee: 600 });
+  const [paid] = settled.state.tickets;
+  assert.equal(paid.settlement.total, 7_200);
+  for (const actor of [helper, outsider]) {
+    await assert.rejects(run(actor, 5, 'denied', correction), { code: 'forbidden' });
+  }
+  await assert.rejects(run(owner, 5, 'missing-reason', { ...correction, reason: '  ' }), { code: 'reason-required' });
+  for (const [name, changes] of [
+    ['unrecognized-method', { payments: [{ method: 'wire', amount: 6_600 }] }],
+    ['noninteger-amount', { payments: [{ method: 'cash', amount: 6_600.5 }] }],
+    ['invalid-credit-date', { creditDueDate: '2026-02-30' }],
+  ]) {
+    await assert.rejects(run(owner, 5, name, { ...correction, ...changes }), { code: 'invalid-command' });
+  }
+  await assert.rejects(run(owner, 5, 'changed-total', {
+    ...correction, payments: [{ method: 'cash', amount: 6_000 }],
+  }), { code: 'rejected-command' });
+  await run(owner, 5, 'receipt', { type: 'issuePrintDocument', ticketId, date, kind: 'receipt' });
+  await run(outsider, 6, 'depart', { type: 'depart', ticketId });
+  await run(owner, 7, 'close', { type: 'close', actualCash: 1_100 });
+  now = Date.parse('2026-11-17T20:00:00+09:00');
+  const before = await run(owner, 8, 'next-day', { type: 'open', date: '2026-11-17', openingCash: 250 });
+  const [previous] = before.state.closedDays;
+  assert.equal(previous.expectedCash, 1_100);
+  await assert.rejects(run(owner, 8, 'stale', correction), { code: 'revision-conflict' });
+  const corrected = await run(owner, 9, 'archived', correction);
+  assert.deepEqual(await run(owner, 9, 'archived', correction), corrected);
+  assert.deepEqual(summary(corrected.state), summary(before.state));
+  assert.deepEqual(corrected.state.stock, before.state.stock);
+  const [report] = corrected.state.closedDays;
+  assert.deepEqual(report.payments, { cash: 4_300, card: 0, qr: 2_900 });
+  assert.deepEqual(report.tenderPayments, { cash: 3_700, card: 0, qr: 2_900 });
+  assert.equal(report.actualCash, previous.actualCash);
+  assert.equal(report.expectedCash, 4_800);
+  assert.equal(report.discrepancy, -3_700);
+  assert.equal(report.sales, previous.sales);
+  assert.deepEqual(report.commission, previous.commission);
+  const [receipt] = report.ticketSnapshots;
+  assert.equal(receipt.paymentsCorrectedAt, now);
+  assert.deepEqual(receipt.settlement, paid.settlement);
+  assert.equal(receipt.settlementRevision, paid.settlementRevision);
+  assert.deepEqual(receipt.deposits, paid.deposits);
+  assert.deepEqual(receipt.payments.map(({ method, amount }) => ({ method, amount })), correction.payments);
+  assert.equal((await readState(db, helper, tenant)).state.closedDays[0].expectedCash, 4_800);
+  const events = (await listAudit(db, owner, tenant)).events.filter(({ action }) => action === correction.type);
+  assert.equal(events.length, 1);
+  const [event] = events;
+  assert.equal(event.businessDate, date);
+  assert.equal(event.at, now);
+  assert.equal(event.actor.id, owner.uid);
+  assert.equal(event.target.id, ticketId);
+  assert.equal(event.reason, '端末の控えを照合');
+  assert.deepEqual(event.before, {
+    total: 7_200, cardFee: 600, payments: [{ method: 'card', amount: 6_600 }],
+    expectedCash: 1_100, actualCash: 1_100, discrepancy: 0,
+  });
+  assert.deepEqual(event.after, {
+    total: 7_200, cardFee: 600, payments: correction.payments,
+    expectedCash: 4_800, actualCash: 1_100, discrepancy: -3_700,
+  });
+  await assert.rejects(listAudit(db, helper, tenant), { code: 'forbidden' });
+  const reprinted = await run(owner, 10, 'corrected-receipt', { type: 'issuePrintDocument', ticketId, date, kind: 'receipt' });
+  assert.equal(reprinted.state.printDocuments.at(-1).number, 2);
+
+  const newTenant = await store(db);
+  for (const [suffix, tamper] of [
+    ['without-marker', (row) => { delete row.paymentsCorrectedAt; }],
+    ['wrong-total', (row) => { row.payments[0].amount += 1; }],
+    ['wrong-paid', (row) => { row.settlement.paid -= 1; }],
+    ['wrong-time', (row) => { row.paymentsCorrectedAt = row.settledAt - 1; }],
+  ]) {
+    const snapshot = structuredClone(corrected.state);
+    tamper(snapshot.closedDays[0].ticketSnapshots[0]);
+    await assert.rejects(migrateState(db, owner, newTenant, { operationId: `migration-corrected-${suffix}`, snapshot }),
+      { code: 'invalid-snapshot' });
+  }
+  const migrated = await migrateState(db, owner, newTenant, { operationId: 'migration-corrected-payments', snapshot: corrected.state });
+  const { seatedByUid: _seatedByUid, ...migratableReceipt } = receipt;
+  assert.deepEqual(migrated.state.closedDays[0].ticketSnapshots, [migratableReceipt]);
+
+  const legacyTenant = await store(db);
+  const legacySnapshot = structuredClone(corrected.state);
+  delete legacySnapshot.closedDays[0].ticketSnapshots[0].settlementRevision;
+  const legacy = await migrateState(db, owner, legacyTenant, { operationId: 'migration-corrected-legacy', snapshot: legacySnapshot });
+  assert.equal(legacy.state.closedDays[0].ticketSnapshots[0].settlementRevision, undefined);
+});
+
+test('a tender correction changes only receivable principal and retains original collection dates and entries', async (t) => {
+  const db = database();
+  const tenant = await store(db);
+  const date = '2026-11-16';
+  const nextDate = '2026-11-17';
+  let now = Date.parse(`${date}T20:00:00+09:00`);
+  t.mock.method(Date, 'now', () => now);
+  const run = (revision, suffix, action) => command(db, owner, tenant, revision, `payments-credit-${suffix}`, action);
+  await run(0, 'open', { type: 'open', date, openingCash: 0 });
+  const registered = await run(1, 'customer', {
+    type: 'saveCustomer', customer: { name: '振替のテスト顧客', creditEnabled: true, creditLimit: 2_000 },
+  });
+  const [customer] = registered.state.customers;
+  const seated = await run(2, 'seat', { type: 'seat', tableIds: ['a1'], setId: 'set60', guests: 1, customerId: customer.id });
+  const [{ id: ticketId }] = seated.state.tickets;
+  await run(3, 'settle', { type: 'settle', ticketId, payments: [{ method: 'cash', amount: 6_600 }] });
+  await run(4, 'depart', { type: 'depart', ticketId });
+  await run(5, 'close', { type: 'close', actualCash: 6_600 });
+  now = Date.parse(`${nextDate}T20:00:00+09:00`);
+  await run(6, 'next-day', { type: 'open', date: nextDate, openingCash: 0 });
+  const action = (credit) => ({ type: 'correctSettledTicketPayments', ticketId, reason: '売掛額の訂正',
+    payments: [{ method: 'cash', amount: 6_600 - credit }, ...(credit ? [{ method: 'receivable', amount: credit }] : [])],
+  });
+  const dueDate = '2026-11-30';
+  const charged = await run(7, 'add', { ...action(3_000), creditDueDate: dueDate });
+  const [issued] = charged.state.receivables;
+  assert.equal(issued.date, date);
+  assert.equal(issued.dueDate, dueDate);
+  assert.equal(issued.amount, 3_000);
+  assert.equal(issued.creditOverride.reason, '売掛額の訂正');
+  assert.equal(charged.state.closedDays[0].receivableSales, 3_000);
+  const recovered = await run(8, 'collect', { type: 'recoverReceivable', receivableId: issued.id, method: 'cash', date: nextDate, amount: 1_000 });
+  const [withCollection] = recovered.state.receivables;
+  await assert.rejects(run(9, 'deny-decrease-below-collected', action(999)), { code: 'rejected-command' });
+  await assert.rejects(run(9, 'deny-removal', action(0)), { code: 'rejected-command' });
+  assert.deepEqual(await readState(db, owner, tenant), recovered);
+  const corrected = await run(9, 'reduce', action(1_500));
+  const [loan] = corrected.state.receivables;
+  assert.equal(loan.id, issued.id);
+  assert.equal(loan.amount, 1_500);
+  assert.equal(loan.dueDate, dueDate);
+  assert.deepEqual(loan.collections, withCollection.collections);
+  assert.equal(summary(corrected.state).expectedCash, 1_000);
+  assert.equal(corrected.state.closedDays[0].receivableSales, 1_500);
+  assert.equal(corrected.state.closedDays[0].expectedCash, 5_100);
+  assert.equal(corrected.state.closedDays[0].actualCash, 6_600);
+  const [event] = (await listAudit(db, owner, tenant)).events;
+  assert.equal(event.businessDate, date);
+  assert.equal(event.before.receivable.amount, 3_000);
+  assert.equal(event.before.receivable.balance, 2_000);
+  assert.equal(event.after.receivable.amount, 1_500);
+  assert.equal(event.after.receivable.balance, 500);
+  assert.equal(event.after.receivable.collected, 1_000);
+  assert.equal(event.after.receivable.dueDate, dueDate);
+});
+
 test('migration strips forged active customer links from every ticket view', async () => {
   const db = database();
   const tenant = await store(db);

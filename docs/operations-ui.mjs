@@ -3,12 +3,13 @@ const timestamp = new Intl.DateTimeFormat('ja-JP', {
   hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
 });
 const japaneseNumber = new Intl.NumberFormat('ja-JP', { maximumFractionDigits: 6 });
-const moneyFields = new Set(['amount', 'total', 'subtotal', 'discount', 'price', 'value', 'cost', 'balance', 'creditLimit', 'balanceBefore', 'expectedCash', 'actualCash', 'discrepancy', 'cardFee']);
+const moneyFields = new Set(['amount', 'total', 'subtotal', 'discount', 'price', 'value', 'cost', 'balance', 'creditLimit', 'balanceBefore', 'expectedCash', 'actualCash', 'discrepancy', 'cardFee', 'collected']);
 const roles = { admin: '店舗管理者', manager: 'マネージャー', staff: 'スタッフ' };
 
 const auditLabels = {
   discount: '値引き', discountRequest: '値引き申請', approveDiscount: '値引き承認', rejectDiscount: '値引き却下',
   cancelLine: '注文取消', void: '伝票取消', settle: '会計確定', cancelSettlement: '会計取消', reopenTicket: '伝票の再オープン',
+  correctSettledTicketPayments: '会計済み伝票の支払方法訂正',
   deposit: '前受金の登録', cancelDeposit: '前受金の取消', stockAdjust: '在庫調整',
   saveStoreSettings: '店舗設定の変更', saveLayout: '卓レイアウトの変更', importStoreConfiguration: '店舗設定の読み込み',
   saveCustomer: '顧客情報の登録・変更', setTicketCustomer: '伝票の顧客設定', correctSettledTicketCustomer: '会計済み伝票の顧客訂正',
@@ -27,6 +28,7 @@ const valueLabels = {
   discountRequest: '値引き申請', discountDetails: '適用した値引き', commission: '歩合', stockMovements: '在庫の増減',
   menu: 'メニュー・プラン', cast: 'キャスト', stock: '在庫品目', tables: '卓', areas: 'エリア', tableIds: '使用卓',
   balance: '売掛残高', creditLimit: '売掛上限', balanceBefore: '計上前の残高', dueDate: '支払期日',
+  collected: '回収済額', unpaid: '未回収', partial: '一部回収', overdue: '期限超過',
   creditOverride: '上限超過の承認', collection: '回収', changedFields: '変更項目', creditEnabled: '売掛利用', customerId: '顧客ID', customerName: '顧客名',
   kind: '種類', category: '理由区分', destination: '相手先・移動先',
   expectedCash: 'レジ理論残高', actualCash: 'レジ実残高', discrepancy: 'レジ差額',
@@ -98,7 +100,7 @@ export function renderAuditLog({entries, loading, more, failed}, {escape, icon})
       <span class="ops-audit-meta"><time>${escape(date)}</time><span>${escape(entry.actor?.label ?? entry.actor?.id ?? '—')}</span>
         ${roles[entry.actor?.role] ? `<span>${roles[entry.actor.role]}</span>` : ''}</span>
     </summary><div class="ops-audit-detail">
-      ${entry.action === 'correctSettledTicketCustomer' ? `<p class="ops-audit-reason"><strong>会計の営業日</strong> ${escape(entry.businessDate)}</p>` : ''}
+      ${['correctSettledTicketCustomer', 'correctSettledTicketPayments'].includes(entry.action) ? `<p class="ops-audit-reason"><strong>会計の営業日</strong> ${escape(entry.businessDate)}</p>` : ''}
       ${entry.reason ? `<p class="ops-audit-reason"><strong>理由</strong> ${escape(entry.reason)}</p>` : ''}
       <div class="ops-audit-compare">${auditValues('変更前', entry.before, escape)}${auditValues('変更後', entry.after, escape)}</div>
     </div></details>`;

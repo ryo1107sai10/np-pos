@@ -15,11 +15,12 @@ const roleCommands = {
   staff: new Set(staffCommands),
   manager: new Set(managerCommands),
   admin: new Set([...managerCommands, 'saveLayout', 'importLayout', 'saveStoreSettings', 'importStoreConfiguration',
-    'approveDiscount', 'rejectDiscount', 'saveControls', 'cancelSettlement', 'reopenTicket',
+    'approveDiscount', 'rejectDiscount', 'saveControls', 'cancelSettlement', 'reopenTicket', 'correctSettledTicketPayments',
     'mergeCustomers', 'linkCustomer', 'correctSettledTicketCustomer', 'importCustomers', 'savePrintSettings',
     'saveAutoExtensionSettings', 'saveCardFeeSettings']),
 };
-const reasonCommands = new Set(['discount', 'cancelSettlement', 'reopenTicket', 'cancelLine', 'recordCashMovement', 'correctSettledTicketCustomer']);
+const reasonCommands = new Set(['discount', 'cancelSettlement', 'reopenTicket', 'cancelLine', 'recordCashMovement',
+  'correctSettledTicketCustomer', 'correctSettledTicketPayments']);
 const paymentMethods = new Set(['cash', 'card', 'qr']);
 const ticketStatuses = new Set(['open', 'paid', 'departed', 'void', 'cancelled']);
 const emptyCommission = { fixed: 0, rate: 0, points: 0 };
@@ -83,6 +84,16 @@ export function verifyCommand(role, command) {
       400, 'invalid-command', 'カード会計加算額を確認してください。');
     requireCondition(role !== 'staff' || command.payments.every(({ method }) => method !== 'receivable'),
       403, 'forbidden', '売掛での会計には管理者またはマネージャーの権限が必要です。');
+  }
+  if (command.type === 'correctSettledTicketPayments') {
+    const { ticketId, payments, creditDueDate, reason } = command;
+    requireCondition(typeof ticketId === 'string' && ticketId.length > 0 && ticketId.length <= 128
+      && ticketId === ticketId.trim() && reason.trim().length <= 120
+      && (creditDueDate === undefined || isBusinessDate(creditDueDate))
+      && Array.isArray(payments) && payments.length > 0 && payments.length <= 10 && payments.every((row) =>
+        isRecord(row) && (paymentMethods.has(row.method) || row.method === 'receivable')
+        && validYen(row.amount) && row.amount > 0),
+    400, 'invalid-command', '伝票と訂正後の支払内容を確認してください。');
   }
 }
 
@@ -236,9 +247,23 @@ function validCardSettlement(ticket) {
   const allocatedFees = ticket.payments.reduce((total, payment) => total + (payment.cardFee ?? 0), 0);
   if (settlement?.cardFee === undefined) return allocatedFees === 0;
   const {cardFee, cardFeeTax, cardFeeRateBps, baseTotal} = settlement;
-  return validYen(cardFee) && cardFee > 0 && cardFee === allocatedFees && validYen(cardFeeTax) && cardFeeTax <= cardFee
+  const allocatedCorrectly = ticket.paymentsCorrectedAt === undefined ? cardFee === allocatedFees : allocatedFees === 0;
+  return validYen(cardFee) && cardFee > 0 && allocatedCorrectly && validYen(cardFeeTax) && cardFeeTax <= cardFee
     && validFeeRate(cardFeeRateBps) && validYen(baseTotal) && baseTotal + cardFee === settlement.total
     && ticket.payments.every((payment) => payment.cardFee === undefined || payment.cardFeeRateBps === cardFeeRateBps);
+}
+
+function validPaymentCorrection(ticket) {
+  if (ticket.paymentsCorrectedAt === undefined) return true;
+  if (!validYen(ticket.paymentsCorrectedAt) || !['paid', 'departed'].includes(ticket.status)
+    || (validYen(ticket.settledAt) && ticket.paymentsCorrectedAt < ticket.settledAt)
+    || !validYen(ticket.settlement?.total)) return false;
+  const deposits = ticket.deposits.reduce((sum, row) => sum + row.amount, 0);
+  const total = ticket.payments.reduce((sum, row) => sum + row.amount, 0);
+  const receivable = ticket.payments.reduce((sum, row) => sum + (row.method === 'receivable' ? row.amount : 0), 0);
+  return validYen(deposits) && validYen(total) && total > 0 && total === ticket.settlement.total - deposits
+    && ticket.settlement.paid === total - receivable && (ticket.settlement.receivable ?? 0) === receivable
+    && ticket.payments.every((row) => validYen(row.amount) && row.amount > 0 && row.cardFee === undefined);
 }
 
 function validTicket(ticket) {
@@ -253,7 +278,7 @@ function validTicket(ticket) {
       && (line.autoExtension === undefined || typeof line.autoExtension === 'boolean')
       && Array.isArray(line.castIds) && Array.isArray(line.stockUses)
       && (line.castIds.length === 0 || isRecord(line.commission)))
-    && validPayments(ticket.deposits) && validPayments(ticket.payments, true)
+    && validPayments(ticket.deposits) && validPayments(ticket.payments, true) && validPaymentCorrection(ticket)
     && nonnegative(ticket.discount) && nonnegative(ticket.serviceRate) && validCardSettlement(ticket)
     && (ticket.settlement == null || (isRecord(ticket.settlement) && nonnegative(ticket.settlement.total)
       && Array.isArray(ticket.settlement.commission) && Array.isArray(ticket.settlement.taxBreakdown)));

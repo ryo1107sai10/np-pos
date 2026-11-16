@@ -1,8 +1,8 @@
 import { addCardFeeTax, getCardFee, getCardFeeSettings, normalizeCardFeeSettings } from './card-fee.mjs';
 import { getStoreSettings, normalizeStoreSettings, replaceStoreSettings } from './store-settings.mjs';
 import { buildOperationAudit } from './operational-audit.mjs';
-import { applyCustomerCommand, customerForSeat, findCustomer, isAssignedCustomer, setTicketCustomer } from './customers.mjs';
-import { getCustomerReceivableBalance, getReceivableBalance, getReceivableRecoveryTotals,
+import { applyCustomerCommand, customerForSeat, findCustomer, findSettledCustomerTicket, isAssignedCustomer, setTicketCustomer } from './customers.mjs';
+import { correctSettledTicketReceivable, getCustomerReceivableBalance, getReceivableBalance, getReceivableRecoveryTotals,
   receivableCollectionMethods } from './receivables.mjs';
 import { createCashMovement, getCashMovements, getDailyRecoveryRows, totalCashMovements } from './cash-ledger.mjs';
 import { applyPrintCommand } from './print-domain.mjs';
@@ -151,6 +151,10 @@ function decimalUnits(number) {
 
 function totalOf(records) {
   return records.reduce((total, record) => total + record.amount, 0);
+}
+
+export function getSettledTicketPaymentTotal(ticket) {
+  return totalOf(ticket?.payments ?? []);
 }
 
 function createId(state, prefix) {
@@ -521,6 +525,83 @@ function correctionReason(reason, actor) {
   return note;
 }
 
+function tallySettlementPayments(payments) {
+  const totals = { cash: 0, card: 0, qr: 0, receivable: 0 };
+  for (const { method, amount } of payments) {
+    assert(Object.hasOwn(totals, method), '登録済みの支払方法を確認してください。');
+    totals[method] += amount;
+  }
+  return totals;
+}
+
+function updateClosedPaymentTotals(state, day, difference) {
+  // Older closing records may have combined tender and deposits only.
+  for (const totals of [day.payments, day.tenderPayments]) {
+    if (!totals) continue;
+    for (const method of methods) {
+      const amount = (totals[method] ?? 0) + difference[method];
+      assert(Number.isSafeInteger(amount) && amount >= 0, '締め日の支払集計と伝票の支払額が一致しません。');
+      totals[method] = amount;
+    }
+  }
+  if (day.receivableSales != null) {
+    const amount = day.receivableSales + difference.receivable;
+    assert(Number.isSafeInteger(amount) && amount >= 0, '締め日の売掛集計と伝票の売掛額が一致しません。');
+    day.receivableSales = amount;
+  } else if (difference.receivable !== 0) {
+    day.receivableSales = totalOf((state.receivables ?? []).filter((entry) => entry.date === day.date && entry.cancelledAt == null));
+  }
+  if (Number.isSafeInteger(day.expectedCash) && difference.cash !== 0) {
+    day.expectedCash += difference.cash;
+    if (Number.isSafeInteger(day.actualCash)) day.discrepancy = day.actualCash - day.expectedCash;
+  }
+}
+
+function correctSettledTicketPayments(state, action, now, actor) {
+  assert(actor.role === 'admin', '支払方法の訂正には店舗管理者の権限が必要です。');
+  const reason = operationalReason(action.reason, '訂正理由');
+  const entry = findSettledCustomerTicket(state, action.ticketId);
+  assert(entry, '会計済みの伝票を選んでください。');
+  const { ticket, date } = entry;
+  const originalTotal = getSettledTicketPaymentTotal(ticket);
+  assert(originalTotal > 0, '訂正できる会計時の支払記録がありません。');
+  const settlement = ticket.settlement ?? calculateQuote(ticket);
+  assert(Number.isSafeInteger(originalTotal) && settlement.total === originalTotal + totalOf(ticket.deposits),
+    '会計額と登録済みの支払額が一致しません。');
+  assert(Array.isArray(action.payments) && action.payments.length > 0 && action.payments.length <= 10,
+    '支払内容を確認してください。');
+  for (const payment of action.payments) {
+    validateMethod(payment?.method, { allowReceivable: true });
+    assert(Number.isSafeInteger(payment.amount) && payment.amount > 0,
+      `${methodLabel[payment.method]}の支払額を1円以上の整数で入力してください。`);
+  }
+  assert(totalOf(action.payments) === originalTotal, '支払額の合計を訂正前の支払額に一致させてください。');
+  const previous = tallySettlementPayments(ticket.payments);
+  const updated = tallySettlementPayments(action.payments);
+  const difference = Object.fromEntries(Object.keys(previous).map((method) => [method, updated[method] - previous[method]]));
+  assert(Object.values(difference).some((amount) => amount !== 0), '訂正する支払方法か金額を変更してください。');
+
+  correctSettledTicketReceivable(state, ticket, { ...action, reason }, {
+    amount: updated.receivable, date, now, actor, createId: () => createId(state, 'receivable'),
+  });
+  const paidAt = ticket.settledAt ?? ticket.payments[0].at ?? now;
+  const payments = action.payments.map(({ method, amount }) => ({ id: createId(state, 'payment'), method, amount, at: paidAt }));
+  const closed = state.closedDays.find((day) => day.date === date);
+  const snapshot = closed?.ticketSnapshots?.find(({ id }) => id === ticket.id);
+  // Keep the original bill and its surcharge, taxes and commission while replacing the tender breakdown.
+  const applyToTicket = (record) => {
+    record.payments = structuredClone(payments);
+    record.paymentsCorrectedAt = now;
+    record.settlement ??= structuredClone(settlement);
+    record.settlement.paid = originalTotal - updated.receivable;
+    if (updated.receivable > 0) record.settlement.receivable = updated.receivable;
+    else delete record.settlement.receivable;
+  };
+  applyToTicket(ticket);
+  if (snapshot && snapshot !== ticket) applyToTicket(snapshot);
+  if (closed) updateClosedPaymentTotals(state, closed, difference);
+}
+
 function correctionStock(state, use, restoreArchived) {
   const stock = state.stock.find(({ id }) => id === use.stockId);
   if (stock) return stock;
@@ -555,6 +636,7 @@ function reverseSettlement(state, ticket, action, now, actor) {
   recordTableAssignment(ticket, [], now);
   ticket.deposits = [];
   ticket.payments = [];
+  delete ticket.paymentsCorrectedAt;
   ticket.settlement = null;
   ticket.settledAt = null;
   ticket.status = 'cancelled';
@@ -881,6 +963,10 @@ function reduce(state, action, now, actor) {
     recoverReceivable(next, action, now, actor);
     return next;
   }
+  if (action.type === 'correctSettledTicketPayments') {
+    correctSettledTicketPayments(next, action, now, actor);
+    return next;
+  }
 
   currentDay(next);
   const ticket = findTicket(next, action.ticketId);
@@ -978,6 +1064,7 @@ function reduce(state, action, now, actor) {
         return {id:createId(next,'payment'),method,amount:amount + fee,at:now,
           ...(fee ? {baseAmount:amount,cardFee:fee,cardFeeRateBps} : {})};
       });
+      delete ticket.paymentsCorrectedAt;
       ticket.settlement = quote(next, ticket.id);
       ticket.status = 'paid';
       ticket.settledAt = now;

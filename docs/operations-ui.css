@@ -1,6 +1,11 @@
 .ops-tools { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 13px; }
 .ops-tools .btn, .ops-actions .btn { min-height: 44px; white-space: normal; }
 .ops-actions { display: flex; flex-wrap: wrap; gap: 7px; }
+.payment-correction { display: grid; gap: 10px; }
+.payment-correction :is(.form-copy, .field-help, .ops-highlight) { margin: 0; }
+.payment-correction .form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.payment-correction input { min-width: 0; width: 100%; }
+.payment-correction [hidden] { display: none; }
 .ops-highlight { padding: 8px 10px; border: 1px solid #e9d7ae; border-radius: 10px; background: #fff8e7; color: #704615; font-size: 12px; line-height: 1.55; }
 .ops-highlight .btn { margin-top: 5px; min-height: 40px; }
 .ops-modal.modal { width: min(690px, calc(100% - 28px)); }

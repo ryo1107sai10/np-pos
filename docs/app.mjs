@@ -1,4 +1,4 @@
-import { apply, businessDate, createDemo, discountReasonCodes, exportStoreConfiguration, getItemCommission, getLayoutAreas, getLayoutTables, getManagerDiscountLimit, getTableLabel, getTicketForTable, getTicketTableLabels, parseStoreConfiguration, quote, summary, tableStatus, yen } from './engine.mjs';
+import { apply, businessDate, createDemo, discountReasonCodes, exportStoreConfiguration, getItemCommission, getLayoutAreas, getLayoutTables, getManagerDiscountLimit, getSettledTicketPaymentTotal, getTableLabel, getTicketForTable, getTicketTableLabels, parseStoreConfiguration, quote, summary, tableStatus, yen } from './engine.mjs';
 import { icon } from './icons.mjs';
 import { renderReport } from './reports.mjs';
 import { getAutoExtensionNotices, getAutoExtensionPlans, getAutoExtensionSettings, getAutomaticExtensionPlan,
@@ -24,6 +24,7 @@ import { printDocumentTitles, renderPrintOptions, renderPrintPreview, renderPrin
 import { createBillingDemo, createCashDemo, createPhaseTwoDemo, createPeriodReportDemo } from './phase-two-demo.mjs';
 import * as customerUI from './customer-ui.mjs';
 import { operationReason, renderAuditLog, renderDiscountForm } from './operations-ui.mjs';
+import { paymentCorrectionModel, readPaymentCorrection, renderPaymentCorrection, updatePaymentCorrection } from './payment-correction-ui.mjs';
 
 const app = document.querySelector('#app');
 const dialog = document.querySelector('#dialog');
@@ -53,7 +54,7 @@ const dateTime = new Intl.DateTimeFormat('ja-JP', { timeZone: 'Asia/Tokyo', hour
 const prettyDate = new Intl.DateTimeFormat('ja-JP', { timeZone: 'Asia/Tokyo', month: 'long', day: 'numeric', weekday: 'short' });
 const number = new Intl.NumberFormat('ja-JP', { maximumFractionDigits: 6 });
 const ownerActions = new Set(['store-settings', 'stock-settings', 'edit-layout', 'layout-transfer', 'layout-export',
-  'discount-review', 'discount-reject', 'cancel-settlement', 'reopen-ticket', 'audit-log', 'audit-more', 'ops-settings', 'print-settings', 'billing-settings', 'billing-settings-tab', 'customer-merge', 'customer-link', 'customer-import', 'settled-ticket-customer']);
+  'discount-review', 'discount-reject', 'cancel-settlement', 'reopen-ticket', 'audit-log', 'audit-more', 'ops-settings', 'print-settings', 'billing-settings', 'billing-settings-tab', 'customer-merge', 'customer-link', 'customer-import', 'settled-ticket-customer', 'settled-ticket-payment']);
 const managerActions = new Set(['open', 'close', 'stock-adjust', 'discount', 'cancel-line', 'cancel-deposit', 'customer-detail', 'customer-new', 'customer-edit', 'customer-visit',
   'receivable-detail', 'receivable-recover', 'record-cash', 'report-mode', 'report-day', 'report-export']);
 const cloudLabels = { admin: '店舗管理者', manager: 'マネージャー', staff: 'スタッフ', cast: 'キャスト', trainee: '体入' };
@@ -400,15 +401,18 @@ function printButton(ticket, date, kind, label, options = {}) {
     data:`data-print-kind="${kind}" data-date="${escape(date)}"`});
 }
 
-function settledCustomerAction(ticket) {
-  return button('顧客を訂正','settled-ticket-customer',{id:ticket.id,glyph:'users',tone:'quiet'});
+function settledCorrectionActions(ticket) {
+  const customer = button('顧客を訂正','settled-ticket-customer',{id:ticket.id,glyph:'users',tone:'quiet'});
+  const payment = getSettledTicketPaymentTotal(ticket) > 0
+    ? button('支払方法を訂正','settled-ticket-payment',{id:ticket.id,glyph:'wallet',tone:'quiet'}) : '';
+  return customer + payment;
 }
 
 function receiptActions(ticket, date) {
   if (!['paid','departed'].includes(ticket.status)) return '';
   const hasTender = getPrintTenderReceived(ticket) > 0;
   const prints = `<div class="ops-actions">${printButton(ticket,date,'receipt','レシートを印刷',{tone:'secondary'})}
-    ${printButton(ticket,date,'invoice','領収書を印刷',{disabled:!hasTender})}${settledCustomerAction(ticket)}</div>
+    ${printButton(ticket,date,'invoice','領収書を印刷',{disabled:!hasTender})}${settledCorrectionActions(ticket)}</div>
     ${hasTender ? '' : '<p class="field-help">領収書は、この会計で受け取った金額がある場合に発行できます。</p>'}`;
   if (!canCorrectToday(date)) return prints;
   if (state.receivables?.some((entry) => entry.ticketId === ticket.id && entry.cancelledAt == null && entry.collections.length)) {
@@ -439,6 +443,11 @@ function openSettledCustomerEditor(ticketId, options = {}) {
     canDetach:!ticketHasReceivable(state,entry.ticket),...options});
 }
 
+function settledTicketContext({ticket,date}) {
+  const tables = getTicketTableLabels(state,ticket).join('・');
+  return `<div class="modal-context">${icon('ticket',16)}<strong>伝票 No. ${escape(ticket.number)}</strong><span>${escape(date)}${tables ? ` · ${escape(tables)}` : ''}</span></div>`;
+}
+
 function renderDetail(notices, now) {
   const ticket = selected && getTicketForTable(state, selected);
   const detailClose = `<button type="button" class="icon-btn detail-mobile-close" data-action="hide-detail" aria-label="伝票詳細を閉じる">${icon('x',18)}</button>`;
@@ -452,7 +461,7 @@ function renderDetail(notices, now) {
   const settled = ticket.status === 'paid';
   const canSetCustomer = ticket.status === 'open' && state.day.status === 'open';
   const customerName = ticket.customer || (canSetCustomer ? ticket.activeCustomerLink?.name : '');
-  const customerAction = settled ? settledCustomerAction(ticket)
+  const customerAction = settled ? settledCorrectionActions(ticket)
     : canSetCustomer ? button('顧客を設定','ticket-customer',{id:ticket.id,glyph:'users',tone:'quiet'}) : '';
   const lines = ticket.lines.filter((line)=>!line.cancelledAt);
   const requested = ticket.discountRequest;
@@ -843,8 +852,20 @@ async function commit(command, message, after, {fromFloor = false} = {}) {
     }
   } finally {
     committing = false;
-    if (submit?.isConnected) submit.disabled = false;
+    if (submit?.isConnected) {
+      if (modal?.type === 'settled-ticket-payment') refreshPaymentCorrection();
+      else if (hasTicketCustomerEditor()) syncTicketCustomerSubmit();
+      else submit.disabled = false;
+    }
   }
+}
+
+async function commitReceiptCorrection(command, message) {
+  const {returnToReceipt} = modal;
+  const next = await commit(command,message);
+  if (!next || !returnToReceipt || dialog.open) return;
+  const entry = findSettledCustomerTicket(next,command.ticketId);
+  if (entry) openDialog('history-receipt',{receipt:entry.ticket,date:entry.date});
 }
 
 function applyDueLocalExtensions(source, now) {
@@ -1085,14 +1106,24 @@ function paintDialog(layoutFileInput) {
         present('会計済み伝票の顧客を訂正','<p class="form-copy">伝票を開き直して現在の会計状態を確認してください。</p>',null);
         return;
       }
-      const tables = getTicketTableLabels(state,entry.ticket).join('・');
-      const context = `<div class="modal-context">${icon('ticket',16)}<strong>伝票 No. ${escape(entry.ticket.number)}</strong><span>${escape(entry.date)}${tables ? ` · ${escape(tables)}` : ''}</span></div>`;
-      present('会計済み伝票の顧客を訂正',context + customerUI.renderTicketCustomerEditor(customerWorkspaceState(),{
+      present('会計済み伝票の顧客を訂正',settledTicketContext(entry) + customerUI.renderTicketCustomerEditor(customerWorkspaceState(),{
         currentAlias:modal.ticketCustomerAlias,query:modal.seatCustomerQuery ?? '',selected:modal.seatCustomerId,
         settled:true,reason:modal.customerCorrectionReason ?? '',canDetach:modal.canDetach,
         receivableConstraint:modal.canDetach ? '' : '売掛のある伝票には顧客の指定が必要です。訂正すると売掛残高と回収履歴は訂正先の顧客に反映されます。',
       },customerUIApi()),'顧客の訂正を保存',{style:'modal-wide customer-dialog'});
       syncTicketCustomerSubmit();
+      return;
+    }
+    case 'settled-ticket-payment': {
+      const entry = findSettledCustomerTicket(state,id);
+      if (!entry || !getSettledTicketPaymentTotal(entry.ticket)) {
+        present('会計済み伝票の支払方法を訂正','<p class="form-copy">伝票を開き直して支払内訳を確認してください。</p>',null);
+        return;
+      }
+      const model = modal.paymentCorrection = paymentCorrectionModel(state,entry,businessDate());
+      present('会計済み伝票の支払方法を訂正',settledTicketContext(entry) + renderPaymentCorrection(model,{escape,yen}),
+        '支払方法の訂正を保存',{style:'ops-modal'});
+      refreshPaymentCorrection();
       return;
     }
     case 'customer-detail':
@@ -1623,6 +1654,13 @@ function clickAction(target) {
     openSettledCustomerEditor(id,{returnToReceipt:['receipt','history-receipt'].includes(modal?.type)});
     return;
   }
+  if (action === 'settled-ticket-payment') {
+    const entry = findSettledCustomerTicket(state,id);
+    if (entry && getSettledTicketPaymentTotal(entry.ticket) > 0) {
+      openDialog(action,{ticketId:id,returnToReceipt:['receipt','history-receipt'].includes(modal?.type)});
+    }
+    return;
+  }
   if (action === 'table-auto-extension') {
     const tableId = id ?? selected ?? state.tables[0]?.id;
     if (state.tables.some((table) => table.id === tableId)) openDialog(action,{autoTableId:tableId});
@@ -1909,13 +1947,17 @@ function submitDialog(form) {
     case 'settled-ticket-customer': {
       const reason = value('customerCorrectionReason')?.trim();
       if (!hasTicketCustomerChange() || !reason) break;
-      const {returnToReceipt} = modal;
-      void commit({type:'correctSettledTicketCustomer',ticketId:id,customerId:modal.seatCustomerId,reason},
-        '会計済み伝票の顧客を訂正しました。').then((next) => {
-        if (!next || !returnToReceipt || dialog.open) return;
-        const entry = findSettledCustomerTicket(next,id);
-        if (entry) openDialog('history-receipt',{receipt:entry.ticket,date:entry.date});
-      });
+      void commitReceiptCorrection({type:'correctSettledTicketCustomer',ticketId:id,customerId:modal.seatCustomerId,reason},
+        '会計済み伝票の顧客を訂正しました。');
+      break;
+    }
+    case 'settled-ticket-payment': {
+      const {difference,changed,payments} = readPaymentCorrection(form,modal.paymentCorrection);
+      const reason = value('reason')?.trim();
+      if (difference !== 0 || !changed || !reason) break;
+      const creditDueDate = value('creditDueDate');
+      void commitReceiptCorrection({type:'correctSettledTicketPayments',ticketId:id,payments,reason,
+        ...(creditDueDate && {creditDueDate})},'会計済み伝票の支払方法を訂正しました。');
       break;
     }
     case 'customer-merge':
@@ -2160,6 +2202,12 @@ function updateSeatCustomerSearch(event) {
   renderSeatCustomerMatches();
 }
 
+function refreshPaymentCorrection() {
+  if (modal?.paymentCorrection && !committing) {
+    updatePaymentCorrection(dialog.querySelector('#dialog-form'),modal.paymentCorrection,yen);
+  }
+}
+
 dialog.addEventListener('keydown',(event) => {
   if (event.key !== 'Enter' || event.target.name !== 'customerQuery' || event.isComposing) return;
   event.preventDefault();
@@ -2169,6 +2217,7 @@ dialog.addEventListener('compositionend',updateSeatCustomerSearch);
 dialog.addEventListener('input',(event)=> {
   updatePrintPreview(event.target);
   updateSeatCustomerSearch(event);
+  refreshPaymentCorrection();
   if (modal?.type === 'settled-ticket-customer' && event.target.name === 'customerCorrectionReason') {
     modal.customerCorrectionReason = event.target.value;
     syncTicketCustomerSubmit();

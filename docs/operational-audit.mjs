@@ -2,7 +2,7 @@ import { getAutoExtensionSettings, getTableAutoExtensionEnabled, isVisitAutoExte
 import { getCardFeeSettings } from './card-fee.mjs';
 import { findSettledCustomerTicket } from './customers.mjs';
 import { getStoreSettings } from './store-settings.mjs';
-import { getReceivableBalance } from './receivables.mjs';
+import { getReceivableBalance, getReceivableStatus } from './receivables.mjs';
 import { cashMovementCategories, cashMovementKinds } from './cash-ledger.mjs';
 import { getPrintSettings, printDocumentKinds } from './print-domain.mjs';
 
@@ -213,6 +213,43 @@ function auditTicketCustomer(before, after, action) {
   return { ...entry, reason };
 }
 
+function auditPaymentCorrection(before, after, action) {
+  const { ticketId } = action;
+  const original = findSettledCustomerTicket(before, ticketId);
+  const corrected = findSettledCustomerTicket(after, ticketId);
+  if (!original || !corrected) return null;
+  const { ticket, date } = corrected;
+  const activeReceivable = (state) => state.receivables?.find((row) => row.ticketId === ticketId && row.cancelledAt == null);
+  const oldReceivable = activeReceivable(before);
+  const newReceivable = activeReceivable(after) ?? (oldReceivable && after.receivables?.find(({ id }) => id === oldReceivable.id));
+  const values = (state, visit, loan) => {
+    const { total, cardFee } = visit.settlement ?? ticket.settlement;
+    const result = { total, payments: auditPayments(visit.payments) };
+    if (cardFee) result.cardFee = cardFee;
+    if (oldReceivable || newReceivable) {
+      result.receivable = loan ? {
+        amount: loan.amount, balance: getReceivableBalance(loan),
+        collected: loan.collections.reduce((sum, row) => sum + row.amount, 0),
+        dueDate: loan.dueDate, status: getReceivableStatus(loan, state.day.date),
+        ...(loan.creditOverride ? { creditOverride: loan.creditOverride } : {}),
+      } : null;
+    }
+    const report = state.closedDays.find((day) => day.date === date);
+    if (report) {
+      const { expectedCash, actualCash, discrepancy } = report;
+      Object.assign(result, { expectedCash, actualCash, discrepancy });
+    }
+    return result;
+  };
+  const oldValues = values(before, original.ticket, oldReceivable);
+  const newValues = values(after, ticket, newReceivable);
+  if (sameValue(oldValues, newValues)) return null;
+  return {
+    businessDate: date, target: target('ticket', ticket.id, `伝票 No. ${ticket.number}`),
+    before: oldValues, after: newValues, reason: textReason(action.reason),
+  };
+}
+
 export function buildOperationAudit(before, after, action, at, actor) {
   let details;
   if (ticketActions.has(action.type)) {
@@ -223,6 +260,8 @@ export function buildOperationAudit(before, after, action, at, actor) {
     details = auditCustomers(before, after, action);
   } else if (action.type === 'setTicketCustomer' || action.type === 'correctSettledTicketCustomer') {
     details = auditTicketCustomer(before, after, action);
+  } else if (action.type === 'correctSettledTicketPayments') {
+    details = auditPaymentCorrection(before, after, action);
   } else if (action.type === 'stockAdjust') {
     const previous = before.stock.find(({ id }) => id === action.stockId);
     const current = after.stock.find(({ id }) => id === action.stockId);
