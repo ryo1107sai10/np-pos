@@ -33,6 +33,7 @@ export function renderWorkspaceMenu({pages, page, ready, isOpen, hasTables, stor
     {group:'アカウント', title:'店舗・アカウント', glyph:'user', action:'cloud-open'},
     ...(ready ? [{group:'アカウント', title:'操作ガイド', glyph:'ticket', action:'ops-guide'}] : []),
     ...(!cloud ? [{group:'アカウント', title:'サンプル操作', glyph:'refresh', action:'demo'}] : []),
+    ...(!cloud ? [{group:'アカウント', title:'デモデータのバックアップ', glyph:'download', action:'demo-backup'}] : []),
   ];
   const entries = [...routes,...shortcuts,...account].filter(({action}) => permittedAction(action));
   const sections = groups.map((group,index) => {

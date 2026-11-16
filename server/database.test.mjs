@@ -14,6 +14,7 @@ import { answerGuideTopic, getGuideAccess } from './guide-assistant.mjs';
 const schema = readFileSync(new URL('schema.sql', import.meta.url), 'utf8');
 const groupMigration = readFileSync(new URL('migrations/20261117-store-groups.sql', import.meta.url), 'utf8');
 const accessMigration = readFileSync(new URL('migrations/20261117-store-access-blocks.sql', import.meta.url), 'utf8');
+const roleMigration = readFileSync(new URL('migrations/20261117-custom-store-roles.sql', import.meta.url), 'utf8');
 const owner = { uid: 'owner-1', email: 'owner@example.test' };
 const helper = { uid: 'helper-1', email: 'helper@example.test' };
 const outsider = { uid: 'outsider-1', email: 'outsider@example.test' };
@@ -88,7 +89,7 @@ test('optional AI guide scopes access, sends only fixed manual content and enfor
   assert.equal(next.answer,'伝票の会計内訳を開きます。');
 });
 
-test('group and access-block migrations apply twice to existing stores without changing their direct access', async () => {
+test('group, access-block and custom-role migrations apply twice without changing direct access', async () => {
   const db = database(schema.slice(0,schema.indexOf(groupMigration.trimEnd())));
   const tenant = await store(db);
   await db.prepare("INSERT INTO np_invites (id, store_id, email, role, created_at) VALUES (?, ?, ?, 'staff', ?) RETURNING id")
@@ -97,8 +98,86 @@ test('group and access-block migrations apply twice to existing stores without c
   db.migrate(groupMigration);
   db.migrate(accessMigration);
   db.migrate(accessMigration);
+  db.migrate(roleMigration);
+  db.migrate(roleMigration);
   assert.deepEqual(await listStores(db,helper),{stores:[{id:tenant,name:'NP POS テスト店',role:'staff',hasState:false}]});
   assert.equal((await listStoreGroups(db,owner)).attachable[0].id,tenant);
+});
+
+test('custom roles bind to one store and gate operations and data without raising the built-in ceiling', async () => {
+  const db = database();
+  const main = await store(db);
+  const other = await store(db);
+  const profile = 'role-0bb13d6c-bcbf-4de9-8ccf-d57189978e1a';
+  const payments = 'role-9b2dc4a0-044c-4787-bec4-834ba904abaf';
+  const policy = {
+    manager:{label:'マネージャー',disabled:['checkout']},
+    custom:{
+      [profile]:{label:'注文担当',base:'manager',allowed:['seatGuests','addOrders']},
+      [payments]:{label:'レジ担当',base:'manager',allowed:['takePayment','reports']},
+    },
+  };
+  const savePolicy = (revision,rolePolicy,key) => command(db,owner,main,revision,`custom-roles-${key}`,
+    {type:'saveRolePolicy',policy:rolePolicy});
+  await migrateState(db,owner,main,{operationId:'custom-role-store-init',snapshot:createDemo('closed')});
+  const saved = await savePolicy(1,policy,'save-initial');
+  await command(db,owner,main,saved.revision,'custom-role-store-open',{type:'open',openingCash:0});
+  await assert.rejects(inviteMember(db,owner,other,helper.email,profile),{code:'role-not-found'});
+  assert.equal((await inviteMember(db,owner,main,helper.email,profile)).invite.profileId,profile);
+  assert.equal((await listMembers(db,owner,main)).invites[0].profileId,profile);
+  await assert.rejects(savePolicy(3,{custom:{}},'remove-invited'),{code:'role-in-use'});
+  const invited = (await listStores(db,helper)).stores[0];
+  assert.deepEqual([invited.role,invited.profileId],['manager',profile]);
+  assert.equal((await listMembers(db,owner,main)).members.find(({uid})=>uid === helper.uid).profileId,profile);
+  const restricted = await readState(db,helper,main);
+  assert.deepEqual(restricted.state.stock,[]);
+  assert.deepEqual(restricted.state.customers,[]);
+  assert.deepEqual(restricted.state.closedDays,[]);
+  assert.equal(restricted.state.cashMovements,undefined);
+  assert.equal(restricted.state.shifts,undefined);
+  await assert.rejects(command(db,helper,main,3,'custom-role-payout-denied',{type:'savePayrollSettings'}),{code:'forbidden'});
+  await assert.rejects(command(db,helper,main,3,'custom-role-cash-denied',{type:'recordCashMovement'}),{code:'forbidden'});
+  await assert.rejects(command(db,helper,main,3,'custom-role-customer-denied',
+    {type:'seat',tableIds:['a1'],guests:2,setId:'set60',customerId:'guest'}),{code:'forbidden'});
+  const seat = await command(db,helper,main,3,'custom-role-seat-enabled',{type:'seat',tableIds:['a1'],guests:2,setId:'set60'});
+  assert.equal(seat.state.tickets.length,1);
+  const changedBase = {...policy,custom:{...policy.custom,[profile]:{label:'注文担当',base:'staff',allowed:['addOrders']}}};
+  await assert.rejects(savePolicy(seat.revision,changedBase,'base-change-blocked'),{code:'role-in-use'});
+  await changeMember(db,owner,main,helper.uid,payments);
+  const since = await readState(db,helper,main,seat.revision);
+  assert.deepEqual(since,{unchanged:true,revision:seat.revision,role:'manager',profileId:payments});
+  await assert.rejects(command(db,helper,main,seat.revision,'custom-role-seat-blocked',{type:'seat'}),{code:'forbidden'});
+  await assert.rejects(command(db,helper,main,seat.revision,'custom-role-settle-ceiling',{type:'settle'}),{code:'forbidden'});
+  await assert.rejects(changeMember(db,owner,main,owner.uid,profile),{code:'primary-member'});
+  await changeMember(db,owner,main,helper.uid,'manager');
+  assert.equal((await readState(db,helper,main)).profileId,undefined);
+  await savePolicy(seat.revision,{custom:{}},'remove-unused');
+});
+
+test('revoking a direct custom role leaves no stale assignment when group access is intentionally restored', async () => {
+  const db = database();
+  const tenant = await store(db);
+  const group = (await createStoreGroup(db,owner,'権限テスト')).group.id;
+  await setGroupStore(db,owner,group,tenant,true);
+  await inviteGroupMember(db,owner,group,helper.email,'manager');
+  await inviteMember(db,owner,tenant,helper.email,'cast');
+  await listStores(db,helper);
+  const profile = 'role-0bb13d6c-bcbf-4de9-8ccf-d57189978e1a';
+  await migrateState(db,owner,tenant,{operationId:'custom-cast-init-store',snapshot:createDemo('closed')});
+  await command(db,owner,tenant,1,'custom-cast-bind-link',{type:'bindCastAccount',memberUid:helper.uid,castId:'cast1'});
+  await command(db,owner,tenant,2,'custom-cast-save-role',{type:'saveRolePolicy',policy:{custom:{
+    [profile]:{label:'注文担当',base:'staff',allowed:['addOrders']},
+  }}});
+  await changeMember(db,owner,tenant,helper.uid,profile);
+  assert.equal((await readState(db,helper,tenant)).profileId,profile);
+  assert.deepEqual((await readState(db,owner,tenant)).state.castAccounts,[]);
+  await changeMember(db,owner,tenant,helper.uid);
+  await assert.rejects(readState(db,helper,tenant),{code:'store-access'});
+  await restoreGroupStoreMember(db,owner,tenant,helper.uid);
+  const inherited = await readState(db,helper,tenant);
+  assert.equal(inherited.role,'manager');
+  assert.equal(inherited.profileId,undefined);
+  assert.equal((await listMembers(db,owner,tenant)).members.find(({uid})=>uid === helper.uid).source,'group');
 });
 
 test('store revocation denies inherited access only at that store and requires the owner to restore it', async () => {

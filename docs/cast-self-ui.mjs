@@ -30,7 +30,7 @@ function attendanceList(entries,api,people) {
       <span class="lr-badge">${attendanceNames[entry.status]}</span><small>${duration(entry.minutes)}</small>
       ${entry.classification && entry.classification !== 'worked' ? `<small>${classes[entry.classification]}</small>` : ''}
       ${entry.breakMinutes ? `<small>休憩 ${entry.breakMinutes}分</small>` : ''}
-      ${people ? button('訂正する','attendance-editor',api,'clock',{id:escape(entry.id)}) : ''}</div></li>`).join('')}</ul>`
+      ${people && api.canEdit !== false ? button('訂正する','attendance-editor',api,'clock',{id:escape(entry.id)}) : ''}</div></li>`).join('')}</ul>`
     : '<p class="field-help">勤怠の記録はありません。</p>';
 }
 
@@ -42,10 +42,10 @@ export function renderCastAttendance(state,entries,api) {
   const reviewRows = pending.map((entry) => `<li><div><strong>${escape(people.get(entry.castId) ?? entry.castId)}</strong>
       <small>${escape(entry.date)} ／ ${escape(displayTime(entry.clockInAt))} ～ ${escape(displayTime(entry.clockOutAt))}</small></div>
       <div class="cast-self-status"><span class="lr-badge">${attendanceNames[entry.status]}</span>
-      ${button('確認する','attendance-review',api,'check',{id:escape(entry.id)})}
-      ${button('訂正する','attendance-editor',api,'clock',{id:escape(entry.id)})}</div></li>`).join('');
+      ${api.canEdit !== false ? button('確認する','attendance-review',api,'check',{id:escape(entry.id)})
+        + button('訂正する','attendance-editor',api,'clock',{id:escape(entry.id)}) : ''}</div></li>`).join('');
   return `<div class="lr-view"><p class="form-copy">承認した実働時間は給与計算に反映されます。</p>
-    <div class="ops-actions">${button('勤怠を代理登録','attendance-editor',api,'plus')}</div>
+    ${api.canEdit !== false ? `<div class="ops-actions">${button('勤怠を代理登録','attendance-editor',api,'plus')}</div>` : ''}
     ${panel('勤務中・確認待ち',reviewRows ? `<ul class="cast-self-list">${reviewRows}</ul>` : '<p class="field-help">確認が必要な勤怠はありません。</p>')}
     ${panel('確認済みの勤怠',attendanceList(complete,api,people))}</div>`;
 }

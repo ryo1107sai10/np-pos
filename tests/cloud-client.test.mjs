@@ -301,6 +301,27 @@ test('same-revision demotion removes privileged data before loading the staff pr
   assert.ok(snapshots.filter((value) => value.store?.role === 'staff').every((value) => !value.state?.confidential));
 });
 
+test('a custom role change clears previous store data even if the base role and revision are unchanged', async (t) => {
+  let profileId = 'role-a';
+  const {client,calls,snapshots,setRevision} = service(t,{role:'manager',readState({role,revision,query}) {
+    return Response.json(query.get('since') === String(revision)
+      ? {revision,role,profileId,unchanged:true}
+      : {revision,role,profileId,state:profileId === 'role-a' ? {reports:'visible'} : {orders:'visible'}});
+  }});
+  setRevision(3);
+  await client.start();
+  await client.enterStore('shop');
+  assert.deepEqual(client.snapshot.state,{reports:'visible'});
+  profileId = 'role-b';
+  await client.retrySync();
+  assert.equal(client.snapshot.store.role,'manager');
+  assert.equal(client.snapshot.store.profileId,'role-b');
+  assert.deepEqual(client.snapshot.state,{orders:'visible'});
+  assert.ok(snapshots.some(({store,state})=>store?.profileId === 'role-b' && state === null));
+  assert.ok(snapshots.filter(({store})=>store?.profileId === 'role-b').every(({state})=>!state?.reports));
+  assert.deepEqual(calls.filter(({path})=>path.endsWith('/state')).map(({query})=>query.get('since')),[null,'3',null]);
+});
+
 test('migration is explicit and sign-out discards authenticated state', async (t) => {
   const { client, calls, setOnline } = service(t);
   await client.start();

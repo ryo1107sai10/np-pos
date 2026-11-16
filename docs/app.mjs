@@ -30,7 +30,7 @@ import { cashAccountOptions, readCashAccounts, renderCashAccountRow, renderCashA
 import { purchaseCancellationBlocker } from './inventory-operations.mjs';
 import { findPrintableTicket, getPrintAutoKind, getPrintDocuments, getPrintSettings, getPrintTenderReceived } from './print-domain.mjs';
 import { printDocumentTitles, renderExtensionQuote, renderPrintOptions, renderPrintPreview, renderPrintSettings } from './print-ui.mjs';
-import { createBillingDemo, createCashDemo, createPayrollDemo, createPhaseTwoDemo, createPeriodReportDemo } from './phase-two-demo.mjs';
+import { createBillingDemo, createCashDemo, createLaborDemo, createPayrollDemo, createPhaseTwoDemo, createPeriodReportDemo } from './phase-two-demo.mjs';
 import * as customerUI from './customer-ui.mjs';
 import { operationReason, renderAuditLog, renderDiscountForm, renderPersonalSalesAdjustment } from './operations-ui.mjs';
 import { getAdjustablePersonalSalesPeople, personalSalesDiscountModes } from './personal-sales.mjs';
@@ -39,7 +39,7 @@ import { paymentCorrectionModel, readPaymentCorrection, renderPaymentCorrection,
 import { calculateCashTender, cashDenominations, cashEntryMaximum, getCashCountTotal, getCashPaymentAmount } from './register-cash.mjs';
 import { getRegisterSettings, openingCashSuggestion, operationBusinessDate, registerCutoff } from './register-config.mjs';
 import { renderWorkspaceMenu } from './workspace-menu.mjs';
-import { readRolePolicy, renderRolePolicy, roleAllowsAction, roleAllowsPage, roleGroupAllowed, roleLabel } from './role-policy.mjs';
+import { getCustomRole, readRolePolicy, renderRolePolicy, roleAllowsAction, roleAllowsPage, roleGroupAllowed, roleLabel } from './role-policy.mjs';
 import { renderAnalytics, buildAnalyticsCsv } from './analytics.mjs';
 import { getDailyPayLimit, getPayrollDailyPays, getPayrollDraft, getPayrollRangeStatements, getPayrollTemplates, isPayrollMonth, MissingPayrollRateError,
   previewPayroll, previewPayrollRange } from './payroll.mjs';
@@ -48,6 +48,10 @@ import { getPayrollVariables } from './payroll-formula.mjs';
 import { renderTicketHistory, bindTicketHistory } from './ticket-history.mjs';
 import { readShiftForm, renderShiftEditor, renderShifts } from './shifts-ui.mjs';
 import { buildTeamPerformanceCsv, renderTeamPerformance } from './team-performance.mjs';
+import { getStaffLabor } from './labor-workspace.mjs';
+import { buildLaborCsv, getLaborReport } from './labor-report.mjs';
+import { renderLaborHighlights, renderLaborReport, renderStaffAttendance, renderStaffAttendanceForm,
+  renderStaffPersonForm, renderStaffRateForm } from './labor-ui.mjs';
 import { getAvailableInitialSets, suggestInitialSet } from './set-schedule.mjs';
 import { getCastWorkspace, listCastAttendance } from './cast-self.mjs';
 import { readManagedAttendance, renderCastAttendance, renderCastShiftRequest, renderCastWorkspace, renderManagedAttendance, renderManagedBreakRow } from './cast-self-ui.mjs';
@@ -75,7 +79,8 @@ const pages = {
   'product-sales': { title: '商品別売上', icon: 'box', group:'分析・レポート', help: '商品ごとの販売数量と売上を確認できます。' },
   payroll: { title: '給与・支給明細', icon: 'wallet', group:'スタッフ管理', roles:['admin'], help: '出勤、手当・控除、支給明細を管理できます。' },
   shifts: { title: 'シフト', icon: 'calendar', group:'スタッフ管理', help: '勤務希望と確定シフトを日・週・月で確認できます。' },
-  attendance: {title:'勤怠',icon:'clock',group:'スタッフ管理',help:'キャストの打刻を確認し、承認した実働時間を給与に反映します。'},
+  attendance: {title:'勤怠',icon:'clock',group:'スタッフ管理',help:'役職別の出退勤を記録し、キャストの打刻を確認します。'},
+  labor: {title:'勤怠・人件費',icon:'users',group:'分析・レポート',roles:['admin'],help:'役職・勤務者ごとに出勤者数、勤務時間、人件費を集計できます。'},
   'team-performance': { title: 'スタッフ成績', icon: 'users', group:'分析・レポート', roles:['admin'], help: 'マネージャーとスタッフが確定した会計を確認できます。' },
   cash: { title: '入出金管理', icon: 'cash', group:'顧客・資金', help: '営業中に出し入れした現金を確認できます。' },
   customers: { title: '顧客管理', icon: 'users', group:'顧客・資金', help: '登録情報と来店・指名履歴を確認できます。' },
@@ -92,11 +97,12 @@ const number = new Intl.NumberFormat('ja-JP', { maximumFractionDigits: 6 });
 const ownerActions = new Set(['store-settings', 'stock-settings', 'edit-layout', 'layout-transfer', 'layout-export',
   'discount-review', 'discount-reject', 'cancel-settlement', 'reopen-ticket', 'audit-log', 'audit-more', 'ops-settings', 'print-settings', 'billing-settings', 'billing-settings-tab', 'calculation-settings', 'customer-merge', 'customer-link', 'customer-import', 'settled-ticket-customer', 'settled-ticket-payment', 'set-schedule',
   'accounting-settings', 'accounting-add-column', 'accounting-remove-column','correct-register-count','role-policy',
-  'cash-accounts','cash-account-add','cash-account-remove-new','settled-ticket-companions']);
+  'cash-accounts','cash-account-add','cash-account-remove-new','settled-ticket-companions','demo-backup','demo-backup-download']);
 const managerActions = new Set(['open', 'close', 'stock-adjust', 'stocktake', 'discount', 'cancel-line', 'cancel-deposit', 'customer-detail', 'customer-new', 'customer-edit', 'customer-visit',
   'record-cash', 'report-mode', 'report-day', 'report-export', 'ticket-end', 'ticket-set-time', 'ticket-guests',
   'edit-ticket-line', 'cancel-ticket-extension', 'ops-notices','edit-cash-movement','void-cash-movement','edit-deposit','personal-sales-adjustment']);
 const cloudLabels = { admin: '店舗管理者', manager: 'マネージャー', staff: 'スタッフ', cast: 'キャスト', trainee: '体入' };
+let demoProfileId;
 
 let cloudState;
 let demoRole = 'admin';
@@ -120,6 +126,7 @@ let analyticsRange = {};
 let payrollMonth = '';
 let payrollCastId = '';
 let teamRange = {};
+let laborRange = {};
 let teamRole = 'all';
 let shiftDate = '';
 let shiftMode = 'week';
@@ -240,7 +247,7 @@ function timer(endsAt, now = Date.now()) {
 
 function canOpenPage(key) {
   const role = currentRole();
-  return Object.hasOwn(pages,key) && roleAllowsPage(state,role,key)
+  return Object.hasOwn(pages,key) && roleAllowsPage(state,role,key,currentProfileId())
     && (key === 'floor' ? role !== 'cast' : (pages[key].roles ?? ['admin','manager']).includes(role));
 }
 
@@ -248,8 +255,22 @@ function currentRole() {
   return cloudState?.store?.role ?? demoRole;
 }
 
+function currentProfileId() {
+  if (cloudState?.store) return cloudState.store.profileId;
+  return !demoPractice && getCustomRole(state,demoProfileId)?.base === demoRole ? demoProfileId : undefined;
+}
+
+function currentRoleLabel() {
+  return roleLabel(state,currentRole(),currentProfileId());
+}
+
+function currentRoleAllows(group) {
+  return roleGroupAllowed(state,currentRole(),group,currentProfileId());
+}
+
 function demoActor() {
-  return { id: `demo-${demoRole}`, label: `デモの${cloudLabels[demoRole]}`, role: demoRole };
+  const profileId = currentProfileId();
+  return { id: `demo-${profileId ?? demoRole}`, label: `デモの${currentRoleLabel()}`, role: demoRole, ...(profileId && {profileId}) };
 }
 
 function permittedAction(action) {
@@ -258,15 +279,16 @@ function permittedAction(action) {
   if (demoPractice && (action.startsWith('cloud-') || action.startsWith('demo-'))) return false;
   if (store && (!cloudState.state || !store.hasState)) return action === 'dismiss' || action.startsWith('cloud-');
   const role = currentRole();
-  if (!roleAllowsAction(state,role,action)) return false;
+  if (!roleAllowsAction(state,role,action,currentProfileId())) return false;
   if (role === 'cast') return ['dismiss','navigate','ops-guide','ops-guide-explain'].includes(action) || action.startsWith('cast-') || action.startsWith('cloud-')
     || (!store && ['demo','demo-role'].includes(action));
   if (action.startsWith('cast-')) return false;
   if (action.startsWith('attendance-')) return canOpenPage('attendance');
   if (store && action.startsWith('demo')) return false;
   if (action.startsWith('payroll-')) return role === 'admin';
+  if (action.startsWith('labor-')) return role === 'admin';
   if (action.startsWith('shift-')) return canOpenPage('shifts');
-  if (ownerActions.has(action) || action.startsWith('store-editor-') || action.startsWith('layout-editor-')
+  if (ownerActions.has(action) || action.startsWith('role-custom-') || action.startsWith('store-editor-') || action.startsWith('layout-editor-')
     || action.startsWith('payment-brand-')) return role === 'admin';
   if (managerActions.has(action)) return role === 'admin' || role === 'manager';
   if (['table-auto-extension','auto-extension-pause','auto-extension-checkout','auto-extension-resume','ticket-customer','ticket-note','extend-overdue'].includes(action)) {
@@ -332,7 +354,7 @@ function titles(ticket) {
 function renderSide() {
   const store = cloudState.store;
   const workspaceName = store?.name ?? '銀座店';
-  const role = roleLabel(state,currentRole());
+  const role = currentRoleLabel();
   return `<aside class="sidebar">
     <div class="brand" aria-label="NP POS"><img src="np-pos.svg" alt="" width="38" height="38"><span class="brand-word">NP <small>POS</small></span></div>
     <div class="store"><span class="store-icon">${icon('store', 16)}</span><span class="store-name">${escape(workspaceName)}<small>${store ? 'クラウド店舗' : 'デモ店舗'}</small></span></div>
@@ -360,7 +382,7 @@ function refreshWorkspaceMenu() {
   const control = app.querySelector('#workspace-menu-toggle');
   control?.setAttribute('aria-expanded',String(workspaceMenu.open));
   const content = renderWorkspaceMenu({pages,page,ready:hasWorkspace(),isOpen:state.day.status==='open',hasTables:state.tables.length>0,
-    storeName:cloudState.store?.name ?? '銀座店',role:roleLabel(state,currentRole()),cloud:Boolean(cloudState.store),
+    storeName:cloudState.store?.name ?? '銀座店',role:currentRoleLabel(),cloud:Boolean(cloudState.store),
     showOverview:cloudState.userVerified && cloudState.stores.some(({role})=>role==='admin')},
     {escape,icon,canOpenPage,permittedAction});
   if (workspaceMenuContent === content) return;
@@ -394,7 +416,7 @@ function renderMetrics() {
   const soon = state.tables.filter((table) => ['soon','overtime'].includes(tableStatus(state,table.id))).length;
   const active = new Set(state.tickets.filter((ticket) => ticket.status === 'open').map((ticket) => ticket.id)).size;
   const figures = [
-    ...(roleGroupAllowed(state,currentRole(),'reports') ? [
+    ...(currentRoleAllows('reports') ? [
       ['calendar', '月間売上', yen(monthlySales), `${year}年${monthNumber}月 · 確定売上`, 'blue'],
       ['trend','営業売上',yen(totals.sales), `会計済み ${totals.tickets}組`, 'green'],
     ] : []),
@@ -564,7 +586,7 @@ function tableAutoExtensionModel(tableId) {
 }
 
 function ticketCustomerAlias(ticket) {
-  if (!roleGroupAllowed(state,currentRole(),'customers')) return null;
+  if (!currentRoleAllows('customers')) return null;
   if (ticket.activeCustomerLink) return ticket.activeCustomerLink;
   const customer = findCustomer(state,ticket.customerId);
   if (customer) return {id:customer.id,name:customer.name};
@@ -595,7 +617,7 @@ function renderDetail(notices, now) {
   const status = tableStatus(state,selected);
   const settled = ticket.status === 'paid';
   const canSetCustomer = ticket.status === 'open' && state.day.status === 'open';
-  const customerName = roleGroupAllowed(state,currentRole(),'customers') ? ticket.customer || (canSetCustomer ? ticket.activeCustomerLink?.name : '') : '';
+  const customerName = currentRoleAllows('customers') ? ticket.customer || (canSetCustomer ? ticket.activeCustomerLink?.name : '') : '';
   const customerAction = settled ? settledCorrectionActions(ticket)
     : canSetCustomer ? button('顧客を設定','ticket-customer',{id:ticket.id,glyph:'users',tone:'quiet'})
       + (ticket.customerId || ticket.activeCustomerLink?.id
@@ -638,7 +660,7 @@ function renderDetail(notices, now) {
 
 function customerUIApi() {
   const today = operationBusinessDate(state);
-  return {escape, icon, yen, role:currentRole(),
+  return {escape, icon, yen, role:currentRole(),canEdit:permittedAction('customer-edit'),
     businessDate:state.day.status === 'closed' && today > state.day.date ? today : state.day.date};
 
 }
@@ -704,14 +726,21 @@ function render({ preserveFocus = false } = {}) {
     else if (page === 'tickets') view = renderTicketHistory(state,{escape,icon,yen,role:currentRole(),workspaceId:cloudState.store?.id});
     else if (page === 'analytics' || page === 'product-sales') view = renderAnalytics(page,state,{escape,icon,yen,range:analyticsRange});
     else if (page === 'payroll') view = payrollUI.renderPayroll(state,{escape,icon,yen,month:payrollMonth,castId:payrollCastId});
-    else if (page === 'shifts') view = renderShifts(state,{escape,icon,date:shiftDate || state.day.date,mode:shiftMode});
-    else if (page === 'attendance') view = renderCastAttendance(state,listCastAttendance(state),{escape,icon,yen});
+    else if (page === 'shifts') view = renderShifts(state,{escape,icon,date:shiftDate || state.day.date,mode:shiftMode,
+      canEdit:permittedAction('shift-new')});
+    else if (page === 'attendance') view = renderStaffAttendance(state,{escape,icon,canEdit:permittedAction('attendance-staff-editor')})
+      + renderCastAttendance(state,listCastAttendance(state),{escape,icon,yen,canEdit:permittedAction('attendance-editor')});
+    else if (page === 'labor') view = renderLaborReport(state,laborRange,{escape,icon,yen});
     else if (page === 'team-performance') view = renderTeamPerformance(state,{escape,icon,yen,range:teamRange,role:teamRole});
     else view = renderReport(page,state,{yen,summary,quote,escape,icon,showHiddenStock,canAdjustStock:permittedAction('stock-adjust'),
-      canCorrectRegister:currentRole() === 'admin',
+      canCorrectRegister:currentRole() === 'admin',canRecordCash:permittedAction('record-cash'),
       canEditCash:(item) => permittedAction('edit-cash-movement') && Boolean(editableCashMovement(state,item.id))
         && (currentRole() === 'admin' || (state.day.date === item.date && state.day.status === 'open')),
       reportDate,commissionCast,reportInterval:currentReportInterval(),reportExportError,stockSearch,stockBarcodeExact,stockLowOnly,stockHistoryId});
+    if (currentRole() === 'admin' && (page === 'analytics' || page === 'reports')) {
+      const filters = page === 'analytics' ? analyticsRange : getReportPeriod(state,currentReportInterval());
+      if (page === 'analytics' || filters.valid) view += renderLaborHighlights(state,filters,{escape,icon,yen});
+    }
     const practice = demoPractice ? renderPracticeProgress(getPracticeStatus(state),{button,escape,icon}) : '';
     content = renderTop() + banner + practice + tools + renderOperationsNav() + view;
   }
@@ -790,7 +819,8 @@ function cloudUpdated(next) {
     demoRole = demoPractice.role;
     demoPractice = null;
   }
-  const contextChanged = before.store?.id !== next.store?.id || before.store?.role !== next.store?.role;
+  const contextChanged = before.store?.id !== next.store?.id || before.store?.role !== next.store?.role
+    || before.store?.profileId !== next.store?.profileId;
   const accountChanged = before.user?.uid !== next.user?.uid || before.userVerified !== next.userVerified;
   if (next.store && next.state && next.store.role !== 'cast') state = next.state;
   else if (next.store && (contextChanged || (before.state && before.store?.role !== 'cast'))) state = createDemo('closed');
@@ -819,6 +849,7 @@ function cloudUpdated(next) {
     selected = null; mobileDetails = false; area = null; filter = 'all'; reportDate = ''; commissionCast = '';
     reportInterval = {mode:'day'}; reportExportError = '';
     analyticsRange = {}; payrollMonth = ''; payrollCastId = '';
+    laborRange = {};
     const view = next.store ? {view: 'list', area: null} : loadFloorView();
     floorView = view.view; planArea = view.area;
     if (before.store && !next.store) rememberStore(null);
@@ -1321,6 +1352,74 @@ function exportStoreFile() {
   toast('店舗設定と卓レイアウトを書き出しました。');
 }
 
+async function exportDemoBackup(active) {
+  if (currentRole() !== 'admin' || cloudState.store || demoPractice || active.loading) return;
+  const source = state;
+  active.loading = true;
+  paintDialog();
+  try {
+    const {writeDemoBackup} = await import('./demo-backup.mjs');
+    const text = await writeDemoBackup(source);
+    if (modal !== active || !dialog.open) return;
+    downloadFile(`np-pos-demo-backup-${source.day.date}.json`,text,'application/json');
+    toast('デモデータをバックアップしました。');
+  } catch (error) {
+    if (modal === active && dialog.open) active.error = error.message;
+  } finally {
+    active.loading = false;
+    if (modal === active && dialog.open) paintDialog();
+  }
+}
+
+async function selectDemoBackup(file) {
+  const active = modal;
+  if (!file || active?.type !== 'demo-backup' || cloudState.store || active.loading) return;
+  Object.assign(active,{loading:true,error:'',backup:null,fileName:file.name});
+  paintDialog();
+  try {
+    const {demoBackupMaxBytes,readDemoBackup} = await import('./demo-backup.mjs');
+    if (file.size > demoBackupMaxBytes) throw new Error('この端末に保存できる範囲のバックアップを選んでください。');
+    active.backup = await readDemoBackup(await file.text());
+  } catch (error) {
+    active.error = error.message;
+  } finally {
+    active.loading = false;
+    if (modal === active && dialog.open) paintDialog();
+  }
+}
+
+async function restoreDemoBackup(active) {
+  if (!active.backup || active.loading || currentRole() !== 'admin' || cloudState.store || demoPractice) return;
+  const submit = dialog.querySelector('#submit-dialog');
+  if (submit) submit.disabled = true;
+  const replace = () => {
+    if (modal !== active || !dialog.open || cloudState.store || demoPractice) return;
+    if (readSavedState() !== active.localAtOpen) throw new Error('別の画面でデモデータが更新されました。開き直してから復元してください。');
+    const next = active.backup.snapshot;
+    try { localStorage.setItem(storageKey,JSON.stringify(next)); }
+    catch { throw new Error('端末の保存領域に空きがあるか確認してください。'); }
+    saveAvailable = true;
+    state = next;
+    selected = null;
+    mobileDetails = false;
+    reportDate = '';
+    reportInterval = {mode:'day'};
+    pendingStorage = false;
+    dialog.close();
+    syncFloorSelection();
+    go('floor');
+    toast('このブラウザーのデモデータを復元しました。');
+  };
+  try {
+    if (navigator.locks?.request) await navigator.locks.request(storageKey,replace);
+    else replace();
+  } catch (error) {
+    if (modal === active && dialog.open) showError(error.message);
+  } finally {
+    if (submit?.isConnected) submit.disabled = false;
+  }
+}
+
 function currentReportInterval() {
   const month = state.day.date.slice(0,7);
   return {date:reportDate,month,start:`${month}-01`,end:state.day.date,...reportInterval};
@@ -1481,7 +1580,7 @@ function paintDialog(layoutFileInput) {
   const ticket = modal.ticketId ? state.tickets.find((item)=>item.id===modal.ticketId) : null;
   const id = modal.ticketId;
   const q = ticket ? quote(state,id) : null;
-  const customerName = roleGroupAllowed(state,currentRole(),'customers') ? ticket?.customer : '';
+  const customerName = currentRoleAllows('customers') ? ticket?.customer : '';
   const headline = ticket ? `<div class="modal-context">${icon('table',16)}<strong>${escape(titles(ticket))}</strong><span>${ticket.guests}名${customerName ? ` · ${escape(customerName)}` : ''}</span></div>` : '';
   switch (modal.type) {
     case 'cloud-groups': {
@@ -1530,6 +1629,19 @@ function paintDialog(layoutFileInput) {
         : renderCloudMigration(details, {escape, icon});
       present(modal.initialize ? '営業データを準備' : 'このブラウザーのデータを移行', body,
         modal.initialize ? '営業データを準備する' : '店舗に移行する', {style: 'cloud-dialog'});
+      return;
+    }
+    case 'demo-backup': {
+      const {backup,loading,error,fileName} = modal;
+      const dateLabel = backup && new Intl.DateTimeFormat('ja-JP',{dateStyle:'medium',timeStyle:'short',timeZone:'Asia/Tokyo'})
+        .format(new Date(backup.savedAt));
+      const review = backup ? `<div class="modal-context"><strong>${escape(backup.snapshot.day.date)} 営業日</strong>
+        <span>保存日時 ${escape(dateLabel)}</span></div><p class="form-copy">現在のデモデータを置き換えます。利用中の伝票は復元後の営業設定に従って処理されます。</p>` : '';
+      present('デモデータのバックアップ',`<p class="form-copy">このブラウザーのデモの設定、伝票、在庫、給与、監査履歴をJSONで保存・復元します。</p>
+        <div class="ops-actions">${button('バックアップを書き出す','demo-backup-download',{glyph:'download',tone:'secondary',disabled:loading})}</div>
+        ${label('復元するファイル','<input type="file" name="demo-backup-file" accept=".json,application/json"'+(loading ? ' disabled' : '')+'>')}
+        ${fileName ? `<p class="field-help">${escape(fileName)}</p>` : ''}${loading ? '<p class="field-help" role="status">確認しています…</p>' : ''}
+        ${error ? `<p class="form-error" role="alert">${escape(error)}</p>` : ''}${review}`,backup ? 'デモデータを復元' : null,{style:'ops-modal'});
       return;
     }
     case 'layout-transfer': {
@@ -1671,7 +1783,7 @@ function paintDialog(layoutFileInput) {
         'この出力区分を保存',{style:'ops-modal modal-wide'});
       return;
     case 'role-policy':
-      present('役職・権限',renderRolePolicy(state,{escape}),'権限を保存',{style:'ops-modal modal-wide'});
+      present('役職・権限',renderRolePolicy(state,{escape},modal.rolePolicyDraft),'権限を保存',{style:'ops-modal modal-wide'});
       return;
     case 'cash-accounts':
       present('金庫・出金先',renderCashAccounts(state,{escape,icon,yen}),'金庫と出金先を保存',{style:'ops-modal modal-wide'});
@@ -1750,6 +1862,27 @@ function paintDialog(layoutFileInput) {
       const entry = listCastAttendance(state).find(({id})=>id===modal.attendanceId);
       present(entry ? '勤怠を訂正' : '勤怠を代理登録',renderManagedAttendance(state,entry,{escape,icon}),
         '勤怠を保存',{style:'ops-modal modal-wide'});
+      return;
+    }
+    case 'attendance-staff-editor': {
+      const entry = getStaffLabor(state).attendance.find(({id})=>id === modal.staffAttendanceId);
+      present(entry ? '勤務を訂正' : '勤務を記録',renderStaffAttendanceForm(state,entry,{escape}),'勤務を保存',{style:'ops-modal'});
+      return;
+    }
+    case 'attendance-staff-void': {
+      const entry = getStaffLabor(state).attendance.find(({id})=>id === modal.staffAttendanceId);
+      present('勤務を取り消す',`<p class="form-copy">${escape(entry.date)}の${escape(entry.personName)}の勤務を取り消します。</p>
+        ${operationReason({title:'取消理由'})}`,'勤務を取り消す',{style:'ops-modal'});
+      return;
+    }
+    case 'labor-person': {
+      const person = getStaffLabor(state).people.find(({id})=>id === modal.staffPersonId);
+      present(person ? '勤務者を編集' : '勤務者を登録',renderStaffPersonForm(state,person,{escape}),'勤務者を保存',{style:'ops-modal'});
+      return;
+    }
+    case 'labor-rate': {
+      const person = getStaffLabor(state).people.find(({id})=>id === modal.staffPersonId);
+      present('勤務者の時給を登録',renderStaffRateForm(state,person,{escape}),'時給を保存',{style:'ops-modal'});
       return;
     }
     case 'payroll-employee':
@@ -1843,9 +1976,11 @@ function paintDialog(layoutFileInput) {
         present('体験クエスト','<p class="form-copy">体験クエストの練習中です。</p>' + button('練習を終了','practice-stop'),null,{style:'ops-modal'});
         return;
       }
-      present('サンプル操作',`${renderPracticeEntry()}<p class="form-copy">開店から試すと、現在の卓配置と店舗設定で営業をやり直せます。ほかのサンプルを選ぶと、店舗設定・卓配置・操作履歴がサンプルの初期状態に戻ります。</p><div class="demo-options">${button('開店から試す','demo-start',{glyph:'power',tone:'primary'})}${button('営業中のサンプルを読み込む','demo-live',{glyph:'refresh'})}${button('入出金と日報を試す','demo-cash',{glyph:'cash'})}${button('期間集計とCSVを試す','demo-reports',{glyph:'download'})}${button('自動延長とカード会計を試す','demo-billing',{glyph:'clock'})}${button('給与・日払いを試す','demo-payroll',{glyph:'wallet'})}</div>
-        <section aria-labelledby="demo-role-label"><h3 id="demo-role-label">デモの権限</h3><p class="form-copy">現在の権限は${cloudLabels[demoRole]}です。同じデモデータで役割を切り替えて確認できます。</p><div class="ops-actions">${['admin','manager','staff','cast'].map((role) =>
-          button(`${cloudLabels[role]}で試す`,'demo-role',{id:role,tone:role===demoRole?'primary':'secondary'})).join('')}</div></section>`,null,{style:'ops-modal'});
+      present('サンプル操作',`${renderPracticeEntry()}<p class="form-copy">開店から試すと、現在の卓配置と店舗設定で営業をやり直せます。ほかのサンプルを選ぶと、店舗設定・卓配置・操作履歴がサンプルの初期状態に戻ります。</p><div class="demo-options">${button('開店から試す','demo-start',{glyph:'power',tone:'primary'})}${button('営業中のサンプルを読み込む','demo-live',{glyph:'refresh'})}${button('入出金と日報を試す','demo-cash',{glyph:'cash'})}${button('期間集計とCSVを試す','demo-reports',{glyph:'download'})}${button('自動延長とカード会計を試す','demo-billing',{glyph:'clock'})}${button('給与・日払いを試す','demo-payroll',{glyph:'wallet'})}${button('勤怠・人件費を試す','demo-labor',{glyph:'users'})}</div>
+        <section aria-labelledby="demo-role-label"><h3 id="demo-role-label">デモの権限</h3><p class="form-copy">現在の権限は${escape(currentRoleLabel())}です。同じデモデータで役割を切り替えて確認できます。</p><div class="ops-actions">${['admin','manager','staff','cast'].map((role) =>
+          button(`${cloudLabels[role]}で試す`,'demo-role',{id:role,tone:!currentProfileId()&&role===demoRole?'primary':'secondary'})).join('')}
+          ${Object.entries(state.rolePolicy?.custom ?? {}).map(([id,{label}]) => button(`${escape(label)}で試す`,'demo-role',
+            {id,tone:currentProfileId()===id?'primary':'secondary'})).join('')}</div></section>`,null,{style:'ops-modal'});
       return;
     case 'open': {
       const current = businessDate(Date.now(),registerCutoff(state));
@@ -1863,7 +1998,7 @@ function paintDialog(layoutFileInput) {
       const suggested = suggestInitialSet(state);
       const initialSetId = suggested?.id ?? (isVip ? 'vip60' : undefined);
       const options = getAvailableInitialSets(state).map((item)=>`<option value="${escape(item.id)}" ${item.id===initialSetId ? 'selected' : ''}>${escape(item.name)}${item.name.includes(`${item.duration}分`) ? '' : ` · ${item.duration}分`} · ${yen(item.price)}/人</option>`).join('');
-      const customerChoice = roleGroupAllowed(state,currentRole(),'customers') ? customerUI.renderSeatCustomer(
+      const customerChoice = currentRoleAllows('customers') ? customerUI.renderSeatCustomer(
         customerWorkspaceState(),customerUIApi(),{query:modal.seatCustomerQuery ?? '',selected:modal.seatCustomerId ?? ''}) : '';
       present('来店登録',`<div class="form-grid">${label('来店人数','<input name="guests" type="number" min="1" max="100" step="1" value="2" required inputmode="numeric">')}${label('初回セット',`<select name="setId">${options}</select>`,suggested ? '現在の時間帯に合うセットを選択しています。変更できます。' : '')}</div>${customerChoice}
         <details class="arrival-time-detail"><summary>来店時刻を指定</summary>${label('実際の来店日時（日本時間）',
@@ -2219,7 +2354,7 @@ function openPrintDocument(id, date, kind) {
   if (!ticket || (kind === 'check' ? ticket.status !== 'open' : !['paid','departed'].includes(ticket.status))) return;
   if (kind === 'invoice' && getPrintTenderReceived(ticket) === 0) return;
   const last = getPrintDocuments(state,ticket,date,kind).at(-1);
-  const recipient = kind === 'invoice' && roleGroupAllowed(state,currentRole(),'customers')
+  const recipient = kind === 'invoice' && currentRoleAllows('customers')
     ? findCustomer(customerWorkspaceState(),ticket.customerId)?.receiptRecipient : '';
   const printSettings = getPrintSettings(state);
   openDialog('print-document',{printTicketId:id,printDate:date,printKind:kind,printWidth:printSettings.width,printSettings,
@@ -2802,6 +2937,20 @@ function clickAction(target) {
   if (action === 'ops-guide') { void openOperationsGuide(); return; }
   if (action === 'ops-guide-explain') { void explainGuideTopic(id,target); return; }
   if (['ops-settings','print-settings','ops-notices','set-schedule','calculation-settings','role-policy'].includes(action)) { openDialog(action); return; }
+  if (modal?.type === 'role-policy' && ['role-custom-add','role-custom-remove'].includes(action)) {
+    const draft = readRolePolicy(dialog.querySelector('#dialog-form'));
+    if (action === 'role-custom-remove') delete draft.custom[id];
+    else if (['manager','staff'].includes(id)) {
+      if (Object.keys(draft.custom).length >= 24) { showError('カスタム役職は24件まで登録できます。'); return; }
+      const names = new Set(Object.values(draft.custom).map(({label}) => label));
+      let suffix = 1;
+      while (names.has(`新しい役職 ${suffix}`)) suffix++;
+      draft.custom[`role-${crypto.randomUUID()}`] = {label:`新しい役職 ${suffix}`,base:id,allowed:[]};
+    }
+    modal.rolePolicyDraft = draft;
+    paintDialog();
+    return;
+  }
   if (action === 'cash-accounts') { openDialog(action); return; }
   if (action === 'cash-account-add' && modal?.type === 'cash-accounts' && ['vault','payee'].includes(id)) {
     const list = dialog.querySelector(`[data-cash-accounts="${id}"]`);
@@ -2971,14 +3120,16 @@ function clickAction(target) {
     } else dialog.close();
     return;
   }
-  if (action === 'demo-role' && !cloudState.store && ['admin','manager','staff','cast'].includes(id)) {
+  if (action === 'demo-role' && !cloudState.store && (['admin','manager','staff','cast'].includes(id) || getCustomRole(state,id))) {
+    const profile = getCustomRole(state,id);
     if (id === 'cast' && !getCastWorkspace(state,'demo-cast')) {
       const occupiedCastIds = new Set((state.castAccounts ?? []).map(({castId})=>castId));
       const person = state.cast.find((entry)=>entry.enabled!==false && !occupiedCastIds.has(entry.id));
       if (person) saveState(apply(state,{type:'bindCastAccount',memberUid:'demo-cast',castId:person.id},Date.now(),
         {id:'demo-admin',role:'admin',label:'デモの店舗管理者'}));
     }
-    demoRole = id;
+    demoRole = profile?.base ?? id;
+    demoProfileId = profile ? id : undefined;
     dialog.close();
     if (!canOpenPage(page)) go(defaultPage()); else render();
     return;
@@ -2998,6 +3149,11 @@ function clickAction(target) {
   }
   if (action === 'attendance-review' && page === 'attendance' && listCastAttendance(state).some((row)=>row.id===id)) {
     openDialog(action,{attendanceId:id});
+    return;
+  }
+  if (page === 'attendance' && ['attendance-staff-editor','attendance-staff-void'].includes(action)) {
+    const entry = getStaffLabor(state).attendance.find((row)=>row.id === id && row.voidedAt === undefined);
+    if (entry || (!id && action === 'attendance-staff-editor')) openDialog(action,{staffAttendanceId:entry?.id ?? null});
     return;
   }
   if (action === 'attendance-editor' && page === 'attendance' && (!id || listCastAttendance(state).some((row)=>row.id===id))) {
@@ -3040,6 +3196,22 @@ function clickAction(target) {
   if (action === 'team-performance-csv' && page === 'team-performance' && canOpenPage(page)) {
     const csv = buildTeamPerformanceCsv(state,teamRange,teamRole);
     if (csv) downloadFile(`np-pos-staff-${teamRange.end || state.day.date}.csv`,csv,'text/csv;charset=utf-8');
+    return;
+  }
+  if (action === 'labor-open') {
+    laborRange = {start:target.dataset.start,end:target.dataset.end};
+    go('labor');
+    return;
+  }
+  if (action.startsWith('labor-') && page === 'labor') {
+    if (action === 'labor-export' && ['summary','daily'].includes(id)) {
+      const report = getLaborReport(state,laborRange);
+      const csv = buildLaborCsv(report,id);
+      if (csv) downloadFile(`np-pos-${id === 'daily' ? 'attendance' : 'labor'}-${report.start}-${report.end}.csv`,csv,'text/csv;charset=utf-8');
+    } else if (['labor-person','labor-rate'].includes(action)) {
+      const person = getStaffLabor(state).people.find((row)=>row.id === id);
+      if (person || (!id && action === 'labor-person')) openDialog(action,{staffPersonId:person?.id ?? null});
+    }
     return;
   }
   if (action.startsWith('shift-') && page === 'shifts') {
@@ -3183,6 +3355,16 @@ function clickAction(target) {
     render({preserveFocus:true});
     return;
   }
+  if (action === 'demo-backup') {
+    let localAtOpen;
+    try { localAtOpen = readSavedState(); } catch { /* Download still works in the current tab. */ }
+    openDialog(action,{localAtOpen});
+    return;
+  }
+  if (action === 'demo-backup-download' && modal?.type === 'demo-backup') {
+    void exportDemoBackup(modal);
+    return;
+  }
   if (action === 'layout-transfer') {
     openDialog(action, { fileName: '', configuration: null, error: '', loading: false, fresh: freshLayoutTarget() });
     return;
@@ -3237,15 +3419,16 @@ function clickAction(target) {
     return;
   }
   if (['demo','open','seat','close','record-cash'].includes(action)) {openDialog(action); return;}
-  if (['demo-start','demo-live','demo-cash','demo-reports','demo-billing','demo-payroll'].includes(action)) {
+  if (['demo-start','demo-live','demo-cash','demo-reports','demo-billing','demo-payroll','demo-labor'].includes(action)) {
     const fromOpening = action === 'demo-start';
     const cashSample = action === 'demo-cash';
     const reportSample = action === 'demo-reports';
     const billingSample = action === 'demo-billing';
     const payrollSample = action === 'demo-payroll';
-    let sample = payrollSample ? createPayrollDemo() : billingSample ? createBillingDemo() : reportSample ? createPeriodReportDemo()
+    const laborSample = action === 'demo-labor';
+    let sample = laborSample ? createLaborDemo() : payrollSample ? createPayrollDemo() : billingSample ? createBillingDemo() : reportSample ? createPeriodReportDemo()
       : cashSample ? createCashDemo() : createPhaseTwoDemo(fromOpening ? 'closed' : 'live');
-    if (cashSample || reportSample || billingSample || payrollSample) demoRole = 'admin';
+    if (cashSample || reportSample || billingSample || payrollSample || laborSample) demoRole = 'admin';
     if (fromOpening) {
       sample.tables = structuredClone(state.tables);
       sample.layoutAreas = getLayoutAreas(state);
@@ -3268,14 +3451,15 @@ function clickAction(target) {
     reportDate = ''; commissionCast = ''; customersQuery = ''; customerFilters = {};
     analyticsRange = {}; payrollMonth = ''; payrollCastId = '';
     teamRange = {}; teamRole = 'all'; shiftDate = ''; shiftMode = 'week';
+    laborRange = laborSample ? {start:getStaffLabor(sample).attendance[0].date,end:sample.day.date} : {};
     reportInterval = reportSample ? {mode:'range',start:getReportDates(sample)[0],end:sample.day.date} : {mode:'day'};
     reportExportError = '';
     if (!fromOpening) setFloorView('list',getLayoutAreas(state)[0]);
-    go(payrollSample ? 'payroll' : reportSample ? 'reports' : cashSample ? 'cash' : 'floor');
+    go(laborSample ? 'labor' : payrollSample ? 'payroll' : reportSample ? 'reports' : cashSample ? 'cash' : 'floor');
     if (fromOpening) openDialog('open');
     else {
       dialog.close();
-      toast(payrollSample ? '給与と日払いのサンプルを読み込みました。' : billingSample ? 'A-01は約30秒後に自動延長。A-02の自動延長はオフです。'
+      toast(laborSample ? '役職別の勤怠と人件費のサンプルを読み込みました。' : payrollSample ? '給与と日払いのサンプルを読み込みました。' : billingSample ? 'A-01は約30秒後に自動延長。A-02の自動延長はオフです。'
         : reportSample ? '期間集計のサンプルを読み込みました。'
         : cashSample ? '入出金と日報のサンプルを読み込みました。' : '営業中のサンプルを読み込みました。');
     }
@@ -3414,6 +3598,24 @@ function submitDialog(form) {
     case 'attendance-editor':
       commit({type:'saveManagedAttendance',attendanceId:modal.attendanceId,...readManagedAttendance(data)},'勤怠を保存しました。');
       break;
+    case 'attendance-staff-editor':
+      commit({type:'saveStaffAttendance',attendanceId:modal.staffAttendanceId,personId:value('staffAttendancePerson'),
+        date:value('staffAttendanceDate'),clockInAt:parseTokyoDateTime(value('staffClockIn')),clockOutAt:parseTokyoDateTime(value('staffClockOut')),
+        breakMinutes:numeric('staffBreak'),reason:value('staffAttendanceReason')},'勤務を保存しました。');
+      break;
+    case 'attendance-staff-void':
+      commit({type:'voidStaffAttendance',attendanceId:modal.staffAttendanceId,reason:value('reason')},'勤務を取り消しました。');
+      break;
+    case 'labor-person': {
+      const [role,profileId] = String(value('staffRole')).split('/');
+      commit({type:'saveStaffPerson',personId:modal.staffPersonId,name:value('staffName'),role,profileId,enabled:data.has('staffEnabled')},
+        '勤務者を保存しました。');
+      break;
+    }
+    case 'labor-rate':
+      commit({type:'saveStaffRate',personId:modal.staffPersonId,effectiveDate:value('staffRateDate'),hourlyRate:numeric('staffHourlyRate')},
+        '時給を保存しました。');
+      break;
     case 'payroll-employee':
       commit({type:'saveEmployeeProfile',castId:modal.selection.castId,profile:payrollUI.readEmployeeProfile(data)},'従業員台帳を保存しました。');
       break;
@@ -3495,6 +3697,9 @@ function submitDialog(form) {
       break;
     case 'cloud-migration':
       void migrateBrowserData();
+      break;
+    case 'demo-backup':
+      void restoreDemoBackup(modal);
       break;
     case 'layout-transfer': {
       if (!modal.configuration) return;
@@ -3895,6 +4100,13 @@ app.addEventListener('change',(event)=> {
       return;
     }
   }
+  const laborField = event.target.dataset.laborFilter;
+  if (page === 'labor' && ['start','end','role'].includes(laborField)) {
+    laborRange[laborField] = event.target.value;
+    render();
+    app.querySelector(`[data-labor-filter="${laborField}"]`)?.focus({preventScroll:true});
+    return;
+  }
   const analyticsFields = [['start','[data-analytics-start]'],['end','[data-analytics-end]'],['comparison','[data-analytics-comparison]']];
   const analyticsField = analyticsFields.find(([,selector]) => event.target.matches(selector));
   if (analyticsField && ['analytics','product-sales'].includes(page)) {
@@ -4017,6 +4229,7 @@ dialog.addEventListener('change', (event) => {
     renderSeatCustomerSelection();
   }
   if (event.target.name === 'layout-file') readStoreFile(event.target);
+  if (event.target.name === 'demo-backup-file') void selectDemoBackup(event.target.files[0]);
   if (event.target.name === 'discountMode') {
     const rate = event.target.value === 'percent';
     const input = dialog.querySelector('[name=discountValue]');

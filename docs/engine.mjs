@@ -4,6 +4,7 @@ import { calculationTaxGroup, defaultItemTaxRateBps, getCalculationSettings, get
 import { getStoreSettings, normalizeStoreSettings, replaceStoreSettings } from './store-settings.mjs';
 import { buildOperationAudit } from './operational-audit.mjs';
 import { applyPayrollCommand, isPayrollCommand } from './payroll.mjs';
+import { applyStaffLaborCommand, isStaffLaborCommand } from './labor-workspace.mjs';
 import { applyCustomerCommand, customerForSeat, findCustomer, findSettledCustomerTicket, isAssignedCustomer, setTicketCompanion, setTicketCustomer } from './customers.mjs';
 import { correctSettledTicketReceivable, getCustomerReceivableBalance, getReceivableBalance, getReceivableRecoveryTotals,
   receivableCollectionMethods } from './receivables.mjs';
@@ -1333,7 +1334,7 @@ function decideDiscount(ticket, action, now, actor) {
 }
 
 export function apply(state, action, now = Date.now(), actor = demoActor) {
-  assert(roleAllowsCommand(state,actor.role,action),'店舗設定でこの役職には操作が許可されていません。');
+  assert(roleAllowsCommand(state,actor.role,action,actor.profileId),'店舗設定でこの役職には操作が許可されていません。');
   const authenticatedActor = { id: actor.id, label: actor.label, role: actor.role };
   const next = reduce(state, action, now, authenticatedActor);
   const addedMovements = next.movements.length - state.movements.length;
@@ -1384,6 +1385,10 @@ function reduce(state, action, now, actor) {
         return movement.id;
       },
     });
+    return next;
+  }
+  if (isStaffLaborCommand(action.type)) {
+    applyStaffLaborCommand(next,action,now,actor,(prefix)=>createId(next,prefix));
     return next;
   }
   if (action.type === 'saveAutoExtensionSettings') {

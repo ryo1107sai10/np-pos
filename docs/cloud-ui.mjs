@@ -2,8 +2,8 @@ import {roleLabel,roleLabels} from './role-policy.mjs';
 
 const integer = new Intl.NumberFormat('ja-JP');
 
-function roleName(role, cloud) {
-  return roleLabel(cloud,role) || '権限未設定';
+function roleName(role, cloud, profileId) {
+  return roleLabel(cloud,role,profileId) || '権限未設定';
 }
 
 function button(label, action, { escape, icon }, { id, glyph, tone = 'secondary', disabled = false } = {}) {
@@ -16,8 +16,10 @@ function field(label, name, type, options = '') {
 }
 
 function roleOptions(cloud, escape, selected = 'staff') {
-  return Object.keys(roleLabels).map((value) =>
-    `<option value="${value}"${value === selected ? ' selected' : ''}>${escape(roleName(value,cloud))}</option>`).join('');
+  const options = Object.keys(roleLabels).map((role) => [role,roleName(role,cloud)]);
+  for (const [id,{label}] of Object.entries(cloud.rolePolicy?.custom ?? {})) options.push([id,label]);
+  return options.map(([value,label]) =>
+    `<option value="${escape(value)}"${value === selected ? ' selected' : ''}>${escape(label)}</option>`).join('');
 }
 
 function heading(iconName, title, api) {
@@ -50,7 +52,7 @@ export function renderCloudBanner(cloud, api) {
   if (connected && store?.hasState === false) caption = '営業データの準備が必要です';
   return `<section class="np-cloud-banner${failed || offline ? ' np-cloud-banner-warning' : ''}" aria-label="クラウド店舗">
     <span class="np-cloud-symbol">${icon('store', 18)}</span>
-    <div class="np-cloud-banner-store"><strong>${escape(name)}</strong>${store?.role ? `<span>${escape(roleName(store.role,cloud))}</span>` : ''}</div>
+    <div class="np-cloud-banner-store"><strong>${escape(name)}</strong>${store?.role ? `<span>${escape(roleName(store.role,cloud,store.profileId))}</span>` : ''}</div>
     <span class="np-cloud-state${connected ? ' np-cloud-state-connected' : ''}" role="status"><span class="dot" aria-hidden="true"></span>${caption}</span>
     ${waiting ? button('送信待ちを確認', 'cloud-sync-review', api, {glyph:'history',tone:'quiet'}) : ''}
     ${status !== 'conflict' && (failed || offline)
@@ -94,7 +96,7 @@ function storeChooser(cloud, api) {
       const current = store.id === cloud.store?.id && isCloudMode(cloud);
       return `<li><button type="button" class="np-cloud-store-row" data-action="cloud-select-store" data-id="${escape(store.id)}" aria-pressed="${current}"${busy ? ' disabled' : ''}>
         <span class="np-cloud-symbol">${icon('store', 16)}</span><span class="np-cloud-store-text"><strong>${escape(store.name)}</strong>
-        <small>${escape(roleName(store.role,store.id === cloud.store?.id ? cloud : undefined))}${store.hasState === false ? ' · 初期設定待ち' : ''}</small></span>
+        <small>${escape(roleName(store.role,store.id === cloud.store?.id ? cloud : undefined,store.profileId))}${store.hasState === false ? ' · 初期設定待ち' : ''}</small></span>
         ${current ? '<span class="np-cloud-role">利用中</span>' : icon('chevron-right', 14)}</button></li>`;
     }).join('')}</ul>` : '<p class="np-cloud-copy">所属する店舗はありません。招待を受けたメールアドレスでサインインすると店舗が表示されます。</p>'}
     <div class="np-cloud-buttons">${button('店舗グループ','cloud-groups',api,{glyph:'users',disabled:busy})}
@@ -131,7 +133,7 @@ function memberControls(member, api, cloud) {
       ${choices.map(({id,name})=>`<option value="${escape(id)}"${id === link?.castId ? ' selected' : ''}>${escape(name)}</option>`).join('')}</select></label>
     ${button('ひもづけを保存','cloud-bind-cast',api,{id:member.uid,disabled:cloud.busy})}</div>` : '';
   return `<div class="np-cloud-member-controls"><label class="field"><span class="sr-only">${escape(member.email)}の権限</span>
-    <select name="cloud-member-role" data-cloud-member-role${cloud.busy ? ' disabled' : ''}>${roleOptions(cloud,escape,member.role)}</select></label>
+    <select name="cloud-member-role" data-cloud-member-role${cloud.busy ? ' disabled' : ''}>${roleOptions(cloud,escape,member.profileId ?? member.role)}</select></label>
     ${button('更新', 'cloud-member-save', api, { id: member.uid, disabled: cloud.busy })}
     ${button('アクセスを解除', 'cloud-member-revoke', api, { id: member.uid, tone: 'danger', disabled: cloud.busy })}${castControls}</div>`;
 }
@@ -146,7 +148,7 @@ function membersPanel(cloud, api) {
     ${heading('users', 'メンバーと権限', api)}
     ${cloud.membersLoading ? '<p class="np-cloud-copy" role="status">メンバーを読み込んでいます。</p>' : ''}
     ${members.length ? `<ul class="np-cloud-people">${members.map((member) => `<li class="np-cloud-person">
-      <span class="np-cloud-identity"><strong>${escape(member.email || member.uid)}</strong><small>${escape(roleName(member.role,cloud))}
+      <span class="np-cloud-identity"><strong>${escape(member.email || member.uid)}</strong><small>${escape(roleName(member.role,cloud,member.profileId))}
       ${member.source === 'group' ? ' · グループ経由' : ' · 店舗で設定'}${member.uid === cloud.user?.uid ? ' · あなた' : ''}</small></span>
       ${memberControls(member, api, cloud)}</li>`).join('')}</ul>` : ''}
     ${blocks.length ? `<div><h4 class="np-cloud-subheading">アクセス解除済み</h4>
@@ -158,7 +160,7 @@ function membersPanel(cloud, api) {
       <p class="np-cloud-copy">${cloud.canRestore ? '直接付与する権限を選ぶ場合は、同じアカウントのメールアドレスで再招待してください。' : 'アクセスの再付与は店舗の作成者が行えます。'}</p>
     </div>` : ''}
     ${invites.length ? `<div><h4 class="np-cloud-subheading">招待中</h4><ul class="np-cloud-people">${invites.map((invite) => `<li class="np-cloud-person">
-      <span class="np-cloud-identity"><strong>${escape(invite.email)}</strong><small>${escape(roleName(invite.role,cloud))}</small></span>
+      <span class="np-cloud-identity"><strong>${escape(invite.email)}</strong><small>${escape(roleName(invite.role,cloud,invite.profileId))}</small></span>
       ${button('招待を取り消す', 'cloud-invite-revoke', api, { id: invite.id, tone: 'quiet', disabled: cloud.busy })}</li>`).join('')}</ul></div>` : ''}
     <details class="np-cloud-create" data-cloud-section="invite"><summary>メンバーを招待</summary>
       <div class="np-cloud-detail-body">

@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test *.test.mjs"
+    "test": "node --test *.test.mjs",
+    "verify:restore": "node restore-drill.mjs"
   },
   "dependencies": {
     "jose": "6.1.3"

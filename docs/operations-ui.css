@@ -1,6 +1,11 @@
 .ops-tools { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 13px; }
 .ops-tools .btn, .ops-actions .btn { min-height: 44px; white-space: normal; }
 .ops-actions { display: flex; flex-wrap: wrap; gap: 7px; }
+.np-role-settings { display: grid; gap: 12px; }
+.np-role-settings details > summary { padding-block: 9px; font-weight: 720; cursor: pointer; }
+.np-role-settings details > summary small { font-weight: 500; }
+.np-role-settings fieldset { display: grid; gap: 6px; grid-template-columns: repeat(auto-fit,minmax(min(100%,215px),1fr)); }
+.np-role-settings .inline-check { min-height: 44px; padding: 5px; }
 .payment-correction { display: grid; gap: 10px; }
 .payment-correction :is(.form-copy, .field-help, .ops-highlight) { margin: 0; }
 .payment-correction .form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }

@@ -111,7 +111,7 @@ export function renderCustomers(state, api) {
     ${icon('chevron-right', 17)}</button></li>`).join('');
   return `<div class="np-directory"><div class="np-directory-actions np-directory-page-actions">
     ${api.role === 'admin' ? action(api, 'CSV一括登録', 'customer-import', '', 'plus') : ''}
-    ${action(api, '顧客を登録', 'customer-new', '', 'plus', true)}</div>
+    ${api.canEdit !== false ? action(api, '顧客を登録', 'customer-new', '', 'plus', true) : ''}</div>
     ${panel('顧客一覧', `<div class="np-directory-toolbar">${field('顧客を検索', `<input type="search" name="customerSearch" value="${escape(query)}" placeholder="表示名・ふりがな・電話番号・タグ" autocomplete="off" maxlength="100">`)}</div>
     ${filtersView(state, filter, api)}
     ${rows ? `<ul class="np-directory-list">${rows}</ul>` : empty(api, 'users', query || Object.values(filter).some(Boolean)
@@ -129,7 +129,7 @@ export function renderCustomerDetail(state, id, api) {
   return `<div class="np-directory np-directory-detail"><div class="np-directory-profile">${avatar(customer.photo, api, 22)}
     <div><strong>${escape(customer.name)}</strong>${customer.kana ? `<small>${escape(customer.kana)}</small>` : ''}</div>
     ${customer.flagged ? '<span class="np-directory-badge np-ar-status-overdue">要注意</span>' : ''}</div>
-    <div class="np-directory-actions">${action(api, '編集', 'customer-edit', id, 'edit')}${api.role === 'admin' ? action(api, '伝票を紐づける', 'customer-link', id, 'ticket') + action(api, '重複顧客を統合', 'customer-merge', id, 'users') : ''}</div>
+    <div class="np-directory-actions">${api.canEdit !== false ? action(api, '編集', 'customer-edit', id, 'edit') : ''}${api.role === 'admin' ? action(api, '伝票を紐づける', 'customer-link', id, 'ticket') + action(api, '重複顧客を統合', 'customer-merge', id, 'users') : ''}</div>
     <div class="np-directory-stats">${stat('来店回数', `${visits.length}回`)}${stat('累計売上', yen(totalSales))}</div>
     <dl class="np-directory-facts"><div><dt>担当キャスト</dt><dd>${escape(preferredCast?.name || '—')}</dd></div><div><dt>初回来店日</dt><dd>${escape(customer.firstVisitDate || visits.at(-1)?.date || '—')}</dd></div>
     <div><dt>電話番号</dt><dd>${escape(customer.phone || '—')}</dd></div><div><dt>誕生日</dt><dd>${escape(customer.birthday || '—')}</dd></div>

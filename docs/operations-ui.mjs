@@ -34,6 +34,7 @@ const auditLabels = {
   savePayrollTemplate: '給与テンプレートの保存', assignPayrollTemplate: '給与テンプレートの割り当て', removePayrollTemplate: '給与テンプレートの削除',
   savePayrollVariables:'給与の個人別変数の更新',
   saveEmployeeProfile:'従業員台帳の変更', saveAttendanceItems:'勤怠項目の変更', saveManagedAttendance:'勤怠の代理登録・訂正',
+  saveStaffPerson:'勤務者台帳の変更',saveStaffRate:'勤務者の時給変更',saveStaffAttendance:'役職別勤怠の記録・訂正',voidStaffAttendance:'役職別勤怠の取消',
   requestDailyPay: '日払いの申請', reviewDailyPay: '日払いの審査', payDailyPay: '日払いの支給',
   saveTicketNote: '伝票メモの変更', adjustTicketEnd: '終了時刻の調整', adjustTicketGuests: '利用人数の変更',
   extendOverdue:'一括延長', seat:'来店登録', order:'注文登録', move:'卓移動・連結', extend:'延長登録',

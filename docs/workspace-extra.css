@@ -30,7 +30,8 @@
 .payroll-period-fields { grid-template-columns: repeat(2,minmax(0,1fr)); }
 .payroll-period-fields :is(label,input,select) { min-width: 0; }
 .payroll-period-fields :is(input,select) { width: 100%; }
-.payroll-range-caption { display: none; }
+.payroll-range-caption, .labor-cell-label { display: none; }
+.workspace > .labor-panel { margin-top: 12px; }
 .payroll-range-export { margin-top: 14px; }
 .payroll-range-export .ops-actions { margin-top: 10px; }
 .payroll-rule-row { display: grid; justify-items: start; gap: 5px; padding: 8px; border: 1px solid #e6e9f3; border-radius: 9px; }
@@ -66,13 +67,13 @@
   .payroll-period-fields { grid-template-columns: minmax(0,1fr); }
 }
 @media (max-width: 560px) {
-  .payroll-range-table :is(table,tbody,tfoot) { display: block; }
-  .payroll-range-table thead { position: absolute; width: 1px; height: 1px; clip-path: inset(50%); overflow: hidden; }
-  .payroll-range-table tr { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 9px; padding: 12px 0; border-top: 1px solid var(--line); }
-  .payroll-range-table :is(th,td) { padding: 0; border: 0; text-align: left; overflow-wrap: anywhere; }
-  .payroll-range-table th[scope="row"] { grid-column: 1 / -1; }
+  :is(.payroll-range-table,.labor-table) :is(table,tbody,tfoot) { display: block; }
+  :is(.payroll-range-table,.labor-table) thead { position: absolute; width: 1px; height: 1px; clip-path: inset(50%); overflow: hidden; }
+  :is(.payroll-range-table,.labor-table) tr { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 9px; padding: 12px 0; border-top: 1px solid var(--line); }
+  :is(.payroll-range-table,.labor-table) :is(th,td) { padding: 0; border: 0; text-align: left; overflow-wrap: anywhere; }
+  :is(.payroll-range-table,.labor-table) th[scope="row"] { grid-column: 1 / -1; }
   .payroll-range-table td:last-child { font-weight: 700; }
-  .payroll-range-caption { display: block; color: var(--muted); font-size: .75rem; font-weight: 500; }
+  .payroll-range-caption, .labor-cell-label { display: block; color: var(--muted); font-size: .75rem; font-weight: 500; }
 }
 @media print {
   @page np-pos-a4 { size: A4; margin: 12mm; }

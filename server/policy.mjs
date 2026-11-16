@@ -17,13 +17,15 @@ import { normalizeAttendanceItems } from '../docs/payroll-records.mjs';
 import { normalizeRolePolicy, roleAllowsCommand, roleGroupAllowed } from '../docs/role-policy.mjs';
 import { isPersonalSalesAmount, isPersonalSalesDiscountMode, isValidPersonalSalesHistory } from '../docs/personal-sales.mjs';
 import { normalizeCashAccounts, validCashAccountHistory } from '../docs/cash-accounts.mjs';
+import { normalizeStaffLabor } from '../docs/labor-workspace.mjs';
 
 export const roles = new Set(['admin', 'manager', 'staff', 'cast', 'trainee']);
 const staffCommands = ['seat', 'move', 'order', 'extend', 'extendOverdue', 'deposit', 'settle', 'depart', 'serve', 'issuePrintDocument', 'saveTicketNote',
   'syncAutoExtensions', 'setTableAutoExtension', 'pauseVisitAutoExtension', 'resumeVisitAutoExtension', 'setTicketCustomer','setTicketCompanion'];
 const managerCommands = [...staffCommands, 'open', 'close', 'discount', 'stockAdjust', 'recordStockOperation', 'cancelDeposit', 'cancelLine', 'void', 'adjustTicketEnd',
   'saveCustomer', 'recoverReceivable', 'recordCashMovement', 'saveShift', 'removeShift', 'reviewCastAttendance', 'saveManagedAttendance', 'adjustTicketGuests',
-  'editTicketLine', 'cancelTicketExtension', 'editCashMovement','voidCashMovement','editDeposit','adjustPersonalSales'];
+  'editTicketLine', 'cancelTicketExtension', 'editCashMovement','voidCashMovement','editDeposit','adjustPersonalSales',
+  'saveStaffAttendance','voidStaffAttendance'];
 const roleCommands = {
   cast: new Set(['castClockIn','castClockOut','castRequestShift','castRequestDailyPay']),
   staff: new Set(staffCommands),
@@ -33,7 +35,8 @@ const roleCommands = {
     'mergeCustomers', 'linkCustomer', 'correctSettledTicketCustomer', 'correctSettledTicketCompanion', 'importCustomers', 'savePrintSettings', 'saveAccountingCsv','correctRegisterCount',
     'saveAutoExtensionSettings', 'saveCardFeeSettings', 'savePayrollDraft', 'finalizePayroll', 'savePayrollRate', 'savePayrollSettings',
     'savePayrollTemplate', 'assignPayrollTemplate', 'removePayrollTemplate', 'saveEmployeeProfile', 'saveAttendanceItems','savePayrollVariables',
-    'requestDailyPay', 'reviewDailyPay', 'payDailyPay', 'saveInitialSetSchedule', 'bindCastAccount', 'saveCalculationSettings','saveRolePolicy','saveCashAccounts']),
+    'requestDailyPay', 'reviewDailyPay', 'payDailyPay', 'saveInitialSetSchedule', 'bindCastAccount', 'saveCalculationSettings','saveRolePolicy','saveCashAccounts',
+    'saveStaffPerson','saveStaffRate']),
 };
 const reasonCommands = new Set(['discount', 'cancelSettlement', 'reopenTicket', 'cancelLine', 'recordCashMovement', 'recordStockOperation',
   'correctSettledTicketCustomer', 'correctSettledTicketCompanion', 'correctSettledTicketPayments', 'adjustTicketEnd', 'adjustTicketGuests', 'editTicketLine', 'cancelTicketExtension',
@@ -62,10 +65,10 @@ export function canOperate(role) {
   return Object.hasOwn(roleCommands, role);
 }
 
-export function verifyCommand(role, command, state) {
+export function verifyCommand(role, command, state, profileId) {
   requireCondition(isRecord(command) && typeof command.type === 'string', 400, 'invalid-command', '操作を確認してください。');
   requireCondition(canOperate(role) && roleCommands[role].has(command.type), 403, 'forbidden', 'この操作には権限が必要です。');
-  requireCondition(roleAllowsCommand(state,role,command),403,'forbidden','店舗設定でこの役職には操作が許可されていません。');
+  requireCondition(roleAllowsCommand(state,role,command,profileId),403,'forbidden','店舗設定でこの役職には操作が許可されていません。');
   if (command.type === 'saveRolePolicy') {
     try { normalizeRolePolicy(command.policy); }
     catch (error) { throw new ApiError(400,'invalid-command',error.message); }
@@ -294,12 +297,13 @@ function clearCommissionDetails(state) {
   for (const person of [...state.cast,...(state.archivedCast ?? [])]) delete person.commissionOverride;
 }
 
-function restrictRoleData(next, role) {
-  const allowed = (group) => roleGroupAllowed(next,role,group);
+function restrictRoleData(next, role, profileId) {
+  const allowed = (group) => roleGroupAllowed(next,role,group,profileId);
   if (!allowed('staffing')) {
     delete next.shifts;
     delete next.castAttendance;
     delete next.attendanceItems;
+    delete next.staffLabor;
   }
   if (!allowed('reports')) {
     next.closedDays = [];
@@ -344,7 +348,7 @@ function restrictRoleData(next, role) {
   return next;
 }
 
-export function projectState(state, role, actorUid) {
+export function projectState(state, role, actorUid, profileId) {
   if (role === 'admin') return state;
   if (role === 'cast') return getCastWorkspace(state,actorUid);
   if (role !== 'manager' && role !== 'staff') return null;
@@ -354,10 +358,12 @@ export function projectState(state, role, actorUid) {
   delete next.attendances;
   delete next.dailyPayByDate;
   delete next.castAccounts;
+  if (next.staffLabor !== undefined) delete next.staffLabor.rates;
   if (role === 'staff') {
     delete next.shifts;
     delete next.castAttendance;
     delete next.attendanceItems;
+    delete next.staffLabor;
   } else if (next.castAttendance !== undefined) next.castAttendance = listCastAttendance(state);
   for (const ticket of allSnapshotTickets(next)) delete ticket.settledBy;
   if (next.printDocuments) {
@@ -410,7 +416,7 @@ export function projectState(state, role, actorUid) {
         if (row.actor.id !== actorUid) delete row.actor.id;
       }
     }
-    return restrictRoleData(next,role);
+    return restrictRoleData(next,role,profileId);
   }
   next.floorMonthSales = getMonthlyReportSales(state);
   next.closedDays = [];
@@ -452,7 +458,7 @@ export function projectState(state, role, actorUid) {
     entry.defaultUnitCost = 0;
     entry.value = 0;
   }
-  return restrictRoleData(next,role);
+  return restrictRoleData(next,role,profileId);
 }
 
 function uniqueRecords(records) {
@@ -728,6 +734,7 @@ export function validateSnapshot(state) {
   let normalizedCardFeeSettings;
   let normalizedPayroll;
   let normalizedAttendances;
+  let normalizedLabor;
   try {
     if (state.rolePolicy !== undefined) normalizeRolePolicy(state.rolePolicy);
     if (state.cashAccounts !== undefined) normalizeCashAccounts(state.cashAccounts);
@@ -744,6 +751,7 @@ export function validateSnapshot(state) {
     requireCondition(isValidInitialSetSchedule(state.initialSetSchedule),400,'invalid-snapshot',message);
     normalizedPayroll = normalizePayrollSnapshot(state);
     normalizedAttendances = normalizeAttendanceSnapshot(state);
+    if (state.staffLabor !== undefined) normalizedLabor = normalizeStaffLabor(state.staffLabor);
     if (state.cardFeeSettings !== undefined) normalizedCardFeeSettings = normalizeCardFeeSettings(state.cardFeeSettings);
     if (state.printSettings !== undefined) normalizedPrintSettings = normalizePrintSettings(state.printSettings);
     parseStoreConfiguration(JSON.stringify(exportStoreConfiguration(state)));
@@ -758,6 +766,7 @@ export function validateSnapshot(state) {
   if (migrated.calculationSettings !== undefined) migrated.calculationSettings = normalizeCalculationSettings(migrated.calculationSettings);
   if (normalizedPayroll !== undefined) migrated.payroll = normalizedPayroll;
   if (normalizedAttendances !== undefined) migrated.attendances = normalizedAttendances;
+  if (normalizedLabor !== undefined) migrated.staffLabor = normalizedLabor;
   if (migrated.castAttendance !== undefined) migrated.castAttendance = listCastAttendance(state);
   delete migrated.castAccounts;
   delete migrated.dailyPayByDate;

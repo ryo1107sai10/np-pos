@@ -116,3 +116,21 @@ export function createPayrollDemo(now = Date.now()) {
   step({type:'saveShift',castId:'cast2',date,startMinute:1260,endMinute:1560,status:'requested'});
   return state;
 }
+
+export function createLaborDemo(now = Date.now()) {
+  let state = createPayrollDemo(now);
+  const dates = [2,1].map((offset)=>new Date(Date.parse(state.day.date) - offset * 86_400_000).toISOString().slice(0,10));
+  const step = (command) => { state = apply(state,command,now,demoAdmin); };
+  const roster = [['高橋','admin',0],['佐伯','manager',3000],['森','staff',1800],['望月','trainee',null]];
+  for (const [index,[name,role,hourlyRate]] of roster.entries()) {
+    step({type:'saveStaffPerson',name,role,enabled:true});
+    const {id:personId} = state.staffLabor.people.at(-1);
+    if (hourlyRate !== null) step({type:'saveStaffRate',personId,effectiveDate:dates[0],hourlyRate});
+    for (const date of index < 3 ? dates : dates.slice(1)) {
+      const clockInAt = Date.parse(`${date}T20:00:00+09:00`);
+      step({type:'saveStaffAttendance',personId,date,clockInAt,clockOutAt:clockInAt + (5+index) * 60 * 60_000,
+        breakMinutes:30,reason:'勤怠・人件費サンプル'});
+    }
+  }
+  return state;
+}

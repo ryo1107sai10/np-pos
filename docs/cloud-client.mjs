@@ -192,11 +192,11 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
     const role = result.role ?? current.store.role;
     const restricted = Boolean(result.restricted || role === 'trainee' || (role === 'cast' && result.scope !== 'cast'));
     let store = current.store;
-    const changedRole = result.role && store.role !== result.role;
-    if (changedRole && serial < scope.roleSerial) return false;
+    const changedRole = result.role && (store.role !== result.role || store.profileId !== result.profileId);
+    if (serial < scope.roleSerial) return false;
     if (changedRole) {
       scope.roleSerial = serial;
-      store = { ...store, role: result.role };
+      store = { ...store, role: result.role, profileId:result.profileId };
       if (result.unchanged && !restricted) {
         patch({ store, state: null, revision: null, restricted, status: 'connecting' });
         return true;
@@ -293,7 +293,9 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
   }
 
   function currentStoreResult() {
-    return { state: current.state, revision: current.revision, role: current.store?.role, restricted: current.restricted };
+    const profileId = current.store?.profileId;
+    return { state: current.state, revision: current.revision, role: current.store?.role, restricted: current.restricted,
+      ...(profileId && {profileId}) };
   }
 
   function topicDenied(scope, error) {

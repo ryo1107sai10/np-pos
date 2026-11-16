@@ -12,7 +12,7 @@ function peopleById(state) {
   return new Map([...(state.archivedCast ?? []),...state.cast].map((person) => [person.id,person.name]));
 }
 
-export function renderShifts(state,{date = state.day.date,mode = 'week',escape,icon}) {
+export function renderShifts(state,{date = state.day.date,mode = 'week',escape,icon,canEdit = true}) {
   const period = shiftPeriod(date,mode);
   const records = listShifts(state,period);
   const people = peopleById(state);
@@ -26,12 +26,14 @@ export function renderShifts(state,{date = state.day.date,mode = 'week',escape,i
   const groups = [...byDate].sort(([first],[second]) => first.localeCompare(second)).map(([day,shifts]) =>
     `<section class="np-shift-day">
       <header><h3><time datetime="${escape(day)}">${escape(dayLabel.format(new Date(day)))}</time></h3>
-        <button type="button" class="btn btn-quiet" data-action="shift-new" data-date="${escape(day)}" aria-label="${escape(day)}に追加">${icon('plus',16)}追加</button></header>
-      ${shifts.length ? `<ul>${shifts.map((shift) => `<li><button type="button" class="np-shift-row" data-action="shift-edit" data-id="${escape(shift.id)}">
+        ${canEdit ? `<button type="button" class="btn btn-quiet" data-action="shift-new" data-date="${escape(day)}" aria-label="${escape(day)}に追加">${icon('plus',16)}追加</button>` : ''}</header>
+      ${shifts.length ? `<ul>${shifts.map((shift) => `<li>${canEdit
+        ? `<button type="button" class="np-shift-row" data-action="shift-edit" data-id="${escape(shift.id)}">`
+        : '<div class="np-shift-row">' }
         <strong>${escape(people.get(shift.castId) ?? shift.castId)}</strong>
         <span class="np-shift-time">${timeValue(shift.startMinute)}–${shift.endMinute >= 1_440 ? '翌 ' : ''}${timeValue(shift.endMinute)}</span>
-        <span class="np-shift-status${shift.status === 'confirmed' ? ' np-shift-confirmed' : ''}">${statuses[shift.status]}</span>${icon('chevron-right',15)}
-        ${shift.note ? `<small>${escape(shift.note)}</small>` : ''}</button></li>`).join('')}</ul>` : '<p class="field-help">登録されたシフトはありません。</p>'}</section>`).join('');
+        <span class="np-shift-status${shift.status === 'confirmed' ? ' np-shift-confirmed' : ''}">${statuses[shift.status]}</span>${canEdit ? icon('chevron-right',15) : ''}
+        ${shift.note ? `<small>${escape(shift.note)}</small>` : ''}${canEdit ? '</button>' : '</div>'}</li>`).join('')}</ul>` : '<p class="field-help">登録されたシフトはありません。</p>'}</section>`).join('');
   return `<section class="np-shifts" aria-label="シフト管理">
     <div class="np-shift-toolbar">
       <div class="seg" role="group" aria-label="表示期間">${Object.entries(modes).map(([id,label]) =>
@@ -41,7 +43,7 @@ export function renderShifts(state,{date = state.day.date,mode = 'week',escape,i
         <label class="field"><span class="sr-only">表示の基準日</span><input type="date" data-shift-date value="${escape(date)}" required></label>
         <button type="button" class="btn btn-quiet" data-action="shift-navigate" data-date="${escape(period.next)}" aria-label="次の期間">${icon('chevron-right',15)}</button>
       </div>
-      <button type="button" class="btn btn-primary np-shift-new" data-action="shift-new" data-date="${escape(date)}">${icon('plus',16)}シフトを登録</button>
+      ${canEdit ? `<button type="button" class="btn btn-primary np-shift-new" data-action="shift-new" data-date="${escape(date)}">${icon('plus',16)}シフトを登録</button>` : ''}
     </div>
     <p class="np-shift-summary"><strong>${escape(period.start)}${period.end === period.start ? '' : ` – ${escape(period.end)}`}</strong><span>確定 ${records.filter(({status}) => status === 'confirmed').length}件 · 勤務希望 ${records.filter(({status}) => status === 'requested').length}件</span></p>
     <div class="np-shift-days">${groups}</div>

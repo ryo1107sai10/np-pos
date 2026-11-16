@@ -57,3 +57,33 @@ test('command and projection filtering protects history, cash, staff and custome
   assert.throws(() => verifyCommand('staff',{type:'saveStoreSettings'},state),{code:'forbidden'});
   assert.equal(projectState(state,'staff',staff.id).day.openingCash,0);
 });
+
+test('custom roles split order, checkout and read-only staffing permissions', () => {
+  const id = 'role-0bb13d6c-bcbf-4de9-8ccf-d57189978e1a';
+  const make = (base,allowed) => ({custom:{[id]:{label:'卓担当',base,allowed}}});
+  assert.throws(() => normalizeRolePolicy(make('admin',['addOrders'])),/操作/);
+  assert.throws(() => normalizeRolePolicy(make('staff',['discounts'])),/操作/);
+  assert.throws(() => normalizeRolePolicy(make('manager',['approveDiscount'])),/操作/);
+  const state = apply(createDemo('closed',now),{type:'saveRolePolicy',policy:make('manager',['addOrders','staffing'])},now,admin);
+  assert.equal(roleLabel(state,'manager',id),'卓担当');
+  assert.equal(roleAllowsPage(state,'manager','shifts',id),true);
+  assert.equal(roleAllowsAction(state,'manager','shift-period',id),true);
+  assert.equal(roleAllowsAction(state,'manager','shift-new',id),false);
+  assert.equal(roleAllowsAction(state,'manager','order',id),true);
+  assert.equal(roleAllowsAction(state,'manager','settle',id),false);
+  const actor = {...manager,profileId:id};
+  assert.throws(() => apply(state,{type:'open',openingCash:0},now,actor),/許可/);
+  assert.throws(() => verifyCommand('manager',{type:'saveStaffAttendance'},state,id),{code:'forbidden'});
+  assert.throws(() => verifyCommand('staff',{type:'order'},state,id),{code:'forbidden'});
+});
+
+test('a checkout-only custom role can record regular payment but cannot create customer credit', () => {
+  const id = 'role-0bb13d6c-bcbf-4de9-8ccf-d57189978e1a';
+  const policy = {custom:{[id]:{label:'会計担当',base:'manager',allowed:['takePayment']}}};
+  const state = apply(createDemo('closed',now),{type:'saveRolePolicy',policy},now,admin);
+  const cash = {type:'settle',ticketId:'ticket-1',payments:[{method:'cash',amount:1000}]};
+  const credit = {...cash,payments:[{method:'receivable',amount:1000}],creditDueDate:date};
+  verifyCommand('manager',cash,state,id);
+  verifyCommand('manager',credit,state);
+  assert.throws(()=>verifyCommand('manager',credit,state,id),{code:'forbidden'});
+});

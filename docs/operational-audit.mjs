@@ -6,6 +6,7 @@ import { getReceivableBalance, getReceivableStatus } from './receivables.mjs';
 import { cashMovementCategories, cashMovementKinds } from './cash-ledger.mjs';
 import { getPrintSettings, printDocumentKinds } from './print-domain.mjs';
 import { getPayrollDraft, getPayrollRates, getPayrollSettings, getPayrollTemplateAssignment, getPayrollTemplates, isDailyPayCommand, isPayrollCommand } from './payroll.mjs';
+import { getStaffLabor, isStaffLaborCommand } from './labor-workspace.mjs';
 import { isCastAttendanceReview, linkedCastForActor } from './cast-self.mjs';
 import { getCalculationSettings } from './calculation-settings.mjs';
 import { getEmployeeProfile } from './payroll-records.mjs';
@@ -411,6 +412,28 @@ function auditPayroll(before, after, action) {
     before:previous, after:next, reason:action.type === 'finalizePayroll' ? '給与を確定' : '給与の下書きを保存' };
 }
 
+function auditStaffLabor(before,after,action) {
+  const previous = getStaffLabor(before);
+  const current = getStaffLabor(after);
+  if (action.type === 'saveStaffPerson') {
+    const old = previous.people.find(({id})=>id === action.personId);
+    const next = current.people.find(({id})=>id === (action.personId ?? current.people.at(-1)?.id));
+    return !sameValue(old,next) && {target:target('payroll',next.id,next.name),before:old ?? null,after:next,reason:'勤務者台帳を更新'};
+  }
+  if (action.type === 'saveStaffRate') {
+    const rate = ({personId,effectiveDate})=>personId === action.personId && effectiveDate === action.effectiveDate;
+    const old = previous.rates.find(rate);
+    const next = current.rates.find(rate);
+    const name = current.people.find(({id})=>id === action.personId).name;
+    return !sameValue(old,next) && {businessDate:next.effectiveDate,target:target('payroll',next.personId,`${name}の時給`),
+      before:old ?? null,after:next,reason:'適用開始日付きの時給を保存'};
+  }
+  const old = previous.attendance.find(({id})=>id === action.attendanceId);
+  const next = action.attendanceId ? current.attendance.find(({id})=>id === action.attendanceId) : current.attendance.at(-1);
+  return !sameValue(old,next) && {businessDate:next.date,target:target('attendance',next.id,next.personName),
+    before:old ?? null,after:next,reason:textReason(action.reason)};
+}
+
 export function buildOperationAudit(before, after, action, at, actor) {
   let details;
   if (ticketActions.has(action.type)) {
@@ -445,6 +468,8 @@ export function buildOperationAudit(before, after, action, at, actor) {
       reason:textReason(action.reason)};
   } else if (isPayrollCommand(action.type) || action.type === 'castRequestDailyPay') {
     details = auditPayroll(before, after, action.type === 'castRequestDailyPay' ? {...action,type:'requestDailyPay'} : action);
+  } else if (isStaffLaborCommand(action.type)) {
+    details = auditStaffLabor(before,after,action);
   } else if (action.type === 'saveShift' || action.type === 'removeShift' || action.type === 'castRequestShift') {
     const previous = before.shifts?.find(({id}) => id === action.shiftId);
     const current = after.shifts?.find(({id}) => previous ? id === previous.id : !before.shifts?.some((entry) => entry.id === id));

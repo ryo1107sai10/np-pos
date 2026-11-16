@@ -346,7 +346,7 @@ function cashTotals(current, api) {
 
 function renderCash(state, api, period, current) {
   const {icon,escape,yen} = api;
-  const canRecord = period.date === state.day.date && state.day.status === 'open' && !period.closed;
+  const canRecord = api.canRecordCash !== false && period.date === state.day.date && state.day.status === 'open' && !period.closed;
   const vaults = cashAccounts(state,'vault');
   const vaultPanel = vaults.length ? panel('金庫の現在残高',
     `<dl class="lr-money-list">${vaults.map((vault)=>`<div><dt>${escape(vault.name)}${vault.enabled ? '' : '（停止中）'}</dt>
