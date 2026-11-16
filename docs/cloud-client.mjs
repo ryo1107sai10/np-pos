@@ -478,6 +478,28 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
     },
     listStores,
     storeOverview() { return request('/stores/overview'); },
+    async operationsGuide(topic) {
+      const scope = activeScope;
+      const result = await request(`${storePath(scope)}/guide`,topic ? {method:'POST',body:{topic}} : undefined);
+      assertScope(scope);
+      return result;
+    },
+    listStoreGroups() { return request('/groups'); },
+    createStoreGroup(name) { return request('/groups', { method: 'POST', body: { name } }); },
+    renameStoreGroup(id, name) { return request(`/groups/${encodeURIComponent(id)}`, { method: 'PATCH', body: { name } }); },
+    setGroupStore(id, storeId, attach) {
+      return request(`/groups/${encodeURIComponent(id)}/stores/${encodeURIComponent(storeId)}`, { method: attach ? 'PUT' : 'DELETE' });
+    },
+    inviteGroupMember(id, email, role) {
+      return request(`/groups/${encodeURIComponent(id)}/members`, { method: 'POST', body: { email, role } });
+    },
+    changeGroupMember(id, uid, role) {
+      return request(`/groups/${encodeURIComponent(id)}/members/${encodeURIComponent(uid)}`,
+        role === undefined ? { method: 'DELETE' } : { method: 'PATCH', body: { role } });
+    },
+    revokeGroupInvite(id, inviteId) {
+      return request(`/groups/${encodeURIComponent(id)}/invites/${encodeURIComponent(inviteId)}`, { method: 'DELETE' });
+    },
     async createStore(name) {
       const { store } = await request('/stores', { method: 'POST', body: { name } });
       await listStores();

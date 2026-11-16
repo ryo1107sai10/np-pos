@@ -1,3 +1,5 @@
+import { depositGrossAmount } from './card-fee.mjs';
+
 export const printDocumentKinds = Object.freeze({
   check: '会計確認用伝票',
   receipt: 'レシート',
@@ -108,9 +110,10 @@ export function findPrintableTicket(state, ticketId, date) {
 }
 
 export function getPrintTenderReceived(ticket) {
-  return [...(ticket.deposits ?? []), ...(ticket.payments ?? [])]
-    .filter(({method}) => receivedMethods.has(method))
-    .reduce((total, {amount}) => total + amount, 0);
+  const deposits = (ticket.deposits ?? []).filter(({method}) => receivedMethods.has(method));
+  const payments = (ticket.payments ?? []).filter(({method}) => receivedMethods.has(method));
+  return deposits.reduce((total, deposit) => total + depositGrossAmount(deposit),0)
+    + payments.reduce((total, {amount}) => total + amount,0);
 }
 
 export function getPrintDocuments(state, ticket, date, kind) {

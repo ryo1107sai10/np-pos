@@ -1,5 +1,5 @@
 import { getAutoExtensionSettings, getTableAutoExtensionEnabled, isVisitAutoExtensionPaused } from './auto-extension.mjs';
-import { getCardFeeSettings } from './card-fee.mjs';
+import { depositGrossAmount, getCardFeeSettings } from './card-fee.mjs';
 import { findSettledCustomerTicket } from './customers.mjs';
 import { getStoreSettings } from './store-settings.mjs';
 import { getReceivableBalance, getReceivableStatus } from './receivables.mjs';
@@ -94,17 +94,18 @@ function auditSettings(before, after, action) {
   };
 }
 
-function auditPayments(rows = []) {
+function auditPayments(rows = [], isDeposit = false) {
   return rows.map(({method,amount,brandName,feeWaived,waivedFeeRate,cardFee,cardFeeRateBps,memo}) => ({
     method,amount,...(brandName && {brandName}),...(feeWaived && {feeWaived,waivedFeeRate}),
-    ...(cardFee && brandName && {cardFee,cardFeeRateBps}),...(memo && {memo}),
+    ...(cardFee && (brandName || isDeposit) && {cardFee,cardFeeRateBps}),
+    ...(cardFee && isDeposit && {grossAmount:depositGrossAmount({amount,cardFee})}),...(memo && {memo}),
   }));
 }
 
 function ticketValues(ticket) {
   const result = {
     status: ticket.status, tableIds: ticket.tableIds, discount: ticket.discount,
-    deposits: auditPayments(ticket.deposits), payments: auditPayments(ticket.payments),
+    deposits: auditPayments(ticket.deposits,true), payments: auditPayments(ticket.payments),
   };
   if (ticket.cashTender) result.cashTender = ticket.cashTender;
   if (ticket.settlement) {
@@ -416,10 +417,14 @@ export function buildOperationAudit(before, after, action, at, actor) {
     details = auditCustomers(before, after, action);
   } else if (action.type === 'setTicketCustomer' || action.type === 'correctSettledTicketCustomer') {
     details = auditTicketCustomer(before, after, action);
-  } else if (action.type === 'setTicketCompanion') {
-    const previous = before.tickets.find(({id})=>id === action.ticketId);
-    const next = after.tickets.find(({id})=>id === action.ticketId);
-    details = {target:target('ticket',next.id,`伝票 No. ${next.number}`),reason:action.mode === 'add' ? '同席者を追加' : '同席者を解除',
+  } else if (action.type === 'setTicketCompanion' || action.type === 'correctSettledTicketCompanion') {
+    const find = (state) => action.type === 'correctSettledTicketCompanion' ? findSettledCustomerTicket(state,action.ticketId)
+      : {ticket:state.tickets.find(({id})=>id === action.ticketId),date:state.day.date};
+    const {ticket:previous} = find(before);
+    const {ticket:next,date} = find(after);
+    const reason = action.type === 'correctSettledTicketCompanion' ? textReason(action.reason)
+      : action.mode === 'add' ? '同席者を追加' : '同席者を解除';
+    details = {businessDate:date,target:target('ticket',next.id,`伝票 No. ${next.number}`),reason,
       before:{companionCustomerIds:previous.companionCustomerIds ?? []},after:{companionCustomerIds:next.companionCustomerIds ?? []}};
   } else if (action.type === 'correctSettledTicketPayments') {
     details = auditPaymentCorrection(before, after, action);

@@ -29,6 +29,7 @@ export function renderWorkspaceMenu({pages, page, ready, isOpen, hasTables, stor
   ] : [];
   const account = [
     ...(showOverview ? [{group:'分析・レポート',title:'複数店舗の営業状況',glyph:'chart',action:'cloud-overview'}] : []),
+    {group:'アカウント', title:'店舗グループ', glyph:'users', action:'cloud-groups'},
     {group:'アカウント', title:'店舗・アカウント', glyph:'user', action:'cloud-open'},
     ...(ready ? [{group:'アカウント', title:'操作ガイド', glyph:'ticket', action:'ops-guide'}] : []),
     ...(!cloud ? [{group:'アカウント', title:'サンプル操作', glyph:'refresh', action:'demo'}] : []),

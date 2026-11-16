@@ -27,6 +27,10 @@
 .payroll-edit-row input { min-width: 0; width: 100%; }
 .payroll-edit-row .icon-btn { min-height: 44px; }
 .payroll-edit-section .btn { min-height: 40px; }
+.payroll-period-fields { grid-template-columns: repeat(2,minmax(0,1fr)); }
+.payroll-period-fields :is(label,input,select) { min-width: 0; }
+.payroll-period-fields :is(input,select) { width: 100%; }
+.payroll-range-caption { display: none; }
 .payroll-rule-row { display: grid; justify-items: start; gap: 5px; padding: 8px; border: 1px solid #e6e9f3; border-radius: 9px; }
 .payroll-rule-row .form-grid { justify-self: stretch; grid-template-columns: repeat(2,minmax(0,1fr)); }
 .payroll-rule-row .field :is(input,select) { min-width: 0; width: 100%; }
@@ -36,6 +40,10 @@
 .ops-notice-section h3 { margin: 0 0 5px; }
 .ops-guide { margin: 3px 0; padding-left: 21px; }
 .ops-guide p { margin: 3px 0 10px; color: var(--muted); }
+.ops-guide li + li { margin-top: 12px; }
+.ops-guide .ops-actions { margin: 0 0 8px; }
+.ops-guide-answer { border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
+.ops-guide-answer p { margin-bottom: 0; white-space: pre-line; }
 .cast-self-list { display: grid; gap: 6px; margin: 8px 0 0; padding: 0; list-style: none; }
 .cast-self-list li { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; padding: 9px 0; border-top: 1px solid #e6e9f3; }
 .cast-self-list li > div { min-width: 0; overflow-wrap: anywhere; }
@@ -53,6 +61,16 @@
 @media (max-width: 480px) {
   .analytics-table th, .analytics-table td { padding-inline: 5px; }
   .payroll-view input, .payroll-edit-row input { font-size: 16px; }
+  .payroll-period-fields { grid-template-columns: minmax(0,1fr); }
+}
+@media (max-width: 560px) {
+  .payroll-range-table :is(table,tbody,tfoot) { display: block; }
+  .payroll-range-table thead { position: absolute; width: 1px; height: 1px; clip-path: inset(50%); overflow: hidden; }
+  .payroll-range-table tr { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 9px; padding: 12px 0; border-top: 1px solid var(--line); }
+  .payroll-range-table :is(th,td) { padding: 0; border: 0; text-align: left; overflow-wrap: anywhere; }
+  .payroll-range-table th[scope="row"] { grid-column: 1 / -1; }
+  .payroll-range-table td:last-child { font-weight: 700; }
+  .payroll-range-caption { display: block; color: var(--muted); font-size: .75rem; font-weight: 500; }
 }
 @media print {
   @page np-pos-a4 { size: A4; margin: 12mm; }

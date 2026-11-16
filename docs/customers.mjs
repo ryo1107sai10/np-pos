@@ -264,8 +264,13 @@ function updateTicketCustomer(state, tickets, customer, date) {
   }
 }
 
-export function setTicketCompanion(state,ticket,{customerId,mode},actor) {
+export function setTicketCompanion(state,ticket,action,actor) {
   check(['admin','manager','staff'].includes(actor.role),'同席者を変更する権限がありません。');
+  updateTicketCompanion(state,[ticket],action,state.day.date);
+}
+
+function updateTicketCompanion(state,tickets,{customerId,mode},businessDate) {
+  const [ticket] = tickets;
   check(ticket.customerId,'先に会計の代表となるお客様を選択してください。');
   const customer = ticketCustomerTarget(state,customerId);
   check(customer && customer.id !== ticket.customerId,'代表のお客様と異なる同席者を選択してください。');
@@ -273,12 +278,12 @@ export function setTicketCompanion(state,ticket,{customerId,mode},actor) {
   if (mode === 'add') {
     check(!ids.includes(customer.id),'このお客様は同席者に登録済みです。');
     check(ids.length < Math.min(20,ticket.guests - 1),'参加人数に合わせて来店人数を変更してください。');
-    ticket.companionCustomerIds = [...ids,customer.id];
-    firstVisit(customer,state.day.date);
+    for (const copy of tickets) copy.companionCustomerIds = [...ids,customer.id];
+    firstVisit(customer,businessDate);
   } else {
     check(mode === 'remove' && ids.includes(customer.id),'登録済みの同席者を選択してください。');
-    ticket.companionCustomerIds = ids.filter((id)=>id !== customer.id);
-    if (customer.firstVisitDate === state.day.date) {
+    for (const copy of tickets) copy.companionCustomerIds = ids.filter((id)=>id !== customer.id);
+    if (customer.firstVisitDate === businessDate) {
       customer.firstVisitDate = '';
       for (const {ticket:visit,date} of ticketSnapshots(state)) {
         if (visit.status !== 'void' && (visit.customerId === customer.id || visit.companionCustomerIds?.includes(customer.id))) {
@@ -296,6 +301,11 @@ export function setTicketCustomer(state, ticket, { customerId }, actor) {
   updateTicketCustomer(state, [ticket], customer, state.day.date);
 }
 
+function settledTicketCopies(state,ticket,date) {
+  const archive = state.closedDays?.find((day) => day.date === date)?.ticketSnapshots?.find(({ id }) => id === ticket.id);
+  return archive && archive !== ticket ? [ticket, archive] : [ticket];
+}
+
 function correctSettledTicketCustomer(state, action) {
   profileText(action.reason, 120, '訂正理由', true);
   const entry = findSettledCustomerTicket(state, action.ticketId);
@@ -305,9 +315,7 @@ function correctSettledTicketCustomer(state, action) {
   if (customer ? ticket.customerId === customer.id : !ticket.customerId && !ticket.customer) return;
 
   reassignSettledTicketReceivable(state, ticket, date, action.customerId);
-  const archive = state.closedDays?.find((day) => day.date === date)?.ticketSnapshots?.find(({ id }) => id === ticket.id);
-  const copies = archive && archive !== ticket ? [ticket, archive] : [ticket];
-  updateTicketCustomer(state, copies, customer, date);
+  updateTicketCustomer(state, settledTicketCopies(state,ticket,date), customer, date);
 }
 
 function rewriteTicketLinks(state, from, to) {
@@ -352,6 +360,15 @@ export function applyCustomerCommand(state, action, actor, now, allocateId) {
   check(actor.role === 'admin', 'この操作には店舗管理者の権限が必要です。');
   if (action.type === 'correctSettledTicketCustomer') {
     correctSettledTicketCustomer(state, action);
+    return;
+  }
+  if (action.type === 'correctSettledTicketCompanion') {
+    profileText(action.reason, 120, '訂正理由', true);
+    const entry = findSettledCustomerTicket(state, action.ticketId);
+    check(entry, '会計済みの伝票を選んでください。');
+    const {ticket,date} = entry;
+    check(ticket.customerId === action.primaryCustomerId, '会計の代表者が変更されました。伝票を開き直してください。');
+    updateTicketCompanion(state,settledTicketCopies(state,ticket,date),action,date);
     return;
   }
   if (action.type === 'importCustomers') {

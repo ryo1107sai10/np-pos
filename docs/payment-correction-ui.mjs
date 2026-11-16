@@ -12,7 +12,7 @@ export function paymentCorrectionModel(ticket) {
   }
   return {
     amounts, fixedAmount, total:getSettledTicketPaymentTotal(ticket) - fixedAmount,
-    cardFee:ticket.settlement?.cardFee ?? 0,
+    cardFee:(ticket.settlement?.cardFee ?? 0) - (ticket.settlement?.depositFee ?? 0),
   };
 }
 
@@ -22,7 +22,7 @@ export function renderPaymentCorrection(model, { yen }) {
       min="0" max="${model.total}" value="${model.amounts[method]}" required></label>`).join('');
   return `<div class="payment-correction">
     <p class="form-copy">会計時に記録した受取額の内訳を訂正します。会計合計と前受金はそのままです。</p>
-    ${model.cardFee && !model.fixedAmount ? `<p class="field-help">会計時のカード加算 ${yen(model.cardFee)} を含めた金額を入力してください。</p>` : ''}
+    ${model.cardFee && !model.fixedAmount ? `<p class="field-help">会計時の決済加算 ${yen(model.cardFee)} を含めた金額を入力してください。</p>` : ''}
     <div class="result-bar"><span>会計時の受取額</span><strong>${yen(model.total)}</strong></div>
     <div class="form-grid">${fields}</div>
     <div id="correction-payment-difference" class="result-bar" aria-live="polite"><span>入力した合計との差</span><strong></strong></div>

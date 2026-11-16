@@ -61,6 +61,7 @@
 .np-cloud-intro, .np-cloud-account { grid-template-columns: auto minmax(0, 1fr); align-items: center; }
 .np-cloud-intro { background: linear-gradient(115deg,#f3eefa,#fbfbff 58%,#fff); }
 .np-cloud-intro h3 { margin-bottom: 3px; }
+.np-cloud-group-demo { grid-template-columns: minmax(0,1fr) auto; }
 .np-cloud-account { grid-template-columns: auto minmax(0, 1fr) auto; }
 .np-cloud-section-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 6px; }
 .np-cloud-buttons { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
@@ -135,6 +136,8 @@
   .np-cloud-person > .btn { justify-self: start; }
   .np-cloud-account { grid-template-columns: auto minmax(0,1fr); }
   .np-cloud-account > .btn { grid-column: 2; justify-self: start; }
+  .np-cloud-group-demo { grid-template-columns: minmax(0,1fr); }
+  .np-cloud-group-demo > .btn { justify-self: start; }
   .np-cloud-banner { gap: 6px 8px; margin-bottom: 10px; }
 }
 @media (max-width: 380px) {

@@ -7,7 +7,7 @@ import { getAutoExtensionNotices, getAutoExtensionPlans, getAutoExtensionSetting
   getNextAutoExtensionAt, getTableAutoExtensionEnabled, getTicketAutoExtensionAt, isVisitAutoExtensionPaused } from './auto-extension.mjs';
 import { formatAutoExtensionCountdown, renderAutoExtensionBadge, renderAutoExtensionWarnings, renderTableAutoExtensionControl,
   renderTableAutoExtensionSettings, renderVisitAutoExtensionPaused } from './auto-extension-ui.mjs';
-import { canWaivePaymentFee, getCardFee, getCardFeeSettings } from './card-fee.mjs';
+import { canWaivePaymentFee, depositGrossAmount, getCardFee, getCardFeeSettings, getDepositPaymentTerms } from './card-fee.mjs';
 import { getSettlementPaymentFees } from './engine.mjs';
 import { getMonthlyReportSales, getReportDates, getReportPeriod } from './report-period.mjs';
 import { buildDailyReportCsv } from './report-export.mjs';
@@ -20,6 +20,8 @@ import { commitStoreSettingsEditor, handleStoreSettingsEditorAction, renderStore
 import { cloudConfig } from './cloud-config.mjs';
 import { createCloudClient } from './cloud-client.mjs';
 import { renderCloudBanner, renderCloudEntry, renderCloudMigration, renderCloudPanel, renderCloudRestricted, renderStoreOverview } from './cloud-ui.mjs';
+import { createStoreGroupDemo } from './store-group-demo.mjs';
+import { renderStoreGroups } from './store-group-ui.mjs';
 import { findCustomer, findSettledCustomerTicket, getCustomerDetail, isAssignedCustomer, parseCustomersCsv } from './customers.mjs';
 import { ticketHasReceivable } from './receivables.mjs';
 import { cashMovementCategories, cashMovementKinds, editableCashMovement } from './cash-ledger.mjs';
@@ -30,14 +32,15 @@ import { printDocumentTitles, renderExtensionQuote, renderPrintOptions, renderPr
 import { createBillingDemo, createCashDemo, createPayrollDemo, createPhaseTwoDemo, createPeriodReportDemo } from './phase-two-demo.mjs';
 import * as customerUI from './customer-ui.mjs';
 import { operationReason, renderAuditLog, renderDiscountForm } from './operations-ui.mjs';
-import { getPracticeStatus, renderGuideResults, renderPracticeProgress } from './practice-guide.mjs';
+import { getOperationsGuideTopic, getPracticeStatus, renderGuideResults, renderPracticeProgress } from './practice-guide.mjs';
 import { paymentCorrectionModel, readPaymentCorrection, renderPaymentCorrection, updatePaymentCorrection } from './payment-correction-ui.mjs';
 import { calculateCashTender, cashDenominations, cashEntryMaximum, getCashCountTotal, getCashPaymentAmount } from './register-cash.mjs';
 import { getRegisterSettings, openingCashSuggestion, registerCutoff } from './register-config.mjs';
 import { renderWorkspaceMenu } from './workspace-menu.mjs';
 import { readRolePolicy, renderRolePolicy, roleAllowsAction, roleAllowsPage, roleGroupAllowed, roleLabel } from './role-policy.mjs';
 import { renderAnalytics, buildAnalyticsCsv } from './analytics.mjs';
-import { getDailyPayLimit, getPayrollDailyPays, getPayrollDraft, getPayrollTemplates, isPayrollMonth, MissingPayrollRateError, previewPayroll } from './payroll.mjs';
+import { getDailyPayLimit, getPayrollDailyPays, getPayrollDraft, getPayrollTemplates, isPayrollMonth, MissingPayrollRateError,
+  previewPayroll, previewPayrollRange } from './payroll.mjs';
 import * as payrollUI from './payroll-ui.mjs';
 import { getPayrollVariables } from './payroll-formula.mjs';
 import { renderTicketHistory, bindTicketHistory } from './ticket-history.mjs';
@@ -87,7 +90,7 @@ const number = new Intl.NumberFormat('ja-JP', { maximumFractionDigits: 6 });
 const ownerActions = new Set(['store-settings', 'stock-settings', 'edit-layout', 'layout-transfer', 'layout-export',
   'discount-review', 'discount-reject', 'cancel-settlement', 'reopen-ticket', 'audit-log', 'audit-more', 'ops-settings', 'print-settings', 'billing-settings', 'billing-settings-tab', 'calculation-settings', 'customer-merge', 'customer-link', 'customer-import', 'settled-ticket-customer', 'settled-ticket-payment', 'set-schedule',
   'accounting-settings', 'accounting-add-column', 'accounting-remove-column','correct-register-count','role-policy',
-  'cash-accounts','cash-account-add','cash-account-remove-new']);
+  'cash-accounts','cash-account-add','cash-account-remove-new','settled-ticket-companions']);
 const managerActions = new Set(['open', 'close', 'stock-adjust', 'stocktake', 'discount', 'cancel-line', 'cancel-deposit', 'customer-detail', 'customer-new', 'customer-edit', 'customer-visit',
   'record-cash', 'report-mode', 'report-day', 'report-export', 'ticket-end', 'ticket-set-time', 'ticket-guests',
   'edit-ticket-line', 'cancel-ticket-extension', 'ops-notices','edit-cash-movement','void-cash-movement','edit-deposit']);
@@ -96,6 +99,7 @@ const cloudLabels = { admin: '店舗管理者', manager: 'マネージャー', s
 let cloudState;
 let demoRole = 'admin';
 let demoPractice = null;
+const castNoticesSeen = new Map();
 let state = loadState();
 let stockSearch = '';
 let stockLowOnly = false;
@@ -251,7 +255,7 @@ function permittedAction(action) {
   if (store && (!cloudState.state || !store.hasState)) return action === 'dismiss' || action.startsWith('cloud-');
   const role = currentRole();
   if (!roleAllowsAction(state,role,action)) return false;
-  if (role === 'cast') return ['dismiss','navigate','ops-guide'].includes(action) || action.startsWith('cast-') || action.startsWith('cloud-')
+  if (role === 'cast') return ['dismiss','navigate','ops-guide','ops-guide-explain'].includes(action) || action.startsWith('cast-') || action.startsWith('cloud-')
     || (!store && ['demo','demo-role'].includes(action));
   if (action.startsWith('cast-')) return false;
   if (action.startsWith('attendance-')) return canOpenPage('attendance');
@@ -479,15 +483,17 @@ function renderFloor(notices, now) {
 function totalRows(q, { settlement = false, large = false } = {}) {
   const tax = q.priceMode === 'inclusive' ? 'うち消費税' : '消費税';
   const taxLabel = q.cardFee ? `${tax}（加算前）` : q.taxBreakdown.length === 1 ? `${tax}（${q.taxBreakdown[0].rate / 100}%）` : tax;
+  const settlementFee = (q.cardFee ?? 0) - (q.depositFee ?? 0);
   return `<dl class="totals ${large ? 'totals-large' : ''}">
     <div><dt>小計</dt><dd class="money">${yen(q.subtotal)}</dd></div>
     ${q.discount ? `<div><dt>値引き</dt><dd class="money">−${yen(q.discount)}</dd></div>` : ''}
     <div><dt>サービス料</dt><dd class="money">${yen(q.service)}</dd></div>
     <div><dt>${taxLabel}</dt><dd class="money">${yen(q.tax - (q.cardFeeTax ?? 0))}</dd></div>
-    ${q.cardFee ? `<div><dt>${q.brandedFee ? '決済加算（税込）' : 'カード会計加算（税込）'}</dt><dd class="money">${yen(q.cardFee)}</dd></div>` : ''}
+    ${q.depositFee ? `<div><dt>前受金の決済加算（税込）</dt><dd class="money">${yen(q.depositFee)}</dd></div>` : ''}
+    ${settlementFee ? `<div><dt>${q.brandedFee ? '決済加算（税込）' : 'カード会計加算（税込）'}</dt><dd class="money">${yen(settlementFee)}</dd></div>` : ''}
     ${large && q.taxBreakdown.length > 1 ? q.taxBreakdown.map((tax) => `<div><dt>税率 ${tax.rate / 100}%</dt><dd>${yen(tax.tax)}</dd></div>`).join('') : ''}
     <div class="total"><dt>${settlement ? '合計' : '合計（税込）'}</dt><dd class="money">${yen(q.total)}</dd></div>
-    ${q.deposit ? `<div><dt>前受金</dt><dd class="money">−${yen(q.deposit)}</dd></div>` : ''}
+    ${q.deposit ? `<div><dt>${q.depositFee ? '受領済みの前受金' : '前受金'}</dt><dd class="money">−${yen(q.deposit)}</dd></div>` : ''}
     ${settlement && q.paid ? `<div><dt>会計時のお支払い</dt><dd class="money">${yen(q.paid)}</dd></div>` : ''}
     ${(!settlement && (large || q.deposit)) ? `<div class="balance"><dt>未収額</dt><dd class="money">${yen(q.remaining)}</dd></div>` : ''}
   </dl>`;
@@ -495,7 +501,8 @@ function totalRows(q, { settlement = false, large = false } = {}) {
 
 function receiptBody(ticket, totals) {
   const lines = ticket.lines.filter((line) => line.cancelledAt == null);
-  const payments = [...ticket.deposits, ...ticket.payments].filter(({method}) => Object.hasOwn(tenderMethods,method));
+  const payments = [...ticket.deposits.map((deposit) => ({...deposit,amount:depositGrossAmount(deposit),isDeposit:true})),
+    ...ticket.payments].filter(({method}) => Object.hasOwn(tenderMethods,method));
   const customer = canOpenPage('customers') && findCustomer(customerWorkspaceState(),ticket.customerId);
   const customerLink = customer && !customer.restricted
     ? `<div class="ops-actions">${button('顧客詳細','customer-detail',{id:customer.id,glyph:'users'})}</div>` : '';
@@ -506,7 +513,7 @@ function receiptBody(ticket, totals) {
       return `<li class="ticket-line"><span class="line-desc">${escape(line.name)} <em>${yen(line.price)} × ${line.quantity}</em>${cast ? `<small>${cast}</small>` : ''}</span><span class="money">${yen(line.total)}</span></li>`;
     }).join('')}</ul></section>
     ${totalRows(totals, { settlement: true, large: true })}
-    ${payments.length ? `<ul class="deposit-list">${payments.map((entry) => `<li><span>${escape(entry.brandName || tenderMethods[entry.method])}</span><strong>${yen(entry.amount)}</strong></li>`).join('')}</ul>` : ''}
+    ${payments.length ? `<ul class="deposit-list">${payments.map((entry) => `<li><span>${entry.isDeposit ? '前受金・' : ''}${escape(entry.brandName || tenderMethods[entry.method])}</span><strong>${yen(entry.amount)}</strong></li>`).join('')}</ul>` : ''}
     ${ticket.cashTender ? `<dl class="cash-close-breakdown"><div><dt>現金お預かり</dt><dd>${yen(ticket.cashTender.received)}</dd></div>
       <div><dt>お釣り</dt><dd>${yen(ticket.cashTender.change)}</dd></div></dl>` : ''}`;
 }
@@ -526,7 +533,9 @@ function settledCorrectionActions(ticket) {
     ? button('支払方法を訂正','settled-ticket-payment',{id:ticket.id,glyph:'wallet',tone:'quiet'}) : '';
   const contents = currentRole() === 'admin' && !ticketHasReceivable(state,ticket)
     ? button('注文・値引きを訂正','settled-ticket-contents',{id:ticket.id,glyph:'ticket',tone:'quiet'}) : '';
-  return customer + payment + contents;
+  const companions = currentRole() === 'admin' && ticket.customerId && (ticket.guests > 1 || ticket.companionCustomerIds?.length)
+    ? button('同席者を訂正','settled-ticket-companions',{id:ticket.id,glyph:'users',tone:'quiet'}) : '';
+  return customer + companions + payment + contents;
 }
 
 function receiptActions(ticket, date) {
@@ -670,10 +679,11 @@ function render({ preserveFocus = false } = {}) {
   let floorNotices = [];
   let content;
   if (currentRole() === 'cast') {
+    const workspace = currentCastWorkspace();
     content = `<header class="page-head"><div><h1>マイページ</h1><p>勤怠・シフト・支給明細</p></div>
       <div class="actions">${renderWorkspaceMenuTrigger()}${renderCloudEntry(model,{escape,icon})}</div></header>${banner}
       ${cloudState.store && cloudState.status === 'connecting' ? '<p class="notice" role="status">店舗に接続しています。</p>'
-        : renderCastWorkspace(currentCastWorkspace(),{escape,icon,yen})}`;
+        : renderCastWorkspace(workspace,{escape,icon,yen},{seenPayrollMonths:seenCastPayrollNotices(workspace)})}`;
   } else if (cloudState.store && (!cloudState.state || !cloudState.store.hasState)) {
     content = `<header class="page-head"><h1>クラウド店舗</h1><div class="actions">${renderWorkspaceMenuTrigger()}${renderCloudEntry(model,{escape,icon})}</div></header>${banner}
       ${cloudState.restricted ? renderCloudRestricted(model,{escape,icon}) : '<p class="notice">店舗・アカウントから営業データを準備してください。</p>'}`;
@@ -717,6 +727,34 @@ function render({ preserveFocus = false } = {}) {
 
 function currentCastWorkspace() {
   return cloudState.store ? cloudState.state : getCastWorkspace(state,demoActor().id);
+}
+
+function castPayrollNoticeKey(model) {
+  if (!model?.cast) return null;
+  return `np-pos.payroll-notice.v1:${JSON.stringify([cloudState.store?.id ?? 'demo',cloudState.user?.uid ?? 'demo-cast',model.cast.id])}`;
+}
+
+function seenCastPayrollNotices(model) {
+  const key = castPayrollNoticeKey(model);
+  if (!key) return new Set();
+  let saved;
+  try { saved = JSON.parse(localStorage.getItem(key)); } catch { /* Use the current session when storage is unavailable. */ }
+  return new Set([...(Array.isArray(saved) ? saved : []),...(castNoticesSeen.get(key) ?? [])]);
+}
+
+function readCastPayrollNotice(model,month) {
+  const key = castPayrollNoticeKey(model);
+  const seen = seenCastPayrollNotices(model);
+  seen.add(month);
+  castNoticesSeen.set(key,seen);
+  try { localStorage.setItem(key,JSON.stringify([...seen])); } catch { /* The current session still remembers the notice. */ }
+  render();
+  const statement = document.getElementById(`cast-payslip-${month}`);
+  if (statement) {
+    statement.open = true;
+    statement.querySelector('summary').focus({preventScroll:true});
+    statement.scrollIntoView({block:'nearest'});
+  }
 }
 
 function cloudModel() {
@@ -781,6 +819,7 @@ function cloudUpdated(next) {
   }
   if (contextChanged || before.state !== next.state) syncFloorSelection();
   if ((contextChanged || accountChanged) && dialog.open && modal?.type === 'cloud') paintDialog();
+  if (accountChanged && dialog.open && modal?.type === 'cloud-groups' && !modal.demo) dialog.close();
   if (contextChanged || before.state !== next.state || before.status !== next.status
     || before.pending !== next.pending || accountChanged) render({preserveFocus: true});
 }
@@ -826,8 +865,93 @@ async function migrateBrowserData() {
   }
 }
 
+async function storeGroupAction(action, target) {
+  if (action === 'cloud-groups' || action === 'cloud-groups-demo') {
+    const demo = action === 'cloud-groups-demo' || !cloudState.userVerified;
+    const service = demo ? createStoreGroupDemo() : cloud;
+    openDialog('cloud-groups', {demo, service, loading:true, uid:cloudState.user?.uid});
+    const active = modal;
+    try { active.model = await service.listStoreGroups(); }
+    catch (error) { active.error = error.message; }
+    if (modal === active && dialog.open && (demo || cloudState.user?.uid === active.uid)) {
+      active.loading = false;
+      paintDialog();
+    }
+    return;
+  }
+  const active = modal;
+  if (active?.type !== 'cloud-groups' || active.loading || (!active.demo && cloudState.user?.uid !== active.uid)) return;
+  const { service } = active;
+  const values = new FormData(dialog.querySelector('#dialog-form'));
+  const value = (name) => String(values.get(name) ?? '').trim();
+  const group = active.model.groups.find(({id}) => id === active.selectedGroupId) ?? active.model.groups[0];
+  const groupId = group?.id;
+  const id = target.dataset.id;
+  const memberRole = target.closest('.np-cloud-person')?.querySelector('[data-group-member-role]')?.value;
+  cloudBusy = true;
+  target.disabled = true;
+  dialog.setAttribute('aria-busy','true');
+  try {
+    switch (action) {
+      case 'cloud-group-create':
+        active.selectedGroupId = (await service.createStoreGroup(value('group-create-name'))).group.id;
+        break;
+      case 'cloud-group-rename':
+        await service.renameStoreGroup(groupId,value('group-name'));
+        break;
+      case 'cloud-group-store-add':
+        if (!value('group-store')) throw new Error('追加する店舗を選択してください。');
+        await service.setGroupStore(groupId,value('group-store'),true);
+        break;
+      case 'cloud-group-store-remove':
+        if (!window.confirm('この店舗のグループ経由のアクセスを解除しますか？')) return;
+        await service.setGroupStore(groupId,id,false);
+        break;
+      case 'cloud-group-invite':
+        await service.inviteGroupMember(groupId,value('group-email'),value('group-role'));
+        break;
+      case 'cloud-group-member-save':
+        await service.changeGroupMember(groupId,id,memberRole);
+        break;
+      case 'cloud-group-member-remove':
+        if (!window.confirm('このメンバーのグループ経由のアクセスを解除しますか？')) return;
+        await service.changeGroupMember(groupId,id);
+        break;
+      case 'cloud-group-invite-remove':
+        await service.revokeGroupInvite(groupId,id);
+        break;
+      case 'cloud-group-demo-accept':
+        if (!active.demo) return;
+        service.acceptDemoInvite(groupId,id);
+        break;
+      case 'cloud-group-demo-preview':
+      case 'cloud-group-demo-return':
+        if (!active.demo) return;
+        active.preview = action === 'cloud-group-demo-preview';
+        service.preview(groupId,active.preview ? id : null);
+        break;
+      default: return;
+    }
+    active.model = await service.listStoreGroups();
+    if (modal === active && dialog.open) {
+      paintDialog();
+      toast(active.preview ? 'グループ所属メンバーの表示です。' : 'グループの表示を更新しました。');
+    }
+  } catch (error) {
+    if (modal === active && dialog.open) showError(error.message);
+  } finally {
+    cloudBusy = false;
+    if (target.isConnected) target.disabled = false;
+    dialog.removeAttribute('aria-busy');
+  }
+}
+
 async function cloudAction(action, target) {
   if (cloudBusy) return;
+  if (action.startsWith('cloud-group')) {
+    await storeGroupAction(action,target);
+    return;
+  }
   if (action === 'cloud-overview') {
     if (!cloudState.userVerified || !cloudState.stores.some(({role})=>role==='admin')) return;
     openDialog('cloud-overview',{loading:true});
@@ -897,8 +1021,10 @@ async function cloudAction(action, target) {
       case 'cloud-select-store':
       case 'cloud-create-store': {
         const storeId = action === 'cloud-create-store' ? (await cloud.createStore(value('cloud-store-name'))).id : id;
+        if (active?.type === 'cloud-groups') await cloud.listStores();
         await cloud.enterStore(storeId);
         rememberStore(cloudState.store);
+        if (active?.type === 'cloud-groups' && !cloudState.store?.hasState) openDialog('cloud');
         if (cloudState.store?.hasState && dialog.open && modal === active) dialog.close();
         else await refreshMembers();
         break;
@@ -947,7 +1073,7 @@ async function cloudAction(action, target) {
         break;
     }
   } catch (error) {
-    if (dialog.open && modal === active && active?.type === 'cloud-overview') showError(error.message);
+    if (dialog.open && modal === active && ['cloud-overview','cloud-groups'].includes(active?.type)) showError(error.message);
     else if (dialog.open && modal === active) cloudActionError = error.message;
     else toast(error.message);
   } finally {
@@ -1121,8 +1247,8 @@ function checkCatalogDeletion(kind, id, menu) {
   return catalogDeletionBlocker(state, kind, id, menu);
 }
 
-function downloadFile(filename, text, type) {
-  const url = URL.createObjectURL(new Blob([text], {type}));
+function downloadFile(filename, data, type) {
+  const url = URL.createObjectURL(data instanceof Blob ? data : new Blob([data], {type}));
   const link = document.createElement('a');
   link.href = url;
   link.download = filename;
@@ -1247,6 +1373,53 @@ function seatPicker(selectedIds,{ticketId,primary=null}={}) {
   }).join('')}</div></fieldset>`;
 }
 
+function canShowGuideTopic(topic) {
+  return topic && (!topic.adminOnly || currentRole() === 'admin')
+    && (topic.page ? canOpenPage(topic.page) : currentRole() !== 'cast');
+}
+
+function guideList(query) {
+  return renderGuideResults(query,escape,{
+    allows:canShowGuideTopic,
+    actions:(topic) => `<div class="ops-actions">${topic.page ? button(`${pages[topic.page].title}を開く`,'navigate',{id:topic.page,tone:'quiet'})
+      : button('店舗グループを開く',topic.action,{tone:'quiet'})}${modal.guideEnabled
+        ? button('AIで手順を見る','ops-guide-explain',{id:topic.id,tone:'quiet'}) : ''}</div>`,
+  });
+}
+
+async function openOperationsGuide() {
+  openDialog('ops-guide');
+  const current = modal;
+  if (!cloudState.store) return;
+  const {enabled} = await cloud.operationsGuide().catch(()=>({enabled:false}));
+  if (modal !== current || !dialog.open || !enabled) return;
+  current.guideEnabled = true;
+  const search = dialog.querySelector('[name=guideSearch]');
+  dialog.querySelector('[data-guide-results]').innerHTML = guideList(search.value);
+}
+
+async function explainGuideTopic(id,target) {
+  const current = modal;
+  const topic = getOperationsGuideTopic(id);
+  if (current?.type !== 'ops-guide' || !current.guideEnabled || !canShowGuideTopic(topic) || current.guidePending) return;
+  current.guidePending = true;
+  target.disabled = true;
+  const result = dialog.querySelector('[data-guide-answer]');
+  result.hidden = false;
+  result.querySelector('strong').textContent = topic.title;
+  const status = result.querySelector('p');
+  status.textContent = '手順をまとめています…';
+  try {
+    const {answer} = await cloud.operationsGuide(id);
+    if (modal === current && dialog.open) status.textContent = answer;
+  } catch (error) {
+    if (modal === current && dialog.open) status.textContent = error.message;
+  } finally {
+    current.guidePending = false;
+    if (target.isConnected) target.disabled = false;
+  }
+}
+
 function paintDialog(layoutFileInput) {
   const ticket = modal.ticketId ? state.tickets.find((item)=>item.id===modal.ticketId) : null;
   const id = modal.ticketId;
@@ -1254,6 +1427,14 @@ function paintDialog(layoutFileInput) {
   const customerName = roleGroupAllowed(state,currentRole(),'customers') ? ticket?.customer : '';
   const headline = ticket ? `<div class="modal-context">${icon('table',16)}<strong>${escape(titles(ticket))}</strong><span>${ticket.guests}名${customerName ? ` · ${escape(customerName)}` : ''}</span></div>` : '';
   switch (modal.type) {
+    case 'cloud-groups': {
+      const sections = new Map([...dialog.querySelectorAll('[data-group-section]')].map((section) => [section.dataset.groupSection,section.open]));
+      present('店舗グループ',renderStoreGroups(modal,{escape,button}),null,{style:'cloud-dialog'});
+      for (const section of dialog.querySelectorAll('[data-group-section]')) {
+        if (sections.has(section.dataset.groupSection)) section.open = sections.get(section.dataset.groupSection);
+      }
+      return;
+    }
     case 'cloud-overview':
       present('複数店舗の営業状況',renderStoreOverview(modal,{escape,icon,yen}),null,{style:'cloud-dialog modal-wide'});
       return;
@@ -1307,11 +1488,16 @@ function paintDialog(layoutFileInput) {
       },customerUIApi()),'顧客の設定を保存',{style:'modal-wide customer-dialog'});
       syncTicketCustomerSubmit();
       return;
+    case 'settled-ticket-companions':
     case 'ticket-companions': {
-      const primary = ticketCustomerAlias(ticket);
+      const isCorrection = modal.type === 'settled-ticket-companions';
+      const entry = isCorrection ? findSettledCustomerTicket(state,id) : {ticket};
+      const visit = entry?.ticket;
+      const primary = visit && ticketCustomerAlias(visit);
       if (!primary?.id) {present('同席者','<p class="form-copy">会計を代表するお客様を選択してください。</p>',null);return;}
-      present('同席者',customerUI.renderCompanionEditor(customerWorkspaceState(),ticket,primary,customerUIApi()),
-        null,{style:'ops-modal'});
+      const reason = isCorrection ? settledTicketContext(entry) + operationReason({title:'訂正理由'}) : '';
+      present(isCorrection ? '会計済み伝票の同席者を訂正' : '同席者',reason
+        + customerUI.renderCompanionEditor(customerWorkspaceState(),visit,primary,customerUIApi()),null,{style:'ops-modal'});
       return;
     }
     case 'ticket-note':
@@ -1456,9 +1642,10 @@ function paintDialog(layoutFileInput) {
       present('時間帯別セット',renderInitialSetSchedule(state,{escape,yen}),'時間帯別セットを保存',{style:'ops-modal modal-wide'});
       return;
     case 'ops-guide':
-      present('操作ガイド',`${label('操作を検索','<input type="search" name="guideSearch" placeholder="例　印刷、棚卸、給与" autocomplete="off" maxlength="80">')}
+      present('操作ガイド',`${label('操作を検索','<input type="search" name="guideSearch" placeholder="例　レシートを印刷したい" autocomplete="off" maxlength="80">')}
         ${!cloudState.store && !demoPractice ? renderPracticeEntry() : ''}
-        <div data-guide-results aria-live="polite">${renderGuideResults('',escape)}</div>`,null,{style:'ops-modal'});
+        <section class="ops-guide-answer" data-guide-answer aria-live="polite" hidden><strong></strong><p></p></section>
+        <div data-guide-results aria-live="polite">${guideList('')}</div>`,null,{style:'ops-modal'});
       return;
     case 'cast-clock-in':
       present('出勤を打刻','<p class="form-copy">現在の時刻を出勤時刻として記録します。</p>','出勤を確定',{style:'ops-modal'});
@@ -1505,7 +1692,10 @@ function paintDialog(layoutFileInput) {
         '変数を保存',{style:'ops-modal modal-wide'});
       return;
     case 'payroll-batch':
-      present('確定明細を一括印刷',payrollUI.renderPayrollBatch(state,modal.selection,{escape}),'印刷・PDF保存',{style:'ops-modal'});
+      present('確定明細を一括出力',payrollUI.renderPayrollBatch(state,modal.selection,{escape}),'出力する',{style:'ops-modal'});
+      return;
+    case 'payroll-range':
+      present('日付指定の給与集計',payrollUI.renderPayrollRange(state,modal,{escape,yen}),'集計する',{style:'ops-modal modal-wide'});
       return;
     case 'payroll-templates':
       present('給与の計算テンプレート',payrollUI.renderPayrollTemplates(state,modal.selection,{escape,icon}),
@@ -1659,15 +1849,22 @@ function paintDialog(layoutFileInput) {
     }
     case 'deposit':
     case 'edit-deposit': {
-      const entry = ticket.deposits.find(({id:depositId}) => depositId === modal.depositId);
+      const entry = currentDeposit();
+      if (modal.type === 'edit-deposit' && !entry) {
+        present('前受金を訂正','<p class="form-copy">前受金が見つかりません。伝票を開き直してください。</p>',null);
+        return;
+      }
       present(entry ? '前受金を訂正' : '前受金を登録',`${headline}<p class="form-copy">残りのお支払いは <strong>${yen(q.remaining)}</strong> です。</p>
-        <div class="form-grid">${label('支払方法',methodSelect('method',entry?.method))}
-        ${label('前受金（円）',`<input name="amount" type="number" min="1" max="${q.remaining + (entry?.amount ?? 0)}" value="${entry?.amount ?? ''}" required inputmode="numeric" placeholder="3000">`)}</div>
+        <div class="form-grid">${label('支払方法',methodSelect('depositMethod',entry?.method))}
+        ${label('会計に充当する額（円）',`<input name="depositAmount" type="number" min="1" max="${q.remaining + (entry?.amount ?? 0)}" value="${entry?.amount ?? ''}" required inputmode="numeric" placeholder="3000">`)}</div>
+        <div class="payment-brand-fields" data-deposit-brand-fields>${renderPaymentBrandFields({method:entry?.method ?? 'cash',brandId:savedDepositPaymentTerms},entry,'deposit')}</div>
+        <div class="card-fee-preview" data-deposit-fee-preview aria-live="polite" hidden></div>
         ${label('前受金メモ（任意）',`<input name="depositMemo" maxlength="120" value="${escape(entry?.memo ?? '')}">`)}
         ${entry ? operationReason({title:'訂正理由'}) : ticket.deposits.length ? `<ul class="deposit-list">${ticket.deposits.map((row)=>
-          `<li><span>${tenderMethods[row.method]} · ${yen(row.amount)}${row.memo ? ' ／ ' + escape(row.memo) : ''}</span>
+          `<li><span>${escape(row.brandName || tenderMethods[row.method])} · ${yen(depositGrossAmount(row))}${row.cardFee ? `（加算 ${yen(row.cardFee)}）` : ''}${row.memo ? ' ／ ' + escape(row.memo) : ''}</span>
             <div class="ops-actions">${button('訂正','edit-deposit',{id:row.id})}${button('取消','cancel-deposit',{id:row.id,tone:'danger'})}</div></li>`).join('')}</ul>` : ''}`,
         entry ? '訂正を保存' : '前受金を確定');
+      updateDepositPreview();
       return;
     }
     case 'discount':
@@ -2245,17 +2442,54 @@ function currentPayments() {
   });
 }
 
-function renderPaymentBrandFields(entry) {
+const savedDepositPaymentTerms = '!saved';
+
+function renderPaymentBrandFields(entry, saved = null, prefix = 'payment') {
   const settings = getCardFeeSettings(state);
   const brands = (settings.brands ?? []).filter(({enabled,method}) => enabled && method === entry.method);
+  const showSaved = saved?.method === entry.method && ['card','qr'].includes(entry.method);
+  const keepingSaved = showSaved && entry.brandId === savedDepositPaymentTerms;
+  const savedLabel = saved?.brandName || (saved?.method && tenderMethods[saved.method]);
+  const savedOption = showSaved ? `<option value="${savedDepositPaymentTerms}"${keepingSaved ? ' selected' : ''}>登録時の設定（${escape(savedLabel)}）</option>` : '';
   const chosen = brands.find(({id})=>id === entry.brandId);
   const rate = chosen?.rateBps ?? (entry.method === 'card' && settings.enabled ? settings.rateBps : 0);
   const options = brands.map(({id,name,rateBps}) =>
     `<option value="${escape(id)}"${entry.brandId === id ? ' selected' : ''}>${escape(name)}（+${rateBps / 100}%）</option>`).join('');
-  const brand = brands.length ? label('決済ブランド',`<select name="paymentBrand"><option value="">指定しない</option>${options}</select>`) : '';
-  const waive = rate > 0 && canWaivePaymentFee(currentRole()) ? `<label class="inline-check">
-    <input type="checkbox" name="paymentWaiveFee"${entry.waiveFee ? ' checked' : ''}>この支払いの加算を免除</label>` : '';
+  const brand = brands.length || showSaved ? label('決済ブランド',`<select name="${prefix}Brand">${savedOption}<option value=""${showSaved && !keepingSaved && !chosen ? ' selected' : ''}>指定しない</option>${options}</select>`) : '';
+  const waive = !keepingSaved && rate > 0 && canWaivePaymentFee(currentRole()) ? `<label class="inline-check">
+    <input type="checkbox" name="${prefix}WaiveFee"${entry.waiveFee ? ' checked' : ''}>この支払いの加算を免除</label>` : '';
   return brand + waive;
+}
+
+function currentDeposit() {
+  return state.tickets.find(({id}) => id === modal.ticketId)?.deposits.find(({id}) => id === modal.depositId);
+}
+
+function readDepositPayment() {
+  const method = dialog.querySelector('[name=depositMethod]').value;
+  const amount = Number(dialog.querySelector('[name=depositAmount]').value);
+  const brand = dialog.querySelector('[name=depositBrand]')?.value;
+  const waiveFee = dialog.querySelector('[name=depositWaiveFee]')?.checked;
+  return {method,amount,...(brand === savedDepositPaymentTerms ? {preservePaymentTerms:true} : brand ? {brandId:brand} : {}),
+    ...(waiveFee && {waiveFee:true})};
+}
+
+function updateDepositPreview() {
+  const panel = dialog.querySelector('[data-deposit-fee-preview]');
+  if (!panel) return;
+  const payment = readDepositPayment();
+  modal.expectedDepositFee = undefined;
+  panel.hidden = !['card','qr'].includes(payment.method);
+  if (panel.hidden) { modal.expectedDepositFee = 0; return; }
+  panel.hidden = !Number.isSafeInteger(payment.amount) || payment.amount <= 0;
+  if (panel.hidden) return;
+  try {
+    const terms = getDepositPaymentTerms(state,payment,currentDeposit());
+    modal.expectedDepositFee = terms.cardFee ?? 0;
+    panel.innerHTML = `<dl><div><dt>会計に充当する額</dt><dd>${yen(payment.amount)}</dd></div>
+      <div><dt>決済加算（税込）</dt><dd>${yen(terms.cardFee ?? 0)}</dd></div>
+      <div><dt>${escape(terms.brandName || tenderMethods[payment.method])}端末の決済額</dt><dd>${yen(depositGrossAmount({...payment,...terms}))}</dd></div></dl>`;
+  } catch (error) { panel.textContent = error.message; }
 }
 
 function renderPaymentBrandSetting(brand) {
@@ -2484,7 +2718,9 @@ function clickAction(target) {
     return;
   }
   if (action === 'audit-more') { void loadAuditPage(); return; }
-  if (['ops-settings','print-settings','ops-notices','ops-guide','set-schedule','calculation-settings','role-policy'].includes(action)) { openDialog(action); return; }
+  if (action === 'ops-guide') { void openOperationsGuide(); return; }
+  if (action === 'ops-guide-explain') { void explainGuideTopic(id,target); return; }
+  if (['ops-settings','print-settings','ops-notices','set-schedule','calculation-settings','role-policy'].includes(action)) { openDialog(action); return; }
   if (action === 'cash-accounts') { openDialog(action); return; }
   if (action === 'cash-account-add' && modal?.type === 'cash-accounts' && ['vault','payee'].includes(id)) {
     const list = dialog.querySelector(`[data-cash-accounts="${id}"]`);
@@ -2530,6 +2766,24 @@ function clickAction(target) {
   if (action === 'ticket-companions') {
     const ticket = state.tickets.find((entry) => entry.id === id && entry.status === 'open');
     if (ticket && state.day.status === 'open' && ticketCustomerAlias(ticket)?.id) openDialog(action,{ticketId:id});
+    return;
+  }
+  if (action === 'settled-ticket-companions') {
+    const entry = findSettledCustomerTicket(state,id);
+    if (entry?.ticket.customerId) openDialog(action,{ticketId:id,primaryCustomerId:entry.ticket.customerId,
+      returnToReceipt:['receipt','history-receipt'].includes(modal?.type)});
+    return;
+  }
+  if (action === 'save-ticket-companion' && modal?.type === 'settled-ticket-companions') {
+    const reason = dialog.querySelector('[name=reason]').value.trim();
+    if (!reason) {
+      showError('同席者を訂正する理由を入力してください。');
+      dialog.querySelector('[name=reason]').focus();
+      return;
+    }
+    const mode = target.dataset.mode === 'remove' ? 'remove' : 'add';
+    void commitReceiptCorrection({type:'correctSettledTicketCompanion',ticketId:modal.ticketId,
+      customerId:id,primaryCustomerId:modal.primaryCustomerId,mode,reason},'同席者を訂正しました。');
     return;
   }
   if (action === 'save-ticket-companion' && modal?.type === 'ticket-companions') {
@@ -2651,7 +2905,9 @@ function clickAction(target) {
   if (action.startsWith('cast-') && page === 'cast-workspace') {
     const model = currentCastWorkspace();
     if (!model) return;
-    if (action === 'cast-payslip-print') {
+    if (action === 'cast-payroll-notice' && model.payroll.finals.some(({month})=>month === id)) {
+      readCastPayrollNotice(model,id);
+    } else if (action === 'cast-payslip-print') {
       const snapshot = model.payroll.finals.find(({month})=>month === id);
       if (snapshot) printWorkspace(payrollUI.renderPayrollPrint({month:id,snapshot},{escape,yen,storeName:cloudState.store?.name ?? '銀座店'}));
     } else if (['cast-clock-in','cast-clock-out','cast-request-shift','cast-request-pay'].includes(action)) {
@@ -2763,6 +3019,8 @@ function clickAction(target) {
     const record = getPayrollDraft(state,month,castId);
     if (action === 'payroll-print' && record?.status === 'final') {
       printWorkspace(payrollUI.renderPayrollPrint(record,{escape,yen,storeName:cloudState.store?.name ?? '銀座店'}));
+    } else if (action === 'payroll-range') {
+      openDialog(action,{range:payrollUI.payrollRangeDefaults(month)});
     } else if (['payroll-settings','payroll-templates','payroll-attendance-items','payroll-variables','payroll-batch'].includes(action)
       || (castId && ['payroll-rate','payroll-draft','payroll-request-pay','payroll-employee'].includes(action))
       || (action === 'payroll-finalize' && record?.status === 'draft')) {
@@ -2993,10 +3251,29 @@ function clickAction(target) {
     const ticketId=modal.ticketId;
     const entry=state.tickets.find(item=>item.id===ticketId).deposits.find(item=>item.id===id);
     modal={...modal,type:'cancel-deposit',ticketId,depositId:id};
-    present('前受金を取り消す',`<p class="form-copy">${tenderMethods[entry.method]}で記録した前受金 ${yen(entry.amount)} を取り消します。</p>`,'前受金を取り消す');
+    present('前受金を取り消す',`<p class="form-copy">${escape(entry.brandName || tenderMethods[entry.method])}で記録した受取額 ${yen(depositGrossAmount(entry))} を取り消します。</p>`,'前受金を取り消す');
     return;
   }
   modalFromAction(target);
+}
+
+async function downloadPayrollZip(records,storeName,start,end,control) {
+  const active = modal;
+  control.disabled = true;
+  control.textContent = 'PDFを作成中…';
+  try {
+    const {createPayrollZip} = await import('./payroll-pdf.mjs');
+    const archive = await createPayrollZip(records,storeName);
+    if (modal === active && dialog.open && currentRole() === 'admin') {
+      downloadFile(`NP-POS_支給明細_${start}${start === end ? '' : `_${end}`}.zip`,archive);
+      toast('個別PDFのZIPを保存しました。');
+    }
+  } catch (error) {
+    if (modal === active && dialog.open) showError(error.message);
+  } finally {
+    control.disabled = false;
+    control.textContent = '出力する';
+  }
 }
 
 function submitDialog(form) {
@@ -3059,17 +3336,28 @@ function submitDialog(form) {
         columns:numeric('payrollTemplateColumns'),isDefault:data.has('payrollTemplateDefault'),
         rules:payrollUI.readPayrollTemplateRows(form)},'給与の計算テンプレートを保存しました。');
       break;
+    case 'payroll-range': {
+      const range = {start:value('rangeStart'),end:value('rangeEnd'),castId:value('rangeCast')};
+      const result = previewPayrollRange(state,range);
+      Object.assign(modal,{range,result});
+      paintDialog();
+      dialog.querySelector('#submit-dialog')?.focus();
+      break;
+    }
     case 'payroll-batch': {
       const start = value('batchStart');
       const end = value('batchEnd');
       const castId = value('batchCast');
-      if (!isPayrollMonth(start) || !isPayrollMonth(end) || start > end) throw new Error('印刷する期間を確認してください。');
+      if (!isPayrollMonth(start) || !isPayrollMonth(end) || start > end) throw new Error('出力する期間を確認してください。');
       const records = (state.payroll?.records ?? []).filter((row)=>row.status === 'final'
         && row.month >= start && row.month <= end && (!castId || row.castId === castId))
         .sort((a,b)=>a.month.localeCompare(b.month) || a.snapshot.castName.localeCompare(b.snapshot.castName,'ja'));
       if (!records.length) throw new Error('この期間の確定明細はありません。');
       const api = {escape,yen,storeName:cloudState.store?.name ?? '銀座店'};
-      printWorkspace(records.map((record)=>`<section class="payroll-print-page">${payrollUI.renderPayrollPrint(record,api)}</section>`).join(''));
+      if (value('batchOutput') === 'zip') {
+        const control = form.querySelector('#submit-dialog');
+        if (!control.disabled) void downloadPayrollZip(records,api.storeName,start,end,control);
+      } else printWorkspace(records.map((record)=>`<section class="payroll-print-page">${payrollUI.renderPayrollPrint(record,api)}</section>`).join(''));
       break;
     }
     case 'payroll-template-remove':
@@ -3240,12 +3528,15 @@ function submitDialog(form) {
       break;
     }
     case 'deposit':
-      commit({type:'deposit',ticketId:id,method:value('method'),amount:numeric('amount'),memo:value('depositMemo')},'前受金を記録しました。');
+    case 'edit-deposit': {
+      const previous = currentDeposit();
+      if (modal.type === 'edit-deposit' && !previous) throw new Error('前受金が見つかりません。伝票を開き直してください。');
+      const payment = readDepositPayment();
+      if (modal.expectedDepositFee === undefined) throw new Error('前受金の決済額を確認してください。');
+      commit({type:previous?'editDeposit':'deposit',ticketId:id,...payment,expectedCardFee:modal.expectedDepositFee,memo:value('depositMemo'),
+        ...(previous && {depositId:previous.id,reason:value('reason')})},previous?'前受金を訂正しました。':'前受金を記録しました。');
       break;
-    case 'edit-deposit':
-      commit({type:'editDeposit',ticketId:id,depositId:modal.depositId,method:value('method'),amount:numeric('amount'),
-        memo:value('depositMemo'),reason:value('reason')},'前受金を訂正しました。');
-      break;
+    }
     case 'cancel-deposit':
       commit({type:'cancelDeposit',ticketId:id,depositId:modal.depositId},'前受金を取り消しました。');
       break;
@@ -3515,6 +3806,12 @@ app.addEventListener('change',(event)=> {
   }
 });
 dialog.addEventListener('change', (event) => {
+  if (modal?.type === 'cloud-groups' && event.target.name === 'group-select') {
+    modal.selectedGroupId = event.target.value;
+    paintDialog();
+    dialog.querySelector('[name=group-select]')?.focus({preventScroll:true});
+    return;
+  }
   if (modal?.type === 'open' && event.target.name === 'date' && event.target.value) {
     dialog.querySelector('[name=openingCash]').value = openingCashSuggestion(state,event.target.value);
   }
@@ -3587,6 +3884,15 @@ dialog.addEventListener('change', (event) => {
       if (event.target.name === 'paymentBrand') row.querySelector('[name=paymentBrand]')?.focus();
     }
     updatePaymentNote();
+  }
+  if (['deposit','edit-deposit'].includes(modal?.type) && ['depositMethod','depositBrand','depositWaiveFee'].includes(event.target.name)) {
+    if (event.target.name !== 'depositWaiveFee') {
+      const method = dialog.querySelector('[name=depositMethod]').value;
+      const brandId = event.target.name === 'depositBrand' ? event.target.value : undefined;
+      dialog.querySelector('[data-deposit-brand-fields]').innerHTML = renderPaymentBrandFields({method,brandId},currentDeposit(),'deposit');
+      if (event.target.name === 'depositBrand') dialog.querySelector('[name=depositBrand]')?.focus();
+    }
+    updateDepositPreview();
   }
   if (event.target.name === 'countByDenomination') updateCashDenominations();
   if (event.target.name === 'customerId' && hasCustomerPicker()) {
@@ -3665,21 +3971,26 @@ dialog.addEventListener('keydown',(event) => {
 });
 function updateGuideSearch(event) {
   if (modal?.type === 'ops-guide' && event.target.name === 'guideSearch' && !event.isComposing) {
-    dialog.querySelector('[data-guide-results]').innerHTML = renderGuideResults(event.target.value,escape);
+    dialog.querySelector('[data-guide-results]').innerHTML = guideList(event.target.value);
   }
+}
+
+function updateCompanionSearch(event) {
+  if (!['ticket-companions','settled-ticket-companions'].includes(modal?.type) || event.target.name !== 'companionQuery') return;
+  const ticket = modal.type === 'settled-ticket-companions' ? findSettledCustomerTicket(state,modal.ticketId)?.ticket
+    : state.tickets.find(({id})=>id === modal.ticketId);
+  const primary = ticket && ticketCustomerAlias(ticket);
+  if (primary?.id) dialog.querySelector('#companion-results').innerHTML = customerUI.renderCompanionResults(
+    customerWorkspaceState(),ticket,primary,event.target.value,customerUIApi());
 }
 
 dialog.addEventListener('compositionend',(event)=> {
   updateSeatCustomerSearch(event);
   updateGuideSearch(event);
+  updateCompanionSearch(event);
 });
 dialog.addEventListener('input',(event)=> {
-  if (modal?.type === 'ticket-companions' && event.target.name === 'companionQuery' && !event.isComposing) {
-    const ticket = state.tickets.find(({id})=>id === modal.ticketId);
-    const primary = ticket && ticketCustomerAlias(ticket);
-    if (primary?.id) dialog.querySelector('#companion-results').innerHTML = customerUI.renderCompanionResults(
-      customerWorkspaceState(),ticket,primary,event.target.value,customerUIApi());
-  }
+  if (!event.isComposing) updateCompanionSearch(event);
   updateGuideSearch(event);
   if (modal?.type === 'settled-ticket-contents') updateSettledContentsPreview(event.target.form);
   if (['extend','extend-overdue'].includes(modal?.type) && event.target.name === 'extensionPlanQuantity') updateExtensionMixPreview();
@@ -3695,6 +4006,7 @@ dialog.addEventListener('input',(event)=> {
   }
   if (event.target.id==='menu-search') {modal.search=event.target.value;reviseProduct();}
   if (event.target.name==='paymentAmount' || event.target.name==='cashReceived') updatePaymentNote();
+  if (event.target.name === 'depositAmount') updateDepositPreview();
   if (event.target.matches('[data-cash-denomination]')) updateCashDenominations();
   if (event.target.name==='actualCash') updateCashCloseDifference(event.target);
   for (const error of dialog.querySelectorAll('.form-error')) error.hidden = true;

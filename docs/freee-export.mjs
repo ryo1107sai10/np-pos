@@ -1,4 +1,5 @@
 import { encodeCsv } from './csv-file.mjs';
+import { depositGrossAmount } from './card-fee.mjs';
 
 export const freeeJournalColumns = Object.freeze([
   '[表題行]', '日付', '伝票番号', '決算整理仕訳',
@@ -58,7 +59,7 @@ function ticketSale(ticket,date) {
   const tenders = new Map();
   const payments = ticket.payments ?? [];
   const deposits = ticket.deposits ?? [];
-  const advancesValid = deposits.every(({amount}) => addTender(tenders,'advance',amount));
+  const advancesValid = deposits.every((deposit) => addTender(tenders,'advance',depositGrossAmount(deposit)));
   const paymentsValid = payments.every(({method, amount}) => method !== 'advance' && addTender(tenders,method,amount));
   const received = [...tenders.values()].reduce((sum,amount) => sum + amount,0);
   if (!advancesValid || !paymentsValid || received !== settlement.total) {

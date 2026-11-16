@@ -1,6 +1,8 @@
 import { createRemoteJWKSet, jwtVerify } from 'jose';
 import { applyCommand, changeMember, createStore, getStoreOverview, inviteMember, listAudit, listMembers, listStores, migrateState, readState, revokeInvite } from './database.mjs';
+import { changeGroupMember, createStoreGroup, inviteGroupMember, listStoreGroups, renameStoreGroup, revokeGroupInvite, setGroupStore } from './store-groups.mjs';
 import { ApiError, isRecord, requireCondition } from './policy.mjs';
+import { answerGuideTopic, getGuideAccess } from './guide-assistant.mjs';
 
 const firebaseKeys = createRemoteJWKSet(new URL(
   'https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com',
@@ -21,7 +23,7 @@ function extraHeaders(request, env) {
   return {
     'Access-Control-Allow-Origin': origin,
     'Access-Control-Allow-Headers': 'Authorization, Content-Type',
-    'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
     'Access-Control-Max-Age': '600',
     Vary: 'Origin',
   };
@@ -116,6 +118,36 @@ function validPathId(value) {
   }
 }
 
+async function routeGroups(request, db, actor, [, rawGroup, section, rawId]) {
+  const method = request.method;
+  const groupId = rawGroup && validPathId(rawGroup);
+  const id = rawId && validPathId(rawId);
+  requireCondition((!rawGroup || groupId) && (!rawId || id), 404, 'not-found', 'ページが見つかりません。');
+  if (!groupId) {
+    if (method === 'GET') return listStoreGroups(db, actor);
+    if (method === 'POST') return createStoreGroup(db, actor, (await jsonBody(request)).name);
+  }
+  if (groupId && !section && method === 'PATCH') {
+    const { name } = await jsonBody(request);
+    return renameStoreGroup(db, actor, groupId, name);
+  }
+  if (section === 'stores' && id && (method === 'PUT' || method === 'DELETE')) {
+    return setGroupStore(db, actor, groupId, id, method === 'PUT');
+  }
+  if (section === 'members' && !id && method === 'POST') {
+    const { email, role } = await jsonBody(request);
+    return inviteGroupMember(db, actor, groupId, email, role);
+  }
+  if (section === 'members' && id && method === 'PATCH') {
+    const { role } = await jsonBody(request);
+    requireCondition(typeof role === 'string', 400, 'invalid-role', 'グループ権限を選択してください。');
+    return changeGroupMember(db, actor, groupId, id, role);
+  }
+  if (section === 'members' && id && method === 'DELETE') return changeGroupMember(db, actor, groupId, id);
+  if (section === 'invites' && id && method === 'DELETE') return revokeGroupInvite(db, actor, groupId, id);
+  throw new ApiError(404, 'not-found', 'ページが見つかりません。');
+}
+
 async function route(request, env, url) {
   const method = request.method;
   if (method === 'GET' && url.pathname === '/api/health') {
@@ -123,10 +155,12 @@ async function route(request, env, url) {
     return { ok: row?.ready === 1 };
   }
   const overview = method === 'GET' && url.pathname === '/api/stores/overview';
-  const match = /^\/api\/stores(?:\/([^/]+)\/(state|commands|migrate|members|invites|audit)(?:\/([^/]+))?)?$/.exec(url.pathname);
-  if (!overview && !match) throw new ApiError(404, 'not-found', 'ページが見つかりません。');
+  const groupMatch = /^\/api\/groups(?:\/([^/]+)(?:\/(stores|members|invites)(?:\/([^/]+))?)?)?$/.exec(url.pathname);
+  const match = /^\/api\/stores(?:\/([^/]+)\/(state|commands|migrate|members|invites|audit|guide)(?:\/([^/]+))?)?$/.exec(url.pathname);
+  if (!overview && !match && !groupMatch) throw new ApiError(404, 'not-found', 'ページが見つかりません。');
   const actor = await firebaseActor(request, env);
   const db = env.DB.withSession?.('first-primary') ?? env.DB;
+  if (groupMatch) return routeGroups(request, db, actor, groupMatch);
   if (overview) return getStoreOverview(db,actor);
   const [, rawStore, section, rawId] = match;
   if (!section) {
@@ -136,6 +170,11 @@ async function route(request, env, url) {
   const storeId = rawStore && validPathId(rawStore);
   const id = rawId && validPathId(rawId);
   requireCondition(storeId && (!rawId || id), 404, 'not-found', 'ページが見つかりません。');
+  if (section === 'guide' && !id && ['GET','POST'].includes(method)) {
+    const access = await getGuideAccess(db,env,actor,storeId);
+    if (method === 'GET') return {enabled:access.enabled};
+    return answerGuideTopic(db,env,storeId,access,(await jsonBody(request,1024)).topic);
+  }
   if (section === 'state' && method === 'GET' && !id) return readState(db, actor, storeId, sinceRevision(url.searchParams));
   if (section === 'audit' && method === 'GET' && !id) return listAudit(db, actor, storeId, auditPage(url.searchParams));
   if (section === 'commands' && method === 'POST' && !id) return applyCommand(db, actor, storeId, await jsonBody(request));

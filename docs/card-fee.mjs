@@ -1,4 +1,4 @@
-import { calculationTaxGroup } from './calculation-settings.mjs';
+import { calculationTaxGroup, roundCalculationRate } from './calculation-settings.mjs';
 
 const defaults = Object.freeze({enabled:false,rateBps:0});
 const standardTaxRate = 1_000;
@@ -70,6 +70,23 @@ export function getPaymentFeeGroups(state, payments) {
   });
   return {metadata,groups:[...groups.values()].map(({rate,amount,indexes}) =>
     ({rate,indexes,fee:Number((amount * BigInt(rate) + 5_000n) / 10_000n)}))};
+}
+
+export function depositGrossAmount(deposit) {
+  return deposit.amount + (deposit.cardFee ?? 0);
+}
+
+export function getDepositPaymentTerms(state, payment, saved = null) {
+  const {amount, method, preservePaymentTerms} = payment;
+  if (preservePaymentTerms && saved?.method !== method) throw new Error('前受金の支払方法を選び直してください。');
+  const previous = preservePaymentTerms ? saved : null;
+  const {rate, brandId, brandName, feeWaived, waivedFeeRate} = previous ? {
+    ...previous, rate:previous.cardFeeRateBps ?? 0,
+  } : getPaymentFeeGroups(state,[payment]).metadata[0];
+  const cardFee = rate && !feeWaived && Number.isSafeInteger(amount) && amount > 0
+    ? roundCalculationRate(amount,rate,'round') : 0;
+  return {...(brandId && {brandId,brandName}),...(feeWaived && {feeWaived,waivedFeeRate}),
+    ...(rate && !feeWaived ? {cardFee,cardFeeRateBps:rate} : {})};
 }
 
 export function addCardFeeTax(taxBreakdown, grossFee, taxRounding = 'floor') {

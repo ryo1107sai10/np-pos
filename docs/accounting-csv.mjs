@@ -1,4 +1,5 @@
 import { encodeCsv } from './csv-file.mjs';
+import { depositGrossAmount } from './card-fee.mjs';
 
 const modes = ['daily','tickets'];
 const encodingLabels = {bom:'UTF-8（BOM付き）',utf8:'UTF-8',sjis:'Shift_JIS'};
@@ -41,7 +42,7 @@ const money = (value) => Number.isSafeInteger(value) && value >= 0;
 
 function saleRows(ticket, businessDate, storeName) {
   const buckets = ticket.settlement?.taxBreakdown?.map(({base,tax,rate}) => ({amount:base + tax,rate})) ?? [];
-  const tender = [...(ticket.payments ?? []),...(ticket.deposits ?? []).map(({amount}) => ({method:'advance',amount}))];
+  const tender = [...(ticket.payments ?? []),...(ticket.deposits ?? []).map((deposit) => ({method:'advance',amount:depositGrossAmount(deposit)}))];
   const sum = (rows) => rows.reduce((total,{amount}) => total + amount,0);
   assert([...buckets,...tender].every(({amount}) => money(amount))
     && tender.every(({method}) => Object.hasOwn(labels,method))

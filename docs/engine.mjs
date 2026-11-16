@@ -1,4 +1,4 @@
-import { addCardFeeTax, canWaivePaymentFee, getPaymentFeeGroups, normalizeCardFeeSettings } from './card-fee.mjs';
+import { addCardFeeTax, canWaivePaymentFee, depositGrossAmount, getDepositPaymentTerms, getPaymentFeeGroups, normalizeCardFeeSettings } from './card-fee.mjs';
 import { calculationTaxGroup, defaultItemTaxRateBps, getCalculationSettings, getTicketCalculationSettings,
   normalizeCalculationSettings, roundCalculationRate } from './calculation-settings.mjs';
 import { getStoreSettings, normalizeStoreSettings, replaceStoreSettings } from './store-settings.mjs';
@@ -268,6 +268,25 @@ export function getSettlementPaymentFees(state, payments) {
   return {metadata,fees,total:fees.reduce((sum,fee)=>sum+fee,0)};
 }
 
+function recordDepositPaymentTerms(state, action, actor, saved) {
+  assert(action.waiveFee === undefined || typeof action.waiveFee === 'boolean','前受金の決済加算を確認してください。');
+  assert(action.preservePaymentTerms === undefined || typeof action.preservePaymentTerms === 'boolean','前受金の決済設定を確認してください。');
+  assert(canWaivePaymentFee(actor.role) || !action.waiveFee,'決済加算を免除するにはマネージャー以上の権限が必要です。');
+  const hasPaymentSelection = action.expectedCardFee !== undefined || action.brandId !== undefined || action.waiveFee !== undefined;
+  if (!hasPaymentSelection && action.preservePaymentTerms === undefined) {
+    // Older clients recorded advances without a surcharge, even if checkout fees were enabled.
+    return saved?.method === action.method ? getDepositPaymentTerms(state,{...action,preservePaymentTerms:true},saved) : {};
+  }
+  const terms = getDepositPaymentTerms(state, action, saved);
+  const fee = terms.cardFee ?? 0;
+  assert(action.expectedCardFee === fee,'前受金の決済加算が更新されています。金額を確認してください。');
+  return terms;
+}
+
+function totalDepositsReceived(deposits) {
+  return deposits.reduce((total,deposit) => total + depositGrossAmount(deposit), 0);
+}
+
 function exactRate(total, rate) {
   return roundCalculationRate(total, rate);
 }
@@ -298,7 +317,7 @@ export function quote(state, ticketId) {
   return calculateQuote(ticket);
 }
 
-function calculateQuote(ticket) {
+function calculateQuote(ticket, frozenFee = null) {
   const lines = ticket.lines.filter((line) => line.cancelledAt === null);
   const settings = getTicketCalculationSettings(ticket);
   const inclusive = settings.priceMode === 'inclusive';
@@ -351,19 +370,23 @@ function calculateQuote(ticket) {
 
   const itemTax = itemTaxBreakdown.reduce((total, group) => total + group.tax, 0);
   const baseTotal = subtotal - discount + service + (inclusive ? 0 : itemTax);
-  const feePayment = ticket.payments.find(({cardFee}) => cardFee > 0);
-  const brandedFee = ticket.payments.some(({cardFee,brandId}) => cardFee > 0 && brandId);
-  const cardFee = ticket.payments.reduce((total, payment) => total + (payment.cardFee ?? 0), 0);
+  const tenders = [...ticket.payments, ...ticket.deposits];
+  const depositPrincipal = totalOf(ticket.deposits);
+  const deposit = totalDepositsReceived(ticket.deposits);
+  const depositFee = deposit - depositPrincipal;
+  const cardFeeRateBps = frozenFee ? frozenFee.cardFeeRateBps : tenders.find(({cardFee}) => cardFee > 0)?.cardFeeRateBps;
+  const brandedFee = frozenFee ? frozenFee.brandedFee : tenders.some(({cardFee,brandId}) => cardFee > 0 && brandId);
+  const cardFee = frozenFee ? frozenFee.cardFee ?? 0 : tenders.reduce((total, payment) => total + (payment.cardFee ?? 0), 0);
   const {breakdown:taxBreakdown, feeTax:cardFeeTax} = cardFee > 0
     ? addCardFeeTax(itemTaxBreakdown,cardFee,settings.taxRounding) : {breakdown:itemTaxBreakdown,feeTax:0};
   const tax = itemTax + cardFeeTax;
   const total = baseTotal + cardFee;
-  const deposit = totalOf(ticket.deposits);
   const receivable = totalOf(ticket.payments.filter(({ method }) => method === 'receivable'));
   const paid = totalOf(ticket.payments) - receivable;
   return { subtotal, discount, service, tax, total, deposit, paid, ...(receivable > 0 ? { receivable } : {}),
     ...(inclusive ? {priceMode:'inclusive'} : {}),
-    ...(cardFee > 0 ? {cardFee,cardFeeTax,baseTotal,cardFeeRateBps:feePayment.cardFeeRateBps,...(brandedFee && {brandedFee:true})} : {}),
+    ...(depositFee > 0 ? {depositFee} : {}),
+    ...(cardFee > 0 ? {cardFee,cardFeeTax,baseTotal,cardFeeRateBps,...(brandedFee && {brandedFee:true})} : {}),
     remaining: Math.max(0, total - deposit - paid - receivable),
     commission: outputCommission(commission), commissionDetails, taxBreakdown };
 }
@@ -476,7 +499,7 @@ function reconcileEditedLineStock(state, ticket, original, updated, now) {
 function assertReducedTicketAmounts(state, ticket, actor, label) {
   const amounts = calculateQuote(ticket);
   assert(amounts.subtotal >= ticket.discount, `${label}前に値引き額を調整してください。`);
-  assert(amounts.total >= totalOf(ticket.deposits), `${label}後の請求額が前受金を下回ります。`);
+  assert((amounts.baseTotal ?? amounts.total) >= totalOf(ticket.deposits), `${label}後の請求額が前受金を下回ります。`);
   if (actor.role === 'manager' && ticket.discountDetails?.managerLimitBps !== undefined) {
     assert(ticket.discount <= exactRate(amounts.subtotal,getManagerDiscountLimit(state)),
       `${label}後の値引きが承認上限を超えます。先に値引きを調整してください。`);
@@ -800,7 +823,7 @@ function correctSettledTicketPayments(state, action, now, actor) {
   const originalTotal = getSettledTicketPaymentTotal(ticket);
   assert(originalTotal > 0, '訂正できる会計時の支払記録がありません。');
   const settlement = ticket.settlement ?? calculateQuote(ticket);
-  assert(Number.isSafeInteger(originalTotal) && settlement.total === originalTotal + totalOf(ticket.deposits),
+  assert(Number.isSafeInteger(originalTotal) && settlement.total === originalTotal + totalDepositsReceived(ticket.deposits),
     '会計額と登録済みの支払額が一致しません。');
   assert(Array.isArray(action.payments) && action.payments.length > 0 && action.payments.length <= 10,
     '支払内容を確認してください。');
@@ -852,15 +875,9 @@ export function previewSettledContents(state, ticket, action) {
     } else revised.lines[index] = editTicketLineSnapshot(state,line,action);
   }
   money(revised.discount,'値引き');
-  const totals = calculateQuote(revised);
+  const totals = calculateQuote(revised,old);
   assert(revised.discount <= totals.subtotal,'値引き額を小計以下にしてください。');
-  if (old.cardFee) {
-    const fee = addCardFeeTax(totals.taxBreakdown,old.cardFee,ticket.calculationSettings?.taxRounding ?? 'floor');
-    Object.assign(totals,{taxBreakdown:fee.breakdown,tax:totals.tax + fee.feeTax,baseTotal:totals.total,
-      total:totals.total + old.cardFee,cardFee:old.cardFee,cardFeeTax:fee.feeTax,cardFeeRateBps:old.cardFeeRateBps,
-      ...(old.brandedFee && {brandedFee:true})});
-  }
-  assert(totals.total >= totals.deposit,'訂正後の合計が前受金を下回っています。');
+  assert((totals.baseTotal ?? totals.total) >= totalOf(ticket.deposits),'訂正後の合計が前受金を下回っています。');
   return {revised,totals,old,change:totals.total - old.total};
 }
 
@@ -876,7 +893,7 @@ function correctSettledContents(state, action, now, actor) {
   assert((old.receivable ?? 0) === 0 && !ticket.payments.some(({method})=>method === 'receivable'),
     'この伝票は会計後の明細訂正の対象外です。');
   assert(action.expectedTotal === totals.total,'請求額が更新されました。最新の訂正内容を確認してください。');
-  assert(totalOf(ticket.payments) + totalOf(ticket.deposits) === old.total,'元の会計額と決済内訳を確認してください。');
+  assert(totalOf(ticket.payments) + totalDepositsReceived(ticket.deposits) === old.total,'元の会計額と決済内訳を確認してください。');
   const previousCommission = new Map(old.commission.map((row) => [row.castId,JSON.stringify(row)]));
   const nextCommission = new Map(totals.commission.map((row) => [row.castId,JSON.stringify(row)]));
   assert(!(state.payroll?.records ?? []).some(({month,castId,status}) => status === 'final' && month === date.slice(0,7)
@@ -905,7 +922,7 @@ function correctSettledContents(state, action, now, actor) {
     assert(allocations[action.adjustmentMethod] >= 0, '選んだ決済方法の返金額が元の支払額を超えます。');
     payments = methods.filter((method) => allocations[method] > 0).map((method) =>
       ({id:createId(state,'payment'),method,amount:allocations[method],at:ticket.settledAt ?? now}));
-    assert(!old.cardFee || payments.length > 0,'決済加算がある会計では、会計時の入金を残してください。');
+    assert((old.cardFee ?? 0) === (old.depositFee ?? 0) || payments.length > 0,'決済加算がある会計では、会計時の入金を残してください。');
   }
   const difference = Object.fromEntries([...methods,'receivable'].map((method) => [method,
     totalOf(payments.filter((row) => row.method === method)) - totalOf(ticket.payments.filter((row) => row.method === method))]));
@@ -1254,7 +1271,7 @@ function adjustTicketGuests(state, ticket, { mode, count, reason }, actor) {
 function validateDiscountAmount(ticket, amount, subtotal) {
   assert(amount <= subtotal, '値引きは小計以下を入力してください。');
   const changed = calculateQuote({ ...ticket, discount: amount });
-  assert(changed.total >= totalOf(ticket.deposits), '値引き後の請求額が前受金を下回ります。');
+  assert((changed.baseTotal ?? changed.total) >= totalOf(ticket.deposits), '値引き後の請求額が前受金を下回ります。');
 }
 
 function doDiscount(state, ticket, action, now, actor) {
@@ -1381,7 +1398,7 @@ function reduce(state, action, now, actor) {
     applyAccountingCsv(next,action,actor);
     return next;
   }
-  if (['saveCustomer', 'mergeCustomers', 'linkCustomer', 'correctSettledTicketCustomer', 'importCustomers'].includes(action.type)) {
+  if (['saveCustomer', 'mergeCustomers', 'linkCustomer', 'correctSettledTicketCustomer', 'correctSettledTicketCompanion', 'importCustomers'].includes(action.type)) {
     applyCustomerCommand(next, action, actor, now, () => createId(next, 'customer'));
     return next;
   }
@@ -1564,20 +1581,23 @@ function reduce(state, action, now, actor) {
       assert(quote(next, ticket.id).remaining >= amount, '前受金は現在の未収額以下を入力してください。');
       const memo = String(action.memo ?? '').trim();
       assert(memo.length <= 120, '前受金メモは120文字以内です。');
-      ticket.deposits.push({ id: createId(next, 'deposit'), method: action.method, amount, at: now, ...(memo && {memo}) });
+      const terms = recordDepositPaymentTerms(next,action,actor,null);
+      ticket.deposits.push({ id: createId(next, 'deposit'), method: action.method, amount, at: now, ...terms, ...(memo && {memo}) });
       break;
     }
     case 'editDeposit': {
       assert(['admin','manager'].includes(actor.role),'前受金の訂正にはマネージャー以上の権限が必要です。');
       operationalReason(action.reason,'前受金の訂正理由');
-      const entry = ticket.deposits.find(({id}) => id === action.depositId);
+      const index = ticket.deposits.findIndex(({id}) => id === action.depositId);
+      const entry = ticket.deposits[index];
       assert(entry,'前受金が見つかりません。');
       validateMethod(action.method);
       const amount = money(action.amount,'前受金',false);
       assert(amount <= quote(next,ticket.id).remaining + entry.amount,'前受金は会計額の範囲で入力してください。');
       const memo = String(action.memo ?? '').trim();
       assert(memo.length <= 120,'前受金メモは120文字以内です。');
-      Object.assign(entry,{method:action.method,amount,memo});
+      const terms = recordDepositPaymentTerms(next,action,actor,entry);
+      ticket.deposits[index] = {id:entry.id,at:entry.at,method:action.method,amount,memo,...terms};
       break;
     }
     case 'cancelDeposit': {
@@ -1695,7 +1715,7 @@ export function summary(state) {
     if (ticket.status === 'void' || ticket.status === 'cancelled') continue;
     if (occupiedStatuses.has(ticket.status)) occupied += ticket.tableIds.length;
     for (const payment of ticket.deposits) {
-      if (Object.hasOwn(depositsReceived, payment.method)) depositsReceived[payment.method] += payment.amount;
+      if (Object.hasOwn(depositsReceived, payment.method)) depositsReceived[payment.method] += depositGrossAmount(payment);
     }
     for (const payment of ticket.payments) {
       if (Object.hasOwn(tenderPayments, payment.method)) tenderPayments[payment.method] += payment.amount;
@@ -1713,7 +1733,7 @@ export function summary(state) {
       tickets++;
       guests += ticket.admittedGuests ?? ticket.guests;
       sales += totals.total;
-      depositsApplied += totalOf(ticket.deposits);
+      depositsApplied += totalDepositsReceived(ticket.deposits);
       receivableSales += totals.receivable ?? 0;
       totals.commission.forEach((entry) => addCommission(earned, entry.castId, entry.sales, entry.amount,
         Math.round(entry.points * pointsScale)));

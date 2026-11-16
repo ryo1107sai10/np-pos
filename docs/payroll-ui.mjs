@@ -78,7 +78,7 @@ export function renderPayroll(state, api) {
       `<option value="${escape(person.id)}"${person.id === castId ? ' selected' : ''}>${escape(person.name)}${person.enabled === false ? '（非表示）' : ''}</option>`).join('')}</select></label></div></div>
     <div class="lr-period-exports">${button('給与設定','payroll-settings',icon,'settings')}${button('計算テンプレート','payroll-templates',icon,'ticket')}
       ${button('給与の個人別変数','payroll-variables',icon,'settings')}
-      ${button('明細を一括印刷','payroll-batch',icon,'printer')}
+      ${button('日付指定で集計','payroll-range',icon,'calendar')}${button('確定明細を一括出力','payroll-batch',icon,'printer')}
       ${button('勤怠項目','payroll-attendance-items',icon,'clock')}${castId ? button('時給を登録','payroll-rate',icon,'wallet')
         + button('従業員台帳','payroll-employee',icon,'user') : ''}</div></section>`;
   if (!castId) return `<div class="lr-view">${filters}<p class="notice">給与を計算するキャストを店舗設定で登録してください。</p></div>`;
@@ -301,11 +301,53 @@ export function renderPayrollTemplateEditor(template, api) {
 
 export function renderPayrollBatch(state,selection,{escape}) {
   const people = castMembers(state);
-  return `<div class="form-grid">${input('開始月',`<input name="batchStart" type="month" value="${escape(selection.month)}" required>`)}
+  return `<div class="form-grid payroll-period-fields">${input('開始月',`<input name="batchStart" type="month" value="${escape(selection.month)}" required>`)}
     ${input('終了月',`<input name="batchEnd" type="month" value="${escape(selection.month)}" required>`)}
     ${input('対象',`<select name="batchCast"><option value="">全キャスト</option>
-      ${people.map(({id,name})=>`<option value="${escape(id)}">${escape(name)}</option>`).join('')}</select>`)}</div>
-    <p class="field-help">この期間に確定した支給明細をまとめて印刷・PDF保存します。</p>`;
+      ${people.map(({id,name})=>`<option value="${escape(id)}">${escape(name)}</option>`).join('')}</select>`)}
+    ${input('出力形式','<select name="batchOutput"><option value="print">一括印刷・PDF保存</option><option value="zip">個別PDFをZIPで保存</option></select>')}</div>
+    <p class="field-help">指定した給与月の確定明細を出力します。ZIPにはキャスト・給与月ごとにPDFが入ります。</p>`;
+}
+
+export function payrollRangeDefaults(month) {
+  const firstDay = `${month}-01`;
+  const lastDay = new Date(firstDay);
+  lastDay.setUTCMonth(lastDay.getUTCMonth() + 1,0);
+  return {start:firstDay,end:lastDay.toISOString().slice(0,10),castId:''};
+}
+
+export function renderPayrollRange(state,{range,result},api) {
+  const {escape,yen} = api;
+  const filters = `<div class="form-grid payroll-period-fields">${input('開始営業日',`<input type="date" name="rangeStart" value="${escape(range.start)}" required>`)}
+    ${input('終了営業日',`<input type="date" name="rangeEnd" value="${escape(range.end)}" required>`)}
+    ${input('対象',`<select name="rangeCast"><option value="">全キャスト</option>${castMembers(state).map(({id,name}) =>
+      `<option value="${escape(id)}"${id === range.castId ? ' selected' : ''}>${escape(name)}</option>`).join('')}</select>`)}</div>
+    <p class="field-help">勤怠・確定歩合は営業日、日払いは実際の支給日で集計します。月次テンプレートと日付のない手当・控除・日払い調整は月次明細で確認できます。</p>`;
+  if (!result) return filters;
+  const columns = ['勤務時間','時給分','確定歩合','ポイント換金','勤怠手当','勤怠控除','日払い済み','差引額'];
+  const unavailable = result.unavailableDates.length > 0;
+  const cells = (row,missing) => {
+    const values = [hours(row.minutes),missing ? '未集計' : yen(row.hourlyPay),unavailable ? '一部欠損' : yen(row.commission),
+      unavailable ? '一部欠損' : yen(row.pointPay),yen(row.allowanceTotal),yen(0 - row.deductionTotal),yen(0 - row.advance),
+      row.net === null ? '未集計' : yen(row.net)];
+    return columns.map((label,index)=>`<td><span class="payroll-range-caption" aria-hidden="true">${label}</span>${values[index]}</td>`).join('');
+  };
+  const table = `<div class="analytics-table payroll-range-table" tabindex="0"><table role="table">
+    <thead><tr><th scope="col">キャスト</th>${columns.map((label)=>`<th scope="col">${label}</th>`).join('')}</tr></thead>
+    <tbody>${result.rows.map((row) => `<tr><th scope="row">${escape(row.castName)}</th>${cells(row,row.missingDates.length)}</tr>`).join('')}</tbody>
+    ${!range.castId ? `<tfoot><tr><th scope="row">合計</th>${cells(result.totals,result.rows.some(({missingDates}) => missingDates.length))}</tr></tfoot>` : ''}
+    </table></div>`;
+  return `${filters}<h3>集計結果　${escape(result.start)} 〜 ${escape(result.end)}</h3>
+    <p class="field-help">選択期間分の時給・歩合・ポイントは給与月ごとに丸めてから合算します。差引額は期間内の参考額です。</p>
+    ${result.unavailableDates.length ? `<p class="ops-highlight">歩合の元データが不足しています。${result.unavailableDates.map(escape).join('・')}</p>` : ''}
+    ${result.rows.some((row) => row.hasActivity) ? table : '<p class="field-help">この期間に集計できる勤怠・確定歩合・支給済みの日払いはありません。</p>'}
+    ${result.rows.filter((row) => row.missingDates.length).map((row) =>
+      `<p class="ops-highlight">${escape(row.castName)}の時給未登録日　${row.missingDates.map(escape).join('・')}</p>`).join('')}
+    ${result.rows.filter((row) => row.work.length || row.advances.length).map((row) =>
+      `<details class="payroll-rate-history"><summary>${escape(row.castName)}の勤怠・日払いの内訳</summary>
+      ${row.work.length ? workDetails(row,api) : ''}
+      ${row.advances.length ? listAmounts(row.advances.map(({paidDate,month,method,amount}) =>
+        [`${paidDate} ／ ${method === 'cash' ? '現金' : '振込'} ／ ${month}分`,amount]),api) : ''}</details>`).join('')}`;
 }
 
 export function renderDailyPayRequest(state, selection, {yen}) {

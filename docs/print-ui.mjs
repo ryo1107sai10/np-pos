@@ -1,5 +1,6 @@
 import { getPrintAutoKind, getPrintDocumentRules, getPrintTenderReceived, printAutoOptions, printGroupingOptions,
   printInvoiceDateOptions, printItemsOptions } from './print-domain.mjs';
+import { depositGrossAmount } from './card-fee.mjs';
 
 export const printDocumentTitles = Object.freeze({ check: '会計確認伝票', receipt: 'レシート', invoice: '領収書' });
 
@@ -102,7 +103,9 @@ function chargeDetails(totals, api) {
   if (totals.service) rows.push(['サービス料', totals.service]);
   const taxLabel = inclusive ? 'うち消費税' : '消費税';
   rows.push([totals.cardFee ? `${taxLabel}（加算前）` : taxLabel, totals.tax - (totals.cardFeeTax ?? 0)]);
-  if (totals.cardFee) rows.push([totals.brandedFee ? '決済加算（税込）' : 'カード会計加算（税込）',totals.cardFee]);
+  if (totals.depositFee) rows.push(['前受金の決済加算（税込）',totals.depositFee]);
+  const settlementFee = (totals.cardFee ?? 0) - (totals.depositFee ?? 0);
+  if (settlementFee) rows.push([totals.brandedFee ? '決済加算（税込）' : 'カード会計加算（税込）',settlementFee]);
   return moneyRows(rows,api);
 }
 
@@ -124,7 +127,7 @@ function paymentGroups(payments, prefix = '') {
 }
 
 function receiptPayments(ticket, api) {
-  const deposits = paymentGroups(ticket.deposits ?? [],'前受金・');
+  const deposits = paymentGroups((ticket.deposits ?? []).map((deposit) => ({...deposit,amount:depositGrossAmount(deposit)})),'前受金・');
   const payments = paymentGroups(ticket.payments ?? []);
   if (!deposits.length && !payments.length) return '';
   const tender = ticket.cashTender;

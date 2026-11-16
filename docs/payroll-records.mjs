@@ -75,10 +75,10 @@ export function resolveAttendanceItems(state, ids, prior = []) {
   });
 }
 
-export function payrollAttendanceItems(state, month, castId) {
+export function payrollAttendanceItems(state, month, castId, includes = () => true) {
   const totals = new Map();
   for (const row of state.castAttendance ?? []) {
-    if (row.castId !== castId || row.status !== 'approved' || row.date.slice(0,7) !== month) continue;
+    if (row.castId !== castId || row.status !== 'approved' || row.date.slice(0,7) !== month || !includes(row.date)) continue;
     for (const {kind,label,amount} of row.items ?? []) {
       const key = JSON.stringify([kind,label]);
       const item = totals.get(key) ?? {kind,label,amount:0};

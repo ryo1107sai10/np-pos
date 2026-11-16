@@ -79,7 +79,8 @@ function loginPanel(cloud, api) {
     ${google ? `<div class="np-cloud-google">${button('Googleでサインイン', 'cloud-google', api, { glyph: 'user', tone: 'primary', disabled: busy })}</div>` : ''}
     ${passwords ? (google ? `<details data-cloud-section="email"><summary>メールアドレスでサインイン</summary>${emailFields}</details>` : emailFields) : ''}
   </section>`}
-  <div class="np-cloud-buttons">${button('サインインなしで試す', 'cloud-demo', api, { glyph: 'arrow-left', tone: 'quiet' })}</div>`;
+  <div class="np-cloud-buttons">${button('サインインなしで試す', 'cloud-demo', api, { glyph: 'arrow-left', tone: 'quiet' })}
+    ${button('店舗グループのデモ', 'cloud-groups-demo', api, { glyph: 'users', tone: 'quiet' })}</div>`;
 }
 
 function storeChooser(cloud, api) {
@@ -95,7 +96,8 @@ function storeChooser(cloud, api) {
         <small>${escape(roleName(store.role,store.id === cloud.store?.id ? cloud : undefined))}${store.hasState === false ? ' · 初期設定待ち' : ''}</small></span>
         ${current ? '<span class="np-cloud-role">利用中</span>' : icon('chevron-right', 14)}</button></li>`;
     }).join('')}</ul>` : '<p class="np-cloud-copy">所属する店舗はありません。招待を受けたメールアドレスでサインインすると店舗が表示されます。</p>'}
-    ${stores.some(({role})=>role==='admin') ? `<div class="np-cloud-buttons">${button('複数店舗の営業状況','cloud-overview',api,{glyph:'chart',disabled:busy})}</div>` : ''}
+    <div class="np-cloud-buttons">${button('店舗グループ','cloud-groups',api,{glyph:'users',disabled:busy})}
+    ${stores.some(({role})=>role==='admin') ? button('複数店舗の営業状況','cloud-overview',api,{glyph:'chart',disabled:busy}) : ''}</div>
     <details class="np-cloud-create" data-cloud-section="create"><summary>店舗を作成</summary><div class="np-cloud-detail-body">
       <div class="np-cloud-form-row">${field('店舗名','cloud-store-name','text',`autocomplete="organization" maxlength="80"${busy ? ' disabled' : ''}`)}${button('作成する','cloud-create-store',api,{ glyph:'plus', disabled:busy })}</div>
     </div></details>

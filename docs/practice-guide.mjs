@@ -1,13 +1,16 @@
 const lessons = [
-  {title:'開店して卓を選ぶ',keywords:'ホール 営業 釣銭 来店 座席 卓 移動 連結',text:'ホールの「開店する」で釣銭準備金を登録します。空席を選び、人数と初回セットを指定して来店を確定します。'},
-  {title:'注文・歩合を登録する',keywords:'カート 注文 商品 ボトル 指名 同伴 バック 歩合 キャスト',text:'利用中の伝票で「注文」を開きます。商品ごとに数量と担当キャストを選んでカートに追加し、注文をまとめて確定します。'},
-  {title:'延長を登録する',keywords:'延長 自動 一括 時間 超過 セット 見積',text:'伝票の「延長」でプランと追加料金を確認します。終了時刻を過ぎた卓では、店舗設定に従って超過分の一括延長を選べます。'},
-  {title:'会計・レシート・領収書',keywords:'レシート 領収書 印刷 前受金 会計 現金 カード 釣銭 退店',text:'「会計へ進む」で支払方法と金額を確認します。確定後の会計内訳から印刷でき、「退店・卓を解放」で空席に戻ります。'},
-  {title:'閉店と日報を確認する',keywords:'閉店 レジ 日報 金種 差額 CSV 仕訳 freee 経費 入出金',text:'伝票の会計と退店を済ませ、「閉店処理」でレジの実残高を登録します。日報の期間を指定して売上や締め結果を確認し、CSVを出力できます。'},
-  {title:'入庫・廃棄・棚卸を記録する',keywords:'棚卸 在庫 入庫 仕入 廃棄 ロス 原価 ボトル 数量',text:'「在庫」で品目を選び、「調整」から仕入れ・廃棄・消費を記録します。「棚卸」には実際に数えた数量を入れます。'},
-  {title:'顧客と来店履歴を確認する',keywords:'顧客 誕生日 指名 連絡先 ボトル キープ 写真 来店',text:'「顧客管理」で顧客を検索でき、来店・指名履歴やキープボトルを確認できます。受付では登録済みの顧客を検索して伝票にひもづけます。'},
-  {title:'打刻・勤務希望・支給明細',keywords:'出勤 退勤 打刻 休憩 シフト 給与 支給 明細 日払い 勤怠',text:'キャストは「マイページ」で打刻・勤務希望・日払いを操作できます。確定した支給明細も同じ画面から確認できます。'},
-  {title:'給与・支給明細を管理する',keywords:'給与 計算 時給 支給 PDF 歩合 キャスト 管理者 手当 控除',text:'店舗管理者は「給与・支給明細」で時給を登録し、対象の給与月・キャストを選んで試算を確認します。確定した支給明細は印刷・PDF保存できます。'},
+  {id:'seat',page:'floor',title:'開店して卓を選ぶ',keywords:'ホール 営業 釣銭 来店 座席 卓 移動 連結',text:'ホールの「開店する」で釣銭準備金を登録します。空席を選び、人数と初回セットを指定して来店を確定します。'},
+  {id:'order',page:'floor',title:'注文・歩合を登録する',keywords:'カート 注文 商品 ボトル 指名 同伴 バック 歩合 キャスト',text:'利用中の伝票で「注文」を開きます。商品ごとに数量と担当キャストを選んでカートに追加し、注文をまとめて確定します。'},
+  {id:'extension',page:'floor',title:'延長を登録する',keywords:'延長 自動 一括 時間 超過 セット 見積',text:'伝票の「延長」でプランと追加料金を確認します。終了時刻を過ぎた卓では、店舗設定に従って超過分の一括延長を選べます。'},
+  {id:'receipt',page:'floor',title:'会計・レシート・領収書',keywords:'レシート 領収書 印刷 前受金 会計 現金 カード 釣銭 退店',text:'「会計へ進む」で支払方法と金額を確認します。確定後の会計内訳から印刷でき、「退店・卓を解放」で空席に戻ります。'},
+  {id:'reports',page:'reports',title:'閉店と日報を確認する',keywords:'閉店 レジ 日報 金種 差額 CSV 仕訳 freee 経費 入出金',text:'伝票の会計と退店を済ませ、「閉店処理」でレジの実残高を登録します。日報の期間を指定して売上や締め結果を確認し、CSVを出力できます。'},
+  {id:'stock',page:'stock',title:'入庫・廃棄・棚卸を記録する',keywords:'棚卸 在庫 入庫 仕入 廃棄 ロス 原価 ボトル 数量',text:'「在庫」で品目を選び、「調整」から仕入れ・廃棄・消費を記録します。「棚卸」には実際に数えた数量を入れます。'},
+  {id:'customers',page:'customers',title:'顧客と来店履歴を確認する',keywords:'顧客 誕生日 指名 連絡先 ボトル キープ 写真 来店',text:'「顧客管理」で顧客を検索し、来店・指名履歴やキープボトルを確認できます。受付では登録済みの顧客を検索して伝票にひもづけます。'},
+  {id:'my-pay',page:'cast-workspace',title:'打刻・勤務希望・支給明細',keywords:'出勤 退勤 打刻 休憩 シフト 給与 支給 明細 日払い 勤怠 通知',text:'キャストは「マイページ」で打刻・勤務希望・日払いを操作できます。給与が確定すると同じ画面にお知らせが表示され、「明細を確認」から開けます。'},
+  {id:'payroll',page:'payroll',title:'給与・支給明細を管理する',keywords:'給与 計算 時給 支給 PDF ZIP 歩合 キャスト 管理者 手当 控除 日付 期間 締め',text:'店舗管理者は「給与・支給明細」で試算・確定ができます。任意期間で実績を集計し、給与月の確定明細を個人別PDFのZIPで保存できます。'},
+  {id:'companion',page:'tickets',adminOnly:true,title:'会計後に同席者を訂正する',keywords:'会計 済み 過去 履歴 同席 代表 同伴 訂正 解除 理由 修正',text:'「伝票履歴」で会計済み伝票を開き、「同席者を訂正」を選びます。理由を入力して同席者を追加・解除すると、対象の来店履歴と監査ログに反映されます。'},
+  {id:'prepayments',page:'floor',title:'前受金に決済手数料を適用する',keywords:'前受 預り 入金 ブランド 手数料 カード QR 税 タックス 差額',text:'利用中の伝票で「前受金」を開き、会計に充当する額と支払方法を入力します。決済ブランドを選ぶと、設定済みの手数料とお客様から受け取る合計を確認できます。'},
+  {id:'groups',action:'cloud-groups',title:'複数店舗の権限を管理する',keywords:'複数 店舗 グループ 役職 権限 追加 切替 招待 本店 支店',text:'メニューの「店舗グループ」でグループを作り、自分が開設した店舗を追加します。招待したマネージャー・スタッフは、割り当てた店舗を同じアカウントで切り替えられます。'},
 ];
 
 export const practiceSteps = Object.freeze([
@@ -22,21 +25,26 @@ export const practiceSteps = Object.freeze([
 const normalize = (text) => text.normalize('NFKC').toLocaleLowerCase('ja-JP');
 const particles = /(?:にする|したい|できますか|できる|どうやって|どこで|方法|使い方|教えて|について|を|の)/gu;
 
-export function searchOperationsGuide(query) {
+export function getOperationsGuideTopic(id) {
+  return lessons.find((lesson)=>lesson.id === id);
+}
+
+export function searchOperationsGuide(query, allows = () => true) {
   const normalizedQuery = normalize(query ?? '').replace(particles,' ').replace(/[?？。、]/gu,' ').trim();
   const tokens = normalizedQuery.split(/\s+/u).filter(Boolean);
-  if (!tokens.length) return lessons;
-  return lessons.map((lesson) => {
+  const available = lessons.filter(allows);
+  if (!tokens.length) return available;
+  return available.map((lesson) => {
     const source = normalize(lesson.title + ' ' + lesson.keywords + ' ' + lesson.text);
     const matches = tokens.filter((token) => source.includes(token)).length;
     return {lesson,matches};
   }).filter(({matches}) => matches > 0).sort((first,second) => second.matches - first.matches).map(({lesson}) => lesson);
 }
 
-export function renderGuideResults(query, escape) {
-  const matches = searchOperationsGuide(query);
-  return matches.length ? `<ol class="ops-guide">${matches.map(({title,text}) =>
-    `<li><strong>${escape(title)}</strong><p>${escape(text)}</p></li>`).join('')}</ol>`
+export function renderGuideResults(query, escape, {allows, actions} = {}) {
+  const matches = searchOperationsGuide(query,allows);
+  return matches.length ? `<ol class="ops-guide">${matches.map((lesson) =>
+    `<li><strong>${escape(lesson.title)}</strong><p>${escape(lesson.text)}</p>${actions?.(lesson) ?? ''}</li>`).join('')}</ol>`
     : '<p class="field-help">該当する操作が見つかりません。注文、印刷、給与などの短いキーワードで探してください。</p>';
 }
 

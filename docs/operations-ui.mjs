@@ -4,7 +4,7 @@ const timestamp = new Intl.DateTimeFormat('ja-JP', {
 });
 const japaneseNumber = new Intl.NumberFormat('ja-JP', { maximumFractionDigits: 6 });
 const moneyFields = new Set(['amount', 'total', 'subtotal', 'discount', 'price', 'value', 'cost', 'unitCost', 'expectedCash', 'actualCash', 'discrepancy',
-  'received', 'change', 'cardFee', 'net', 'manualAdvance', 'hourlyRate', 'pointRate']);
+  'received', 'change', 'cardFee', 'grossAmount', 'net', 'manualAdvance', 'hourlyRate', 'pointRate']);
 const omittedAuditFields = new Set(['receivable', 'receivableSales', 'recoveries', 'recoveryRows', 'creditLimit', 'creditEnabled', 'creditOverride']);
 const roles = { admin: '店舗管理者', manager: 'マネージャー', staff: 'スタッフ', cast:'キャスト' };
 
@@ -18,7 +18,7 @@ const auditLabels = {
   saveRolePolicy:'役職・権限の設定変更',
   saveCashAccounts:'金庫・出金先の設定変更',
   saveCustomer: '顧客情報の登録・変更', setTicketCustomer: '伝票の顧客設定', correctSettledTicketCustomer: '会計済み伝票の顧客訂正',
-  setTicketCompanion: '伝票の同席者を変更',
+  setTicketCompanion: '伝票の同席者を変更', correctSettledTicketCompanion: '会計済み伝票の同席者訂正',
   mergeCustomers: '顧客の統合', linkCustomer: '来店と顧客の関連づけ',
   importCustomers: '顧客の一括登録',
   recordCashMovement: '入出金の記録', editCashMovement:'入出金の訂正', voidCashMovement:'入出金の取消',
@@ -58,7 +58,8 @@ const valueLabels = {
   cashTender: '現金のお預かりとお釣り', received: '現金お預かり', change: 'お釣り', cashDenominations: '金種別の枚数',
   issueNumber: '発行回数', width: '用紙幅（mm）', storeName: '印字する店名', address: '住所', phone: '電話番号',
   registrationNumber: '登録番号', showItems: '明細を印字', autoReceipt: '会計時のレシート自動印刷',
-  enabled: '有効', menuId: '延長プラン', rateBps: '加算率', cardFee: 'カード会計加算',
+  enabled: '有効', menuId: '延長プラン', rateBps: '加算率', cardFee: '決済加算', grossAmount: '受取額',
+  brandName: '決済ブランド', cardFeeRateBps: '決済加算率', feeWaived: '加算を免除', waivedFeeRate: '免除した加算率',
   paused: '今回の停止', source: '操作', manual: '通知から停止', checkout: '通知から会計へ',
   method: '決済方法', reason: '理由', points: 'ポイント', cost: '原価', value: '評価額',
   request: '承認申請', approved: '承認', rejected: '却下', pending: '承認待ち', paid: '会計済み',
@@ -102,7 +103,7 @@ function visibleAuditFields(value) {
 function readableValue(value, key) {
   if (value == null) return value;
   if (['startsAt','endsAt','arrivedAt','providedAt','cancelledAt'].includes(key) && Number.isFinite(new Date(value).getTime())) return timestamp.format(value);
-  if (['managerDiscountRateBps','rateBps','dailyPayLimitBps','serviceRateBps'].includes(key)) return `${value / 100}%`;
+  if (['managerDiscountRateBps','rateBps','dailyPayLimitBps','serviceRateBps','cardFeeRateBps','waivedFeeRate'].includes(key)) return `${value / 100}%`;
   if (typeof value === 'number' && moneyFields.has(key)) return `¥${japaneseNumber.format(value)}`;
   if (typeof value === 'string') return valueLabels[value] ?? value;
   if (Array.isArray(value)) return value.filter((entry) => entry?.method !== 'receivable'
@@ -142,7 +143,7 @@ export function renderAuditLog({entries, loading, more, failed}, {escape, icon})
       <span class="ops-audit-meta"><time>${escape(date)}</time><span>${escape(entry.actor?.label ?? entry.actor?.id ?? '—')}</span>
         ${roles[entry.actor?.role] ? `<span>${roles[entry.actor.role]}</span>` : ''}</span>
     </summary><div class="ops-audit-detail">
-      ${['correctSettledTicketCustomer', 'correctSettledTicketPayments'].includes(entry.action) ? `<p class="ops-audit-reason"><strong>会計の営業日</strong> ${escape(entry.businessDate)}</p>` : ''}
+      ${['correctSettledTicketCustomer', 'correctSettledTicketCompanion', 'correctSettledTicketPayments'].includes(entry.action) ? `<p class="ops-audit-reason"><strong>会計の営業日</strong> ${escape(entry.businessDate)}</p>` : ''}
       ${reason ? `<p class="ops-audit-reason"><strong>理由</strong> ${escape(reason)}</p>` : ''}
       <div class="ops-audit-compare">${auditValues('変更前', entry.before, escape)}${auditValues('変更後', entry.after, escape)}</div>
     </div></details>`;

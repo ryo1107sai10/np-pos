@@ -181,32 +181,36 @@ function normalizeInputs(state, input) {
     deductions: normalizeItems(deductions, '控除'), manualAdvance: money(manualAdvance, '日払い済み額') };
 }
 
-function settledTickets(state, month) {
+function settledTickets(state, month, includes = () => true, unavailable = []) {
   const tickets = new Map();
   const legacy = [];
   for (const day of state.closedDays) {
-    if (day.date.slice(0, 7) !== month) continue;
-    if (day.date === state.day.date && state.tickets.length) continue;
-    const snapshots = day.ticketSnapshots?.filter(({status}) => paidStatuses.has(status));
+    if (day.date.slice(0, 7) !== month || !includes(day.date)) continue;
+    const current = day.date === state.day.date && state.tickets.length ? state.tickets : null;
+    const snapshots = (current ?? day.ticketSnapshots)
+      ?.filter(({status}) => paidStatuses.has(status));
     const incomplete = !snapshots || (day.tickets != null && snapshots.length !== day.tickets)
       || snapshots.some(({settlement}) => !Array.isArray(settlement?.commission));
     if (incomplete && Array.isArray(day.commission)) {
       legacy.push({ settlement:{ commission:day.commission } });
       continue;
     }
+    if (incomplete && day.tickets !== 0) unavailable.push(day.date);
     for (const ticket of snapshots ?? []) tickets.set(ticket.id, ticket);
   }
-  if (state.day.date.slice(0, 7) === month) {
+  if (state.day.date.slice(0, 7) === month && includes(state.day.date)
+    && !state.closedDays.some(({date}) => date === state.day.date)) {
     for (const ticket of state.tickets) tickets.set(ticket.id, ticket);
   }
-  return [...tickets.values()].filter(({ status, settlement }) => paidStatuses.has(status) && settlement).concat(legacy);
+  return [...tickets.values()].filter(({status, settlement}) => paidStatuses.has(status)
+    && Array.isArray(settlement?.commission)).concat(legacy);
 }
 
-function confirmedCommission(state, month, castId) {
+function confirmedCommission(tickets, castId) {
   const detailByName = new Map();
   let rawCommission = 0;
   let pointUnits = 0;
-  for (const { settlement } of settledTickets(state, month)) {
+  for (const { settlement } of tickets) {
     const entry = settlement.commission.find((row) => row.castId === castId);
     if (!entry) continue;
     rawCommission += entry.amount;
@@ -282,32 +286,42 @@ export class MissingPayrollRateError extends Error {
   }
 }
 
-export function previewPayroll(state, input) {
-  const record = normalizeInputs(state, input);
-  const { month, castId, allowances, deductions, manualAdvance } = record;
+function ratedWork(state, month, castId, manualWork, includes = () => true) {
   const rates = getPayrollRates(state, castId);
   const missingDates = [];
-  const work = attendanceWork(state, month, castId, record.work).map(({ date, minutes, source }) => {
+  const work = attendanceWork(state, month, castId, manualWork).filter(({date}) => includes(date)).map(({ date, minutes, source }) => {
     const rate = rates.findLast((entry) => entry.effectiveDate <= date);
     if (minutes > 0 && !rate) missingDates.push(date);
     return { date, minutes, source, hourlyRate:rate?.hourlyRate ?? 0 };
   });
+  return {work,missingDates};
+}
+
+function calculateDatedPay(work, {rawCommission,pointUnits}, attendanceItems, settings) {
+  const minutes = work.reduce((sum, row) => sum + row.minutes, 0);
+  const hourlyPay = Math.round(work.reduce((sum, row) => sum + row.minutes * row.hourlyRate, 0) / 60);
+  const round = settings.commissionRounding === 'floor' ? Math.floor : Math.round;
+  const commission = round(rawCommission / settings.commissionUnit) * settings.commissionUnit;
+  const attendancePoints = attendanceItems.reduce((sum,row) => sum + (row.kind === 'points' ? row.amount : 0), 0);
+  const totalPointUnits = pointUnits + attendancePoints * 1000;
+  check(Number.isSafeInteger(totalPointUnits), 'ポイントの計算範囲を超えています。');
+  const pointPay = Number((BigInt(totalPointUnits) * BigInt(settings.pointRate) + 500n) / 1000n);
+  return {minutes,hourlyPay,commission,points:totalPointUnits / 1000,pointPay};
+}
+
+export function previewPayroll(state, input) {
+  const record = normalizeInputs(state, input);
+  const { month, castId, allowances, deductions, manualAdvance } = record;
+  const {work,missingDates} = ratedWork(state,month,castId,record.work);
   if (missingDates.length) throw new MissingPayrollRateError(missingDates);
   const templateId = getPayrollTemplateAssignment(state,castId);
   const template = getPayrollTemplates(state).find(({id,isDefault}) => templateId ? id === templateId : isDefault);
   const settings = getPayrollSettings(state);
   if (template) settings.statementRules = template.rules.map((row) => ({...row}));
-  const minutes = work.reduce((sum, row) => sum + row.minutes, 0);
-  const hourlyPay = Math.round(work.reduce((sum, row) => sum + row.minutes * row.hourlyRate, 0) / 60);
-  const {rawCommission, pointUnits, commissionDetails} = confirmedCommission(state, month, castId);
-  const round = settings.commissionRounding === 'floor' ? Math.floor : Math.round;
-  const commission = round(rawCommission / settings.commissionUnit) * settings.commissionUnit;
+  const commissionData = confirmedCommission(settledTickets(state,month),castId);
+  const {rawCommission,commissionDetails} = commissionData;
   const attendanceItems = payrollAttendanceItems(state,month,castId);
-  const attendancePoints = attendanceItems.reduce((sum,row)=>sum + (row.kind === 'points' ? row.amount : 0),0);
-  const totalPointUnits = pointUnits + attendancePoints * 1000;
-  const points = totalPointUnits / 1000;
-  check(Number.isSafeInteger(totalPointUnits), 'ポイントの計算範囲を超えています。');
-  const pointPay = Number((BigInt(totalPointUnits) * BigInt(settings.pointRate) + 500n) / 1000n);
+  const {minutes,hourlyPay,commission,points,pointPay} = calculateDatedPay(work,commissionData,attendanceItems,settings);
   const hasFormula = settings.statementRules.some(({basis}) => advancedPayrollBases.has(basis));
   const formulaContext = hasFormula ? {variables:getPayrollVariableValues(state,castId)} : null;
   const statementItems = calculateStatementItems(settings,hourlyPay,commission,pointPay,{...formulaContext,minutes,points});
@@ -321,6 +335,51 @@ export function previewPayroll(state, input) {
     paidDailyPay, advance, net, settings, ...(formulaContext && {formulaContext}),
     ...(attendanceItems.length && {attendanceItems}), ...(template && {templateName:template.name}),
     ...(template?.columns !== undefined && {templateColumns:template.columns}) };
+}
+
+export function previewPayrollRange(state, {start,end,castId}) {
+  check(isDate(start) && isDate(end) && start <= end, '開始日と終了日を、日付の順に指定してください。');
+  check(!castId || castById(state,castId), '給与の対象キャストを選択してください。');
+  const includes = (date) => date >= start && date <= end;
+  const people = castId ? [castById(state,castId)] : [...state.cast,...(state.archivedCast ?? [])];
+  const payouts = getPayrollDailyPays(state,{castId}).filter(({status,paidDate}) => status === 'paid' && includes(paidDate));
+  const dates = [state.day,...state.closedDays,...(state.attendances ?? []),...(state.castAttendance ?? [])].map(({date}) => date);
+  for (const record of state.payroll?.records ?? []) dates.push(...(record.snapshot?.work ?? record.work).map(({date}) => date));
+  const months = [...new Set(dates.filter(includes).map((date) => date.slice(0,7)))].sort();
+  const unavailableDates = [];
+  const ticketsByMonth = new Map(months.map((month) => [month,settledTickets(state,month,includes,unavailableDates)]));
+  const settings = getPayrollSettings(state);
+  const fields = ['minutes','hourlyPay','rawCommission','commission','points','pointPay','allowanceTotal','deductionTotal'];
+  const rows = people.map(({id,name}) => {
+    const work = [];
+    const missingDates = [];
+    let hasActivity = false;
+    const totals = Object.fromEntries(fields.map((key) => [key,0]));
+    for (const month of months) {
+      const record = getPayrollDraft(state,month,id);
+      const part = record?.snapshot
+        ? {work:record.snapshot.work.filter(({date}) => includes(date)),missingDates:[]}
+        : ratedWork(state,month,id,record?.work ?? [],includes);
+      const commissionData = confirmedCommission(ticketsByMonth.get(month),id);
+      const attendanceItems = payrollAttendanceItems(state,month,id,includes);
+      hasActivity ||= Boolean(part.work.length || commissionData.commissionDetails.length || attendanceItems.length);
+      const pay = {...calculateDatedPay(part.work,commissionData,attendanceItems,record?.snapshot?.settings ?? settings),
+        ...adjustmentTotals([],[],attendanceItems),rawCommission:commissionData.rawCommission};
+      for (const key of fields) totals[key] += pay[key];
+      work.push(...part.work);
+      missingDates.push(...part.missingDates);
+    }
+    const advances = payouts.filter((row) => row.castId === id).sort((a,b) => a.paidDate.localeCompare(b.paidDate) || a.paidAt - b.paidAt);
+    const advance = advances.reduce((sum,{amount}) => sum + amount,0);
+    const {hourlyPay,commission,pointPay,allowanceTotal,deductionTotal} = totals;
+    const net = missingDates.length || unavailableDates.length ? null
+      : netPay(hourlyPay,commission,pointPay,allowanceTotal,deductionTotal,advance);
+    return {castId:id,castName:name,work,missingDates,...totals,advances,advance,net,hasActivity:hasActivity || Boolean(advances.length)};
+  });
+  const summed = [...fields,'advance','net'];
+  const totals = Object.fromEntries(summed.map((key) => [key,rows.reduce((sum,row) => sum + (row[key] ?? 0),0)]));
+  if (rows.some(({net}) => net === null)) totals.net = null;
+  return {start,end,unavailableDates,totals,rows:rows.filter((row) => castId || row.hasActivity)};
 }
 
 export function getDailyPayLimit(state, month, castId) {

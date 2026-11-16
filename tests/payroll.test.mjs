@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { apply, createDemo, quote, summary } from '../docs/engine.mjs';
-import { getDailyPayLimit, getDailyPayTotals, getPayrollDailyPays, getPayrollDraft, getPayrollSettings, getPayrollTemplates, previewPayroll } from '../docs/payroll.mjs';
-import { renderPayroll } from '../docs/payroll-ui.mjs';
+import { getDailyPayLimit, getDailyPayTotals, getPayrollDailyPays, getPayrollDraft, getPayrollSettings, getPayrollTemplates,
+  previewPayroll, previewPayrollRange } from '../docs/payroll.mjs';
+import { makeImagePdf, makeStoredZip } from '../docs/payroll-pdf.mjs';
+import { renderPayroll, renderPayrollRange } from '../docs/payroll-ui.mjs';
+import { createPayrollDemo } from '../docs/phase-two-demo.mjs';
 import { buildDailyReportCsv } from '../docs/report-export.mjs';
 import { getReportDay, getReportPeriod } from '../docs/report-period.mjs';
 import { projectState, validateSnapshot, verifyCommand } from '../server/policy.mjs';
@@ -31,6 +34,101 @@ function visit(state, table = 'a1') {
     {menuId:'castDrink',quantity:1,castIds:[castId]},
   ]})};
 }
+
+test('date range uses dated work, confirmed historical commissions, attendance items and actual payout dates', () => {
+  const previousDate = '2026-10-31';
+  const previousMonth = '2026-10';
+  let state = run(createDemo('closed',now),{type:'open',date:previousDate,openingCash:20_000});
+  state = run(state,rate(3_000,'2026-10-01'));
+  const settings = {pointRate:100,commissionRounding:'floor',commissionUnit:10,
+    statementRules:[{label:'月次手当',kind:'allowance',basis:'fixed',value:800}]};
+  state = run(state,{type:'savePayrollSettings',settings});
+  state.menu.find(({id}) => id === 'champagne').commission = {fixed:3_019,points:2};
+  const {id,state:visited} = visit(state);
+  state = run(visited,{type:'settle',ticketId:id,payments:[{method:'cash',amount:quote(visited,id).remaining}]});
+  state = run(state,{type:'depart',ticketId:id});
+  state = run(state,{type:'close',actualCash:summary(state).expectedCash});
+  state = run(state,payDraft({month:previousMonth,work:[work(90,previousDate),work(120,'2026-10-30')],
+    allowances:[{label:'月次手当の調整',amount:500}],manualAdvance:200}));
+  state = run(state,{type:'requestDailyPay',castId,month:previousMonth,amount:1_000});
+  const [{id:dailyPayId}] = getPayrollDailyPays(state);
+  state = run(state,{type:'reviewDailyPay',dailyPayId,decision:'approve'});
+  state = run(state,{type:'open',date,openingCash:20_000});
+  state = run(state,{type:'payDailyPay',dailyPayId,method:'bank'});
+  state = run(state,{...finalize,month:previousMonth});
+  const frozen = structuredClone(getPayrollDraft(state,previousMonth,castId).snapshot);
+  state = run(state,rate(6_000,'2026-10-01'));
+  state = run(state,rate(3_600,date));
+  state = run(state,{type:'savePayrollSettings',settings:{...settings,pointRate:200}});
+  state.attendances = [{castId,date,status:'approved',minutes:120},
+    {castId,date:'2026-11-15',status:'pending',minutes:120},{castId,date:'2026-11-17',status:'approved',minutes:60}];
+  state.castAttendance = [{castId,date,status:'approved',items:[{label:'出勤手当',kind:'allowance',amount:600},
+    {label:'控除',kind:'deduction',amount:200},{label:'出勤ポイント',kind:'points',amount:1}]}];
+  state = visit(state).state;
+  delete state.closedDays[0].ticketSnapshots;
+  const report = previewPayrollRange(state,{start:previousDate,end:date});
+  const [row] = report.rows;
+  assert.equal(report.rows.length,1);
+  assert.equal(row.castId,castId);
+  assert.equal(row.minutes,210);
+  assert.deepEqual(row.work.map(({date,hourlyRate}) => [date,hourlyRate]),[[previousDate,3000],[date,3600]]);
+  assert.equal(row.hourlyPay,11_700);
+  assert.equal(row.rawCommission,3_319);
+  assert.equal(row.commission,3_310);
+  assert.equal(row.pointPay,500);
+  assert.equal(row.allowanceTotal,600);
+  assert.equal(row.deductionTotal,200);
+  assert.deepEqual(row.advances.map(({paidDate,month}) => [paidDate,month]),[[date,previousMonth]]);
+  assert.equal(row.net,14_910);
+  assert.deepEqual(getPayrollDraft(state,previousMonth,castId).snapshot,frozen);
+  assert.equal(previewPayrollRange(state,{start:previousDate,end:previousDate,castId}).rows[0].advance,0);
+  assert.equal(previewPayrollRange(state,{start:date,end:date,castId}).rows[0].advance,1_000);
+  assert.throws(() => previewPayrollRange(state,{start:'2026-02-29',end:date}),/日付の順/);
+  assert.throws(() => previewPayrollRange(state,{start:date,end:previousDate}),/日付の順/);
+
+  delete state.closedDays[0].commission;
+  const incomplete = previewPayrollRange(state,{start:previousDate,end:date,castId});
+  assert.deepEqual(incomplete.unavailableDates,[previousDate]);
+  assert.equal(incomplete.rows[0].net,null);
+  assert.match(renderPayrollRange(state,{range:{...incomplete,castId},result:incomplete},{escape:String,yen:String}),/歩合の元データが不足/);
+});
+
+test('payroll range surfaces missing rates and the demo includes immediately exportable finalized months', () => {
+  const demo = createPayrollDemo(now);
+  const finals = demo.payroll.records.filter(({status}) => status === 'final');
+  assert.deepEqual(finals.map(({month,castId}) => [month,castId]),[['2026-11','cast2'],['2026-10','cast1']]);
+  assert.equal(validateSnapshot(demo).payroll.records.length,3);
+  const castId = 'cast4';
+  demo.attendances = [{date,castId,status:'approved',minutes:60}];
+  const result = previewPayrollRange(demo,{start:date,end:date,castId});
+  assert.deepEqual(result.rows[0].missingDates,[date]);
+  assert.equal(result.rows[0].net,null);
+});
+
+test('PDF offsets and the Unicode ZIP directory reference each payroll PDF correctly', async () => {
+  const pdf = makeImagePdf([new Blob(['image-one']),new Blob(['image-two'])],16,24);
+  const contents = await pdf.text();
+  assert.match(contents,/\/Type \/Pages \/Count 2/);
+  const xref = Number(contents.match(/startxref\n(\d+)/)[1]);
+  assert.equal(contents.slice(xref,xref + 4),'xref');
+  for (const [index,entry] of [...contents.matchAll(/^(\d{10}) 00000 n /gm)].entries()) {
+    assert.ok(contents.slice(Number(entry[1])).startsWith(`${index + 1} 0 obj\n`));
+  }
+  const name = '支給明細_2026-11_凛.pdf';
+  const zip = await makeStoredZip([{name,blob:pdf}]);
+  const bytes = new Uint8Array(await zip.arrayBuffer());
+  const data = new DataView(bytes.buffer);
+  assert.equal(data.getUint32(0,true),0x04034b50);
+  assert.equal(data.getUint16(6,true),0x0800);
+  const length = data.getUint16(26,true);
+  const index = data.getUint32(bytes.length - 6,true);
+  assert.equal(data.getUint32(index,true),0x02014b50);
+  assert.equal(data.getUint32(index + 42,true),0);
+  const decoder = new TextDecoder();
+  assert.equal(decoder.decode(bytes.slice(30,30 + length)),name);
+  assert.equal(decoder.decode(bytes.slice(index + 46,index + 46 + length)),name);
+  assert.equal(decoder.decode(bytes.slice(30 + length,index)),contents);
+});
 
 test('payroll still displays the rate editor and affected business dates after attendance approval', () => {
   let state = shop();

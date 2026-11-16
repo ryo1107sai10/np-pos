@@ -298,7 +298,7 @@ function tenderBreakdown(current, api, multiple = false) {
   const breakdown = table(api,columns,rows,'lr-tender-table');
   const applied = combinedOnly ? '' : moneyRows([['会計に充当した前受金', current.depositsApplied ?? 0]], api);
   const note = `${multiple ? 'この期間には' : 'この営業日には'}、会計と前受金を合算した受取額が含まれます。`;
-  return panel('支払方法別の入金', `${breakdown}${applied}${combinedOnly ? `<p class="lr-report-note">${note}</p>` : ''}`);
+  return panel('支払方法別の入金', `${breakdown}${applied}<p class="lr-report-note">${combinedOnly ? note : '前受金は、決済加算がある場合は加算を含む受取額で集計します。'}</p>`);
 }
 
 function cashLedgerHistory(current, api) {

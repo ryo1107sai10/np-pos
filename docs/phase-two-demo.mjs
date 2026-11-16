@@ -105,6 +105,13 @@ export function createPayrollDemo(now = Date.now()) {
   step({type:'savePayrollDraft',month,castId,work:[{date,minutes:180}],
     allowances:[{label:'交通費',amount:500}],deductions:[]});
   step({type:'requestDailyPay',castId,month,amount:1000,reason:'サンプルの日払い申請'});
+  const previousDate = new Date(Date.parse(`${month}-01`) - 86_400_000).toISOString().slice(0,10);
+  for (const [id,workDate,minutes,hourlyRate] of [['cast2',date,240,3000],[castId,previousDate,225,3200]]) {
+    const payrollMonth = workDate.slice(0,7);
+    step({type:'savePayrollRate',castId:id,effectiveDate:workDate,hourlyRate});
+    step({type:'savePayrollDraft',month:payrollMonth,castId:id,work:[{date:workDate,minutes}]});
+    step({type:'finalizePayroll',month:payrollMonth,castId:id});
+  }
   step({type:'saveShift',castId,date,startMinute:1200,endMinute:1500,status:'confirmed'});
   step({type:'saveShift',castId:'cast2',date,startMinute:1260,endMinute:1560,status:'requested'});
   return state;

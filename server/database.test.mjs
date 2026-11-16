@@ -8,15 +8,18 @@ import worker from './index.mjs';
 import {
   applyCommand, changeMember, createStore, getStoreOverview, inviteMember, listAudit, listMembers, listStores, migrateState, readState, revokeInvite,
 } from './database.mjs';
+import { changeGroupMember, createStoreGroup, inviteGroupMember, listStoreGroups, renameStoreGroup, revokeGroupInvite, setGroupStore } from './store-groups.mjs';
+import { answerGuideTopic, getGuideAccess } from './guide-assistant.mjs';
 
 const schema = readFileSync(new URL('schema.sql', import.meta.url), 'utf8');
+const groupMigration = readFileSync(new URL('migrations/20261117-store-groups.sql', import.meta.url), 'utf8');
 const owner = { uid: 'owner-1', email: 'owner@example.test' };
 const helper = { uid: 'helper-1', email: 'helper@example.test' };
 const outsider = { uid: 'outsider-1', email: 'outsider@example.test' };
 
-function database() {
+function database(initialSchema = schema) {
   const sqlite = new DatabaseSync(':memory:');
-  sqlite.exec(schema);
+  sqlite.exec(initialSchema);
   function query(sql, parameters) {
     const statement = sqlite.prepare(sql);
     const results = statement.all(...parameters);
@@ -24,6 +27,7 @@ function database() {
     return { results, meta: { changes } };
   }
   return {
+    migrate: (sql) => sqlite.exec(sql),
     prepare(sql) {
       const bind = (...parameters) => ({
         query: () => query(sql, parameters),
@@ -52,6 +56,115 @@ async function store(db, user = owner) {
 
 const command = (db, actor, storeId, expectedRevision, operationId, action) =>
   applyCommand(db, actor, storeId, { expectedRevision, operationId, command: action });
+
+test('optional AI guide scopes access, sends only fixed manual content and enforces an atomic store limit', async () => {
+  const db = database();
+  const tenant = await store(db);
+  const env = {OPENAI_GUIDE_STORE_IDS:tenant,OPENAI_API_KEY:'test-token',OPENAI_GUIDE_MODEL:'test-model'};
+  const access = await getGuideAccess(db,env,owner,tenant);
+  assert.deepEqual(access,{role:'admin',enabled:true});
+  assert.equal((await getGuideAccess(db,{},owner,tenant)).enabled,false);
+  await assert.rejects(getGuideAccess(db,env,outsider,tenant),{code:'store-access'});
+  await assert.rejects(answerGuideTopic(db,env,tenant,access,'user-entered text'),{code:'invalid-guide-topic'});
+  await assert.rejects(answerGuideTopic(db,env,tenant,{role:'staff',enabled:true},'payroll'),{code:'invalid-guide-topic'});
+  const now = Date.parse('2026-11-17T23:59:59+09:00');
+  const requests = [];
+  const send = async (url, request) => {
+    requests.push([url,request]);
+    return Response.json({output:[{type:'message',content:[{type:'output_text',text:'伝票の会計内訳を開きます。'}]}]});
+  };
+  const replies = await Promise.allSettled(Array.from({length:33},()=>answerGuideTopic(db,env,tenant,access,'receipt',{send,now})));
+  assert.equal(replies.filter(({status})=>status === 'fulfilled').length,30);
+  assert.ok(replies.filter(({status})=>status === 'rejected').every(({reason})=>reason.code === 'guide-limit'));
+  assert.equal(requests.length,30);
+  const [url,request] = requests[0];
+  assert.equal(url,'https://api.openai.com/v1/responses');
+  const body = JSON.parse(request.body);
+  assert.equal(body.store,false);
+  assert.match(body.input,/会計・レシート・領収書/);
+  assert.doesNotMatch(request.body,new RegExp(`${tenant}|${owner.uid}|${owner.email}`));
+  const next = await answerGuideTopic(db,env,tenant,access,'receipt',{send,now:now+2000});
+  assert.equal(next.answer,'伝票の会計内訳を開きます。');
+});
+
+test('the group schema applies twice to existing stores without changing their direct access', async () => {
+  const db = database(schema.slice(0,schema.indexOf(groupMigration.trimEnd())));
+  const tenant = await store(db);
+  await db.prepare("INSERT INTO np_invites (id, store_id, email, role, created_at) VALUES (?, ?, ?, 'staff', ?) RETURNING id")
+    .bind('legacy-invite',tenant,helper.email,Date.now()).first();
+  db.migrate(groupMigration);
+  db.migrate(groupMigration);
+  assert.deepEqual(await listStores(db,helper),{stores:[{id:tenant,name:'NP POS テスト店',role:'staff',hasState:false}]});
+  assert.equal((await listStoreGroups(db,owner)).attachable[0].id,tenant);
+});
+
+test('group access is limited to attached stores and obeys direct roles, live revisions and revocation', async () => {
+  const db = database();
+  const main = await store(db);
+  const branch = await store(db);
+  const other = await store(db,outsider);
+  const first = (await createStoreGroup(db,owner,'中央 グループ')).group.id;
+  const second = (await createStoreGroup(db,owner,'別グループ')).group.id;
+  await renameStoreGroup(db,owner,first,'NP グループ');
+  await inviteMember(db,outsider,other,owner.email,'admin');
+  await listStores(db,owner);
+  await assert.rejects(setGroupStore(db,owner,first,other,true),{code:'group-store-unavailable'});
+  await setGroupStore(db,owner,first,main,true);
+  await setGroupStore(db,owner,first,branch,true);
+  await assert.rejects(setGroupStore(db,owner,second,main,true),{code:'group-store-unavailable'});
+  await assert.rejects(setGroupStore(db,helper,first,main,false),{code:'group-forbidden'});
+  await assert.rejects(inviteGroupMember(db,owner,first,helper.email,'admin'),{code:'invalid-role'});
+  await inviteGroupMember(db,owner,first,helper.email.toUpperCase(),'manager');
+  assert.deepEqual(await listStoreGroups(db,outsider),{groups:[],attachable:[{id:other,name:'NP POS テスト店'}]});
+  await assert.rejects(readState(db,helper,main),{code:'store-access'});
+  assert.deepEqual(new Set((await listStores(db,helper)).stores.map(({id}) => id)),new Set([main,branch]));
+  const delegated = (await listStoreGroups(db,helper)).groups[0];
+  assert.equal(delegated.name,'NP グループ');
+  assert.equal(delegated.role,'manager');
+  assert.equal(delegated.members,undefined);
+  assert.equal(delegated.invites,undefined);
+  await assert.rejects(inviteGroupMember(db,helper,first,outsider.email,'staff'),{code:'group-forbidden'});
+  await assert.rejects(renameStoreGroup(db,helper,first,'変更'),{code:'group-forbidden'});
+  await assert.rejects(readState(db,helper,other),{code:'store-access'});
+  await assert.rejects(listMembers(db,helper,main),{code:'forbidden'});
+  await assert.rejects(listAudit(db,helper,main),{code:'forbidden'});
+  await assert.rejects(migrateState(db,helper,main,{operationId:'group-migrate-prohibited',snapshot:createDemo('closed')}),{code:'forbidden'});
+  const initial = await migrateState(db,owner,main,{operationId:'group-initialize-main',snapshot:createDemo('closed')});
+  const opened = await command(db,helper,main,initial.revision,'group-manager-open-main',{type:'open',openingCash:1000});
+  assert.equal(opened.state.day.status,'open');
+  assert.equal((await readState(db,helper,branch)).state.day.status,'closed');
+  const cash = await command(db,helper,main,opened.revision,'group-manager-cash-main',
+    {type:'recordCashMovement',kind:'deposit',amount:500,category:'float',reason:'釣銭補充'});
+  assert.equal((await listAudit(db,owner,main)).events.find(({action}) => action === 'recordCashMovement')?.actor.id,helper.uid);
+  await inviteMember(db,owner,branch,helper.email,'cast');
+  assert.equal((await listStores(db,helper)).stores.find(({id}) => id === branch).role,'cast');
+  assert.equal((await readState(db,helper,branch)).role,'cast');
+  await changeGroupMember(db,owner,first,helper.uid,'staff');
+  assert.equal((await readState(db,helper,main,cash.revision)).role,'staff');
+  await assert.rejects(command(db,helper,main,cash.revision,'group-staff-close-main',{type:'close'}),{code:'forbidden'});
+  await setGroupStore(db,owner,first,main,false);
+  await assert.rejects(readState(db,helper,main),{code:'store-access'});
+  assert.equal((await readState(db,owner,main)).state.day.status,'open');
+  await changeGroupMember(db,owner,first,helper.uid);
+  assert.deepEqual((await listStoreGroups(db,helper)).groups,[]);
+  assert.equal((await readState(db,helper,branch)).role,'cast');
+});
+
+test('revoking group invitations prevents their later acceptance and groups require API authentication', async () => {
+  const db = database();
+  const id = (await createStoreGroup(db,owner,'テスト')).group.id;
+  const {invite} = await inviteGroupMember(db,owner,id,helper.email,'staff');
+  await revokeGroupInvite(db,owner,id,invite.id);
+  assert.deepEqual(await listStoreGroups(db,helper),{groups:[],attachable:[]});
+  const env = {FIREBASE_PROJECT_ID:'test-project',DB:db};
+  const denied = await worker.fetch(new Request('https://api.test/api/groups'),env);
+  assert.equal(denied.status,401);
+  const preflight = await worker.fetch(new Request('https://api.test/api/groups/test/stores/store',{
+    method:'OPTIONS',headers:{Origin:'https://ryo1107sai10.github.io','Access-Control-Request-Method':'PUT'},
+  }),env);
+  assert.equal(preflight.status,204);
+  assert.match(preflight.headers.get('access-control-allow-methods'),/\bPUT\b/);
+});
 
 test('store membership isolates accounts and only a verified matching invite gets claimed', async () => {
   const db = database();

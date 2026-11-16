@@ -336,6 +336,44 @@ test('settled customer correction keeps the closed-day copy and reevaluates firs
   assert.deepEqual(corrected.tickets, state.tickets);
 });
 
+test('settled companions can be added and removed without changing a closed sale', () => {
+  let state = register(register(opened(),{name:'代表'}),{name:'同席者'});
+  const [primary,companion] = state.customers;
+  state = seat(state,{customerId:primary.id,guests:2});
+  const {id:ticketId} = state.tickets[0];
+  const action = {type:'correctSettledTicketCompanion',ticketId,primaryCustomerId:primary.id,
+    customerId:companion.id,mode:'add',reason:'同席を確認'};
+  for (const role of ['manager','staff','cast']) assert.throws(()=>verifyCommand(role,action,state),{code:'forbidden'});
+  assert.doesNotThrow(()=>verifyCommand('admin',action,state));
+  assert.throws(()=>run(state,action),/会計済み/);
+  state = departPaid(state,ticketId);
+  state = run(state,{type:'close',actualCash:summary(state).expectedCash});
+  const original = state.tickets[0];
+  assert.throws(()=>run(state,action,manager),/店舗管理者/);
+  assert.throws(()=>run(state,{...action,reason:' '}),/訂正理由/);
+  assert.throws(()=>run(state,{...action,primaryCustomerId:'other'}),/代表者/);
+  state = run(state,action);
+  assert.deepEqual(state.tickets[0],{...original,companionCustomerIds:[companion.id]});
+  assert.deepEqual(state.closedDays[0].ticketSnapshots[0].companionCustomerIds,[companion.id]);
+  assert.equal(getCustomerDetail(state,companion.id).visits[0].companion,true);
+  assert.equal(getCustomerDetail(state,companion.id).totalSales,0);
+  assert.equal(findCustomer(state,companion.id).firstVisitDate,'2026-11-16');
+  const tomorrow = now + 86_400_000;
+  state = run(state,{type:'open',date:'2026-11-17',openingCash:20000},admin,tomorrow);
+  state = seat(state,{customerId:companion.id},admin,tomorrow);
+  state = run(state,{...action,mode:'remove',reason:'予約名簿で訂正'},admin,tomorrow);
+  const entry = findSettledCustomerTicket(state,ticketId);
+  assert.deepEqual(entry.ticket.companionCustomerIds,[]);
+  assert.deepEqual(entry.ticket.settlement,original.settlement);
+  assert.deepEqual(entry.ticket.payments,original.payments);
+  assert.equal(findCustomer(state,companion.id).firstVisitDate,'2026-11-17');
+  assert.deepEqual(state.auditLog[0].before,{companionCustomerIds:[companion.id]});
+  assert.deepEqual(state.auditLog[0].after,{companionCustomerIds:[]});
+  assert.equal(state.auditLog[0].businessDate,'2026-11-16');
+  assert.equal(state.auditLog[0].reason,'予約名簿で訂正');
+  assert.doesNotThrow(()=>validateSnapshot(state));
+});
+
 test('the arrival picker displays candidates only when searched and keeps the chosen customer separate', () => {
   const state = register(opened(), { name: '山本 花子', kana: 'ヤマモト ハナコ', phone: '090-1111-2222' });
   const [{id}] = state.customers;

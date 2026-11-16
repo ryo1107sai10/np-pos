@@ -104,10 +104,19 @@ function payslip(pay,api,isFinal) {
   const {escape,yen} = api;
   const rows = [['時給分',pay.hourlyPay],['確定歩合',pay.commission],['ポイント換金',pay.pointPay],
     ['手当',pay.allowanceTotal],['控除',-pay.deductionTotal],['日払い済み',-pay.advance]];
-  return `<details class="cast-payslip"${isFinal ? '' : ' open'}><summary>${escape(pay.month)} ${isFinal ? '確定明細' : '試算'} <strong>${yen(pay.net)}</strong></summary>
+  return `<details class="cast-payslip"${isFinal ? ` id="cast-payslip-${escape(pay.month)}"` : ' open'}><summary>${escape(pay.month)} ${isFinal ? '確定明細' : '試算'} <strong>${yen(pay.net)}</strong></summary>
     <dl class="lr-money-list">${rows.map(([label,amount])=>`<div><dt>${label}</dt><dd>${yen(amount)}</dd></div>`).join('')}</dl>
     <p class="field-help">実働時間 ${duration(pay.minutes)}</p>
     ${isFinal ? `<div class="ops-actions">${button('明細を印刷・PDF保存','cast-payslip-print',api,'printer',{id:escape(pay.month)})}</div>` : ''}</details>`;
+}
+
+function payrollNotices(payroll,seenPayrollMonths,api) {
+  const unseen = payroll.finals.filter(({month})=>!seenPayrollMonths.has(month));
+  if (!unseen.length) return '';
+  return panel(`給与のお知らせ <span class="lr-badge">${unseen.length}件</span>`,
+    `<ul class="cast-self-list" aria-live="polite">${unseen.map(({month,finalizedAt})=>`<li>
+      <div><strong>${api.escape(month)} の給与が確定しました</strong><small>${api.escape(displayTime(finalizedAt))}</small></div>
+      ${button('明細を確認','cast-payroll-notice',api,'ticket',{id:api.escape(month)})}</li>`).join('')}</ul>`);
 }
 
 function castPerformance(performance,api) {
@@ -127,7 +136,7 @@ function castPerformance(performance,api) {
     ${incomplete ? '<p class="field-help">一部の過去伝票で内訳がなく、指名・ドリンクは明細を確認できた分を表示しています。</p>' : ''}`);
 }
 
-export function renderCastWorkspace(model,api) {
+export function renderCastWorkspace(model,api,{seenPayrollMonths = new Set()} = {}) {
   if (!model) return '<p class="notice">店舗管理者に、キャスト登録とアカウントのひもづけを確認してください。</p>';
   const {escape,yen,icon} = api;
   const {cast,date,shifts,attendances,openClock,dailyPays,payroll,dailyPayLimit,performance} = model;
@@ -146,6 +155,7 @@ export function renderCastWorkspace(model,api) {
     <section class="lr-panel payroll-total"><div><span class="lr-badge">${escape(date)}</span><h2>${escape(cast.name)}</h2>
       <p>${openClock ? `出勤 ${escape(displayTime(openClock.clockInAt))}` : '出勤前'}</p></div>
       ${button(openClock ? '退勤を打刻' : '出勤を打刻',openClock ? 'cast-clock-out' : 'cast-clock-in',{icon},'clock',{tone:'btn-primary'})}</section>
+    ${payrollNotices(payroll,seenPayrollMonths,api)}
     ${castPerformance(performance,api)}
     <div class="lr-split">${panel('シフト',`<div class="ops-actions">${button('勤務希望を送る','cast-request-shift',api,'calendar')}</div>${schedule}`)}
     ${panel('日払い',`${locked ? '' : `<div class="ops-actions">${button('日払いを申請','cast-request-pay',api,'wallet')}</div>`}

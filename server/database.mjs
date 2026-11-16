@@ -2,29 +2,12 @@ import { apply, createDemo } from '../docs/engine.mjs';
 import { getNextAutoExtensionAt } from '../docs/auto-extension.mjs';
 import { getMonthlyReportSales, getReportDay } from '../docs/report-period.mjs';
 import { ApiError, canOperate, projectState, requireCondition, roles, validateSnapshot, verifyCommand } from './policy.mjs';
+import { emailAddress, prepared, readRows, resultRow } from './db-queries.mjs';
+import { groupInviteAcceptance } from './store-groups.mjs';
 
 const chunkLength = 200_000;
 const maxSnapshotBytes = 7 * 1024 * 1024;
 const textEncoder = new TextEncoder();
-
-function prepared(db, sql, ...args) {
-  return db.prepare(sql).bind(...args);
-}
-
-async function readRows(db, sql, ...args) {
-  return (await prepared(db, sql, ...args).all()).results ?? [];
-}
-
-function resultRow(db, sql, ...args) {
-  return prepared(db, sql, ...args).first();
-}
-
-function emailAddress(value) {
-  const email = typeof value === 'string' ? value.trim().toLowerCase() : '';
-  requireCondition(email.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email),
-    400, 'invalid-email', 'メールアドレスを確認してください。');
-  return email;
-}
 
 function storeResponse(row) {
   return { id: row.id, name: row.name, role: row.role, hasState: row.revision > 0 };
@@ -49,9 +32,10 @@ export async function listStores(db, actor) {
     prepared(db, `DELETE FROM np_invites
       WHERE email = ? AND EXISTS (SELECT 1 FROM np_members m
         WHERE m.store_id = np_invites.store_id AND m.uid = ? AND m.email = ?)`, actor.email, actor.uid, actor.email),
+    ...groupInviteAcceptance(db, actor),
   ]);
   const rows = await readRows(db, `SELECT s.id, s.name, s.revision, m.role
-    FROM np_members m JOIN np_stores s ON s.id = m.store_id WHERE m.uid = ?
+    FROM np_store_access m JOIN np_stores s ON s.id = m.store_id WHERE m.uid = ?
     ORDER BY s.created_at, s.id`, actor.uid);
   return { stores: rows.map(storeResponse) };
 }
@@ -92,7 +76,7 @@ export async function createStore(db, actor, name) {
 
 function findMembership(db, actor, storeId) {
   return resultRow(db, `SELECT s.id, s.owner_uid, s.revision, m.role FROM np_stores s
-    INNER JOIN np_members m ON m.store_id = s.id
+    INNER JOIN np_store_access m ON m.store_id = s.id
     WHERE s.id = ? AND m.uid = ?`, storeId, actor.uid);
 }
 
@@ -166,7 +150,7 @@ export async function revokeInvite(db, actor, storeId, inviteId) {
 
 async function snapshot(db, actor, storeId, since = null) {
   const rows = await readRows(db, `SELECT s.revision, m.role, c.position, c.payload FROM np_stores s
-    JOIN np_members m ON m.store_id = s.id AND m.uid = ?
+    JOIN np_store_access m ON m.store_id = s.id AND m.uid = ?
     LEFT JOIN np_state_chunks c ON c.store_id = s.id AND m.role IN ('admin','manager','staff','cast')
       AND (m.role = 'cast' OR ? IS NULL OR s.revision <> ?)
     WHERE s.id = ? ORDER BY c.position`, actor.uid, since, since, storeId);
@@ -218,7 +202,7 @@ export async function listAudit(db, actor, storeId, { before = null, limit = 50,
     400, 'invalid-audit-limit', '監査ログの表示件数を確認してください。');
   requireCondition(ticketId === null || typeof ticketId === 'string' && /^[a-zA-Z0-9_.:-]{1,128}$/.test(ticketId),
     400,'invalid-audit-target','伝票の操作履歴を確認してください。');
-  const rows = await readRows(db, `SELECT m.role, e.revision, e.payload FROM np_members m
+  const rows = await readRows(db, `SELECT m.role, e.revision, e.payload FROM np_store_access m
     LEFT JOIN np_audit_events e ON e.store_id = m.store_id AND m.role = 'admin'
       AND (? IS NULL OR e.revision < ?)
       AND (? IS NULL OR (json_extract(e.payload,'$.target.kind') = 'ticket' AND json_extract(e.payload,'$.target.id') = ?))
@@ -394,7 +378,7 @@ async function saveOperation(db, actor, storeId, command, observed, observedAt) 
   const conditionArgs = [storeId, operationId, actor.uid, revision, expectedRevision];
   const statements = [
     prepared(db, `INSERT INTO np_operations (store_id, operation_id, actor_uid, operation, fingerprint, revision, recorded_at)
-      SELECT s.id, ?, m.uid, ?, ?, ?, ? FROM np_stores s JOIN np_members m ON m.store_id = s.id
+      SELECT s.id, ?, m.uid, ?, ?, ?, ? FROM np_stores s JOIN np_store_access m ON m.store_id = s.id
       WHERE s.id = ? AND s.revision = ? AND m.uid = ? AND m.role = ?
       AND (? IS NULL OR EXISTS (SELECT 1 FROM np_members c WHERE c.store_id = s.id AND c.uid = ? AND c.role = 'cast'))
       ON CONFLICT DO NOTHING`,
