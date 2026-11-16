@@ -19,10 +19,18 @@
 .auto-extension-warnings ul {
   list-style: none;
   display: grid;
-  grid-template-columns: repeat(auto-fit,minmax(min(100%,15rem),1fr));
-  gap: 6px;
+  grid-template-columns: repeat(auto-fit,minmax(min(100%,21rem),1fr));
+  gap: 8px;
   margin: 8px 0 0;
   padding: 0;
+}
+
+.auto-extension-warning-card {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid #ecd9bd;
+  border-radius: 10px;
+  background: #fffefa;
 }
 
 .auto-extension-warning {
@@ -32,20 +40,63 @@
   gap: 10px;
   width: 100%;
   min-height: 44px;
-  padding: 6px 9px;
-  border: 1px solid #ecd9bd;
-  border-radius: 9px;
-  background: #fffefa;
+  padding: 6px 10px;
+  border: 0;
+  background: transparent;
   color: inherit;
   cursor: pointer;
   font-size: 13px;
   text-align: start;
 }
 
-.auto-extension-warning:hover { border-color: #bd8a4b; }
+.auto-extension-warning:hover { background: #fff7e9; }
 .auto-extension-warning:focus-visible,
 .table-auto-extension-opener:focus-visible { outline: 2px solid #7251b4; outline-offset: 2px; }
+.auto-extension-warning:focus-visible { outline-offset: -3px; }
 .auto-extension-warning strong { min-width: 0; overflow-wrap: anywhere; }
+
+.auto-extension-warning-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 0 8px 8px;
+}
+
+.auto-extension-warning-actions .btn {
+  min-height: 44px;
+  max-width: 100%;
+  padding: 6px 9px;
+  border-radius: 8px;
+  white-space: normal;
+}
+
+.auto-extension-warning-actions .btn .icon { flex: none; }
+.auto-extension-warning-pause.btn { border-color: #ead8bc; background: #fffaf0; color: #71440d; }
+
+.auto-extension-checkout-note {
+  width: 100%;
+  margin: 0;
+  font-size: 11px;
+  text-align: end;
+}
+
+.auto-extension-visit-paused {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+  padding: 7px 8px;
+  border: 1px solid #dedfe8;
+  border-radius: 8px;
+  background: #f2f3f7;
+  color: #4d5770;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.auto-extension-visit-paused .icon { flex: none; }
 
 .auto-extension-countdown {
   display: inline-flex;
@@ -122,6 +173,7 @@
 
 @media (max-width: 610px) {
   .auto-extension-warnings { margin-bottom: 12px; padding: 8px 10px; }
+  .auto-extension-warning-actions .btn { flex: 1 1 auto; }
 }
 
 .auto-extension-detail-warning {

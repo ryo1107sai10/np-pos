@@ -1,5 +1,5 @@
 import { exportStoreConfiguration, parseStoreConfiguration, quote, summary } from '../docs/engine.mjs';
-import { isValidAutoExtensionSettings } from '../docs/auto-extension.mjs';
+import { isAutoExtensionPauseSource, isValidAutoExtensionSettings, isValidVisitAutoExtensionPause } from '../docs/auto-extension.mjs';
 import { normalizeCardFeeSettings } from '../docs/card-fee.mjs';
 import { getMonthlyReportSales } from '../docs/report-period.mjs';
 import { isAssignedCustomer } from '../docs/customers.mjs';
@@ -8,7 +8,7 @@ import { isValidPrintDocument, normalizePrintSettings } from '../docs/print-doma
 
 export const roles = new Set(['admin', 'manager', 'staff', 'cast', 'trainee']);
 const staffCommands = ['seat', 'move', 'order', 'extend', 'deposit', 'settle', 'depart', 'serve', 'issuePrintDocument',
-  'syncAutoExtensions', 'setTableAutoExtension'];
+  'syncAutoExtensions', 'setTableAutoExtension', 'pauseVisitAutoExtension'];
 const managerCommands = [...staffCommands, 'open', 'close', 'discount', 'stockAdjust', 'cancelDeposit', 'cancelLine', 'void',
   'saveCustomer', 'recoverReceivable', 'recordCashMovement'];
 const roleCommands = {
@@ -59,6 +59,11 @@ export function verifyCommand(role, command) {
     requireCondition(typeof command.tableId === 'string' && command.tableId.length > 0 && command.tableId.length <= 100
       && command.tableId.trim() === command.tableId && typeof command.enabled === 'boolean',
     400, 'invalid-command', '卓と自動延長の設定を確認してください。');
+  }
+  if (command.type === 'pauseVisitAutoExtension') {
+    requireCondition(typeof command.ticketId === 'string' && command.ticketId.length > 0 && command.ticketId.length <= 100
+      && command.ticketId.trim() === command.ticketId && isAutoExtensionPauseSource(command.source),
+    400, 'invalid-command', '伝票と自動延長の停止方法を確認してください。');
   }
   if (command.type === 'settle') {
     requireCondition(Array.isArray(command.payments) && command.payments.length <= 10 && command.payments.every(isRecord),
@@ -221,6 +226,7 @@ function validTicket(ticket) {
   return ticketStatuses.has(ticket.status) && Array.isArray(ticket.tableIds)
     && (ticket.settlementRevision === undefined || validYen(ticket.settlementRevision))
     && (ticket.autoExtensionResumedAt === undefined || validYen(ticket.autoExtensionResumedAt))
+    && isValidVisitAutoExtensionPause(ticket)
     && uniqueRecords(ticket.lines) && ticket.lines.every((line) =>
       typeof line.name === 'string' && typeof line.menuId === 'string'
       && Number.isInteger(line.quantity) && line.quantity > 0

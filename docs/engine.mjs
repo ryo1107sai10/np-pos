@@ -6,7 +6,7 @@ import { getCustomerReceivableBalance, getReceivableBalance, getReceivableRecove
   receivableCollectionMethods } from './receivables.mjs';
 import { createCashMovement, getCashMovements, getDailyRecoveryRows, totalCashMovements } from './cash-ledger.mjs';
 import { applyPrintCommand } from './print-domain.mjs';
-import { getLinkedTablesAutoExtensionEnabled, saveAutoExtensionSettings, setTableAutoExtension,
+import { getLinkedTablesAutoExtensionEnabled, pauseVisitAutoExtension, saveAutoExtensionSettings, setTableAutoExtension,
   syncAutomaticExtensions } from './auto-extension.mjs';
 
 const movementScale = 1_000_000;
@@ -901,6 +901,9 @@ function reduce(state, action, now, actor) {
   }
   requireOrderable(ticket);
   switch (action.type) {
+    case 'pauseVisitAutoExtension':
+      pauseVisitAutoExtension(next, ticket, action, now, actor);
+      break;
     case 'move': {
       const tableIds = tableSet(next, action.tableIds, ticket.guests, ticket.id);
       if (!getLinkedTablesAutoExtensionEnabled(next, ticket.tableIds)

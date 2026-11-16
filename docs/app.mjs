@@ -2,9 +2,9 @@ import { apply, businessDate, createDemo, discountReasonCodes, exportStoreConfig
 import { icon } from './icons.mjs';
 import { renderReport } from './reports.mjs';
 import { getAutoExtensionNotices, getAutoExtensionPlans, getAutoExtensionSettings, getAutomaticExtensionPlan,
-  getNextAutoExtensionAt, getTableAutoExtensionEnabled } from './auto-extension.mjs';
+  getNextAutoExtensionAt, getTableAutoExtensionEnabled, isVisitAutoExtensionPaused } from './auto-extension.mjs';
 import { formatAutoExtensionCountdown, renderAutoExtensionBadge, renderAutoExtensionWarnings, renderTableAutoExtensionControl,
-  renderTableAutoExtensionSettings } from './auto-extension-ui.mjs';
+  renderTableAutoExtensionSettings, renderVisitAutoExtensionPaused } from './auto-extension-ui.mjs';
 import { getCardFee, getCardFeeSettings } from './card-fee.mjs';
 import { getMonthlyReportSales, getReportDates, getReportPeriod } from './report-period.mjs';
 import { buildDailyReportCsv } from './report-export.mjs';
@@ -79,6 +79,7 @@ let modal = null;
 let priorFocus = null;
 let lastStatuses = '';
 let lastAutoExtensionNotices = '';
+let pendingAutoNoticeTicket = null;
 const announcedAutoExtensions = new Map();
 let lastMinute = '';
 let saveAvailable = true;
@@ -198,7 +199,9 @@ function permittedAction(action) {
   if (store && ['demo', 'demo-start', 'demo-live', 'demo-cash', 'demo-reports', 'demo-billing', 'demo-role'].includes(action)) return false;
   if (ownerActions.has(action) || action.startsWith('store-editor-') || action.startsWith('layout-editor-')) return role === 'admin';
   if (managerActions.has(action)) return role === 'admin' || role === 'manager';
-  if (action === 'table-auto-extension') return ['admin','manager','staff'].includes(role);
+  if (['table-auto-extension','auto-extension-pause','auto-extension-checkout'].includes(action)) {
+    return ['admin','manager','staff'].includes(role);
+  }
   return true;
 }
 
@@ -302,8 +305,9 @@ function renderTable(table, warning = false) {
   const status = tableStatus(state, table.id);
   const isSelected = table.id === selected;
   const name = escape(table.name);
-  const autoMode = !getTableAutoExtensionEnabled(state,table.id) ? 'off' : warning ? 'soon' : null;
-  const autoLabel = autoMode === 'off' ? ' 自動延長オフ' : autoMode === 'soon' ? ' まもなく自動延長' : '';
+  const paused = ticket?.status === 'open' && isVisitAutoExtensionPaused(ticket);
+  const autoMode = paused ? 'paused' : !getTableAutoExtensionEnabled(state,table.id) ? 'off' : warning ? 'soon' : null;
+  const autoLabel = { paused:' 今回の自動延長は停止中', off:' 自動延長オフ', soon:' まもなく自動延長' }[autoMode] ?? '';
   return `<button type="button" class="seat seat-${status}${isSelected ? ' is-selected' : ''}" data-action="table" data-id="${escape(table.id)}" aria-pressed="${isSelected}" aria-label="${name} ${statuses[status]}${ticket?.tableIds.length > 1 ? ' 複数卓' : ''} 定員${table.capacity}名 ${escape(table.area)}${autoLabel}">
     <div class="seat-top"><span><span class="seat-name" title="${name}">${name}</span><span class="seat-area" title="${escape(table.area)}">${escape(table.area)}${ticket?.tableIds.length > 1 ? ` <span class="seat-linked">· ${ticket.tableIds.length}卓共有</span>` : ''}</span></span>${pill(status)}</div>
     <div class="seat-timer">${icon(ticket ? (status === 'paid' ? 'check' : 'clock') : 'plus',14)}${ticket ? status === 'paid' ? '退店待ち' : `<time data-ends="${ticket.endsAt}">${timer(ticket.endsAt)}</time>` : '来店登録'}${autoMode ? renderAutoExtensionBadge(autoMode,{icon}) : ''}</div>
@@ -340,7 +344,10 @@ function renderFloor(notices, now) {
   const floorContent = areas.length === 0 ? emptyState
     : showingPlan ? planHint + floorLayoutStage(visible, planArea, { renderSeat, escape })
     : `<div class="table-grid">${visible.length ? visible.map(renderSeat).join('') : emptyState}</div>`;
-  return `${!isOpen ? `<div class="notice"><span>${icon('info',17)}開店すると、空席から来店を登録できます。</span></div>` : ''}${renderAutoExtensionWarnings(notices,now,{escape,icon,tableName})}${renderMetrics()}
+  return `${!isOpen ? `<div class="notice"><span>${icon('info',17)}開店すると、空席から来店を登録できます。</span></div>` : ''}${renderAutoExtensionWarnings(notices,now,{
+    escape,icon,tableName, pendingTicketId:pendingAutoNoticeTicket,
+    canCheckout:(id) => !state.tickets.find((ticket) => ticket.id === id)?.discountRequest,
+  })}${renderMetrics()}
     <div class="floor-layout">
       <section class="floor" aria-labelledby="floor-title"><div class="floor-heading">
       <div class="floor-heading-main"><h2 id="floor-title">${icon('grid',17)}${showingPlan ? '店内レイアウト' : '座席一覧'}</h2>${viewSwitch}</div>
@@ -438,6 +445,7 @@ function renderDetail(notices, now) {
     ${ticket.tableIds.length > 1 ? `<div class="detail-links" aria-label="同じ伝票の卓">${ticket.tableIds.map(id=>`<span class="detail-link">${escape(tableName(id))}</span>`).join('')}</div>` : ''}
     ${warning ? `<div class="auto-extension-detail-warning" role="group" aria-label="自動延長まで1分以内">${renderAutoExtensionBadge('soon',{icon})}
       <strong data-auto-extension-deadline="${warning.deadline}">${formatAutoExtensionCountdown(warning.deadline,now)}</strong></div>` : ''}
+    ${!settled && isVisitAutoExtensionPaused(ticket) ? renderVisitAutoExtensionPaused({icon}) : ''}
     ${!settled && selectedTable && permittedAction('table-auto-extension')
       ? renderTableAutoExtensionControl(selectedTable,autoModel,{escape,icon,tableName}) : ''}
     <div class="detail-aux"><h3>注文明細 <small>${lines.length}</small></h3>${settled ? '' : button('卓移動・連結','move',{glyph:'move',id:ticket.id})}</div>
@@ -716,10 +724,10 @@ async function cloudAction(action, target) {
   }
 }
 
-function toast(message) {
+function toast(message, {error = false} = {}) {
   const item = document.createElement('div');
-  item.className = 'toast';
-  item.innerHTML = `${icon('check',17)}<span>${escape(message)}</span>`;
+  item.className = error ? 'toast toast-error' : 'toast';
+  item.innerHTML = `${icon(error ? 'alert' : 'check',17)}<span>${escape(message)}</span>`;
   notifications.append(item);
   setTimeout(()=>item.remove(), 4300);
 }
@@ -732,61 +740,82 @@ function showError(message) {
   box.scrollIntoView({ block: 'nearest' });
 }
 
-async function commit(command, message, after) {
+async function commit(command, message, after, {fromFloor = false} = {}) {
   if (committing) return;
   committing = true;
   const activeModal = modal;
-  const submit = dialog.querySelector('#submit-dialog');
+  const storeId = cloudState.store?.id;
+  const revision = fromFloor ? cloudState.revision : activeModal?.revision;
+  const floorDate = state.day.date;
+  const role = currentRole();
+  const staysActive = () => fromFloor
+    ? !dialog.open && page === 'floor' && cloudState.store?.id === storeId
+      && currentRole() === role && state.day.date === floorDate
+    : dialog.open && modal === activeModal;
+  const submit = fromFloor ? null : dialog.querySelector('#submit-dialog');
   if (submit) submit.disabled = true;
-  if (cloudState.store) {
-    try {
-      if (activeModal.storeId !== cloudState.store.id) throw new Error('店舗を開き直してから操作してください。');
-      const result = await cloud.submit(command, activeModal.revision);
-      if (!dialog.open || modal !== activeModal) return;
-      if (!result.queued && after) after(result.state ?? state);
+  const finish = (next, queued = false) => {
+    if (!staysActive()) return;
+    if (!fromFloor) {
+      if (!queued) after?.(next);
       dialog.close();
-      render();
-      if (result.queued) toast('送信待ちです。接続が回復すると同期を確認します。');
-      else if (message) toast(message);
-      return result.queued ? null : (result.state ?? state);
-    } catch (error) { if (modal === activeModal) showError(error.message); }
-    finally { committing = false; if (submit?.isConnected) submit.disabled = false; }
-    return;
-  }
-  const update = () => {
-    if (!dialog.open || modal !== activeModal) return;
-    let latest;
-    try { latest = readSavedState(); } catch { /* Storage can be disabled. */ }
-    const freshImport = command.type === 'importStoreConfiguration' && activeModal.fresh;
-    if (modal?.autoExtended) throw new Error('自動延長が反映されました。画面を開き直してご確認ください。');
-    if (modal?.stale || (latest && (freshImport || latest !== JSON.stringify(state)))) {
-      modal.stale = true;
-      pendingStorage = true;
-      throw new Error('別のタブでデータが更新されました。画面を閉じ、最新状態を確認してください。');
     }
-    const now = Date.now();
-    const source = storeImportTarget(command.configuration,freshImport);
-    const reconciled = applyDueLocalExtensions(source,now);
-    if (reconciled !== source) {
-      saveState(reconciled);
-      modal.autoExtended = true;
-      render();
-      throw new Error('自動延長が反映されました。画面を開き直してご確認ください。');
-    }
-    const next = apply(source,command,now,demoActor());
-    saveState(next);
-    if (after) after(next);
-    dialog.close();
     render();
-    if (message) toast(message);
-    if (!saveAvailable) toast('ブラウザーの設定により操作内容を保存できません。');
-    return next;
+    if (fromFloor && !queued) after?.(next);
+    if (queued) toast('送信待ちです。接続が回復すると同期を確認します。');
+    else if (message) toast(message);
+    return queued ? null : next;
   };
   try {
-    if (navigator.locks?.request) return await navigator.locks.request(storageKey, update);
+    if (storeId) {
+      if (!fromFloor && activeModal.storeId !== storeId) throw new Error('店舗を開き直してから操作してください。');
+      const result = await cloud.submit(command,revision);
+      return finish(result.state ?? state,result.queued);
+    }
+    const update = () => {
+      if (!staysActive()) return;
+      let latest;
+      try { latest = readSavedState(); } catch { /* Storage can be disabled. */ }
+      const freshImport = command.type === 'importStoreConfiguration' && activeModal?.fresh;
+      if (activeModal?.autoExtended) throw new Error('自動延長が反映されました。画面を開き直してご確認ください。');
+      if (activeModal?.stale || (latest && (freshImport || latest !== JSON.stringify(state)))) {
+        if (fromFloor) {
+          state = loadState();
+          syncFloorSelection();
+          render();
+          throw new Error('別のタブで伝票が更新されました。ホールの最新状態を確認してください。');
+        }
+        activeModal.stale = true;
+        pendingStorage = true;
+        throw new Error('別のタブでデータが更新されました。画面を閉じ、最新状態を確認してください。');
+      }
+      const now = Date.now();
+      const source = storeImportTarget(command.configuration,freshImport);
+      const reconciled = applyDueLocalExtensions(source,now);
+      if (reconciled !== source) {
+        saveState(reconciled);
+        if (activeModal) activeModal.autoExtended = true;
+        render();
+        throw new Error(fromFloor ? '自動延長が反映されました。最新の伝票をご確認ください。'
+          : '自動延長が反映されました。画面を開き直してご確認ください。');
+      }
+      const next = apply(source,command,now,demoActor());
+      saveState(next);
+      const result = finish(next);
+      if (!saveAvailable) toast('ブラウザーの設定により操作内容を保存できません。');
+      return result;
+    };
+    if (navigator.locks?.request) return await navigator.locks.request(storageKey,update);
     return update();
-  } catch (error) { showError(error.message); }
-  finally { committing = false; if (submit?.isConnected) submit.disabled = false; }
+  } catch (error) {
+    if (staysActive()) {
+      if (fromFloor) toast(error.message,{error:true});
+      else showError(error.message);
+    }
+  } finally {
+    committing = false;
+    if (submit?.isConnected) submit.disabled = false;
+  }
 }
 
 function applyDueLocalExtensions(source, now) {
@@ -1125,7 +1154,7 @@ function paintDialog(layoutFileInput) {
       return;
     }
     case 'settle':
-      present('お会計',`${headline}${totalRows(q,{large:true})}${q.remaining > 0 ? `<p class="form-copy payment-copy">${getCardFeeSettings(state).enabled
+      present('お会計',`${headline}${isVisitAutoExtensionPaused(ticket) ? renderVisitAutoExtensionPaused({icon}) : ''}${totalRows(q,{large:true})}${q.remaining > 0 ? `<p class="form-copy payment-copy">${getCardFeeSettings(state).enabled
         ? '加算前の支払額を入力します。カード端末には表示された決済額を入力してください。'
         : 'カード・QRは、外部端末で受け取った金額を記録します。'}</p><div id="payment-rows">${modal.payments.map(renderPayment).join('')}</div>${button('支払方法を追加','add-payment',{glyph:'plus',tone:'quiet'})}<div id="payment-note" class="result-bar" aria-live="polite"></div><div id="card-fee-preview" class="card-fee-preview" aria-live="polite" hidden></div>${renderCreditOptions(creditCustomer(ticket))}` : `<p class="form-copy payment-copy">前受金で全額を充当しました。会計を確定できます。</p>`}`,'会計を確定');
       if (q.remaining > 0) updatePaymentNote();
@@ -1463,6 +1492,43 @@ function openTicket(id) {
   go('floor');
 }
 
+function openSettlement(ticketId) {
+  openDialog('settle',{ticketId,payments:[{method:'cash',amount:quote(state,ticketId).remaining}]});
+}
+
+async function pauseAutoExtensionFromNotice(ticketId, source) {
+  if (page !== 'floor' || dialog.open || committing || pendingAutoNoticeTicket) return;
+  const ticket = state.tickets.find((entry) => entry.id === ticketId && entry.status === 'open');
+  if (!ticket) return;
+  const checkout = source === 'checkout';
+  if (checkout && ticket.discountRequest) {
+    toast('値引きの承認後に会計できます。',{error:true});
+    return;
+  }
+  pendingAutoNoticeTicket = ticketId;
+  render({preserveFocus:true});
+  try {
+    await commit({type:'pauseVisitAutoExtension',ticketId,source},
+      checkout ? null : '今回の来店の自動延長を止めました。', (next) => {
+        const current = next.tickets.find((entry) => entry.id === ticketId && entry.status === 'open');
+        if (!current) return;
+        if (checkout && !current.discountRequest) {
+          revealTable(current.tableIds[0]);
+          mobileDetails = true;
+          openSettlement(ticketId);
+        } else {
+          const table = [...app.querySelectorAll('[data-action=table]')]
+            .find((entry) => current.tableIds.includes(entry.dataset.id));
+          (table ?? app.querySelector('#workspace'))?.focus({preventScroll:true});
+          if (checkout) toast('値引きの承認後に会計できます。',{error:true});
+        }
+      },{fromFloor:true});
+  } finally {
+    pendingAutoNoticeTicket = null;
+    render({preserveFocus:true});
+  }
+}
+
 function modalFromAction(target) {
   const {action,id} = target.dataset;
   if (['customer-new','customer-import'].includes(action)) openDialog(action);
@@ -1474,7 +1540,7 @@ function modalFromAction(target) {
     if (request) openDialog(action,{ticketId:id,requestId:request.id});
   }
   if (action === 'order') openDialog(action,{ticketId:id,product:target.dataset.product ?? '',category:'よく使う',search:''});
-  if (action === 'settle') openDialog(action,{ticketId:id,payments:[{method:'cash',amount:quote(state,id).remaining}]});
+  if (action === 'settle') openSettlement(id);
   if (action === 'stock-adjust') openDialog(action,{stockId:id});
   if (action === 'cancel-line') openDialog(action,{ticketId:target.dataset.ticket,lineId:id});
 }
@@ -1493,6 +1559,10 @@ function clickAction(target) {
   if (action === 'table-auto-extension') {
     const tableId = id ?? selected ?? state.tables[0]?.id;
     if (state.tables.some((table) => table.id === tableId)) openDialog(action,{autoTableId:tableId});
+    return;
+  }
+  if (action === 'auto-extension-pause' || action === 'auto-extension-checkout') {
+    void pauseAutoExtensionFromNotice(id,action === 'auto-extension-checkout' ? 'checkout' : 'manual');
     return;
   }
   if (action === 'auto-extension-focus') {

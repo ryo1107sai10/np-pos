@@ -645,6 +645,129 @@ test('browser migration validates known table auto-extension overrides and keeps
   assert.deepEqual(migrated.state.tableAutoExtension,{a1:false});
 });
 
+test('a visit pause and checkout pause synchronize without resetting tables or the next visit', async (t) => {
+  const db = database();
+  const tenant = await store(db);
+  await inviteMember(db, owner, tenant, helper.email, 'staff');
+  await inviteMember(db, owner, tenant, outsider.email, 'cast');
+  await Promise.all([listStores(db, helper), listStores(db, outsider)]);
+
+  let now = Date.parse('2026-11-16T20:00:00+09:00');
+  t.mock.method(Date,'now',()=>now);
+  const run = (actor, revision, name, value) => command(db, actor, tenant, revision, `visit-pause-${name}`, value);
+  const seat = (tableIds) => ({type:'seat',tableIds,setId:'set60',guests:1});
+  const pause = (ticketId,source) => ({type:'pauseVisitAutoExtension',ticketId,source});
+
+  await run(owner,0,'opening',{type:'open',openingCash:0});
+  await run(owner,1,'store-on',{type:'saveAutoExtensionSettings',enabled:true,menuId:'extend30'});
+  await run(owner,2,'table-off',{type:'setTableAutoExtension',tableId:'a4',enabled:false});
+  await run(helper,3,'shared-seat',seat(['a1','a2']));
+  await run(helper,4,'checkout-seat',seat(['a3']));
+  const open = await run(helper,5,'regular-seat',seat(['a5']));
+  const [shared, checkout, regular] = open.state.tickets;
+  await assert.rejects(run(outsider,6,'cast-denied',pause(shared.id,'manual')),{code:'forbidden'});
+  await assert.rejects(run(helper,6,'source-invalid',pause(shared.id,'invalid')),{code:'invalid-command'});
+  await assert.rejects(run(helper,6,'ticket-id-invalid',pause('','manual')),{code:'invalid-command'});
+  await assert.rejects(run(helper,6,'ticket-unknown',pause('unknown','manual')),{code:'rejected-command'});
+
+  now = shared.endsAt - 1_000;
+  const sharedPause = await run(helper,6,'shared-off',pause(shared.id,'manual'));
+  assert.equal(sharedPause.state.tickets[0].autoExtensionPausedAt,now);
+  assert.equal(sharedPause.state.tickets[0].autoExtensionPauseSource,'manual');
+  assert.equal((await run(helper,6,'shared-off',pause(shared.id,'manual'))).revision,7);
+  const checkoutPause = await run(owner,7,'checkout-off',pause(checkout.id,'checkout'));
+  assert.equal(checkoutPause.state.tickets[1].autoExtensionPausedAt,now);
+  assert.equal(checkoutPause.state.tickets[1].autoExtensionPauseSource,'checkout');
+  const repeated = await run(owner,8,'shared-repeated',pause(shared.id,'checkout'));
+  assert.equal(repeated.state.tickets[0].autoExtensionPauseSource,'manual');
+
+  now = shared.endsAt + 1_000;
+  const synced = await Promise.all([readState(db, owner, tenant),readState(db, helper, tenant)]);
+  for (const view of synced) {
+    assert.equal(view.revision,10);
+    assert.deepEqual(view.state.tableAutoExtension,{a4:false});
+    assert.equal(view.state.autoExtensionSettings.enabled,true);
+    const paused = (id) => view.state.tickets.find((ticket) => ticket.id === id);
+    assert.deepEqual(paused(shared.id).tableIds,['a1','a2']);
+    assert.equal(paused(shared.id).endsAt,shared.endsAt);
+    assert.equal(paused(checkout.id).endsAt,checkout.endsAt);
+    assert.equal(paused(regular.id).lines.filter(({autoExtension}) => autoExtension).length,1);
+  }
+
+  const payment = (ticket) => ({type:'settle',ticketId:ticket.id,payments:[{method:'cash',amount:quote(open.state,ticket.id).remaining}]});
+  await run(helper,10,'checkout-paid',payment(checkout));
+  await assert.rejects(run(helper,11,'paid-pause-denied',pause(checkout.id,'manual')),{code:'rejected-command'});
+  await run(helper,11,'shared-paid',payment(shared));
+  await run(helper,12,'shared-departed',{type:'depart',ticketId:shared.id});
+  const next = await run(helper,13,'next-shared-visit',seat(['a1','a2']));
+  const nextVisit = next.state.tickets.at(-1);
+  assert.equal(nextVisit.autoExtensionPausedAt,undefined);
+  assert.equal(nextVisit.autoExtensionPauseSource,undefined);
+  now = nextVisit.endsAt;
+  const extended = await readState(db, helper, tenant);
+  assert.equal(extended.state.tickets.at(-1).lines.filter(({autoExtension}) => autoExtension).length,1);
+
+  const pauses = (await listAudit(db, owner, tenant)).events.filter(({action}) => action === 'pauseVisitAutoExtension');
+  assert.equal(pauses.length,2);
+  assert.equal(pauses[0].target.id,checkout.id);
+  assert.deepEqual(pauses[0].before,{paused:false});
+  assert.deepEqual(pauses[0].after,{paused:true,source:'checkout'});
+  assert.match(pauses[0].reason,/会計/);
+  assert.equal(pauses[0].actor.id,owner.uid);
+  assert.equal(pauses[1].target.id,shared.id);
+  assert.deepEqual(pauses[1].after,{paused:true,source:'manual'});
+  assert.equal(pauses[1].actor.id,helper.uid);
+});
+
+test('a pause at the exact deadline retains the already accrued extension', async (t) => {
+  const db = database();
+  const tenant = await store(db);
+  let now = Date.parse('2026-11-16T20:00:00+09:00');
+  t.mock.method(Date,'now',()=>now);
+  await command(db, owner, tenant, 0, 'boundary-visit-opening', {type:'open',openingCash:0});
+  await command(db, owner, tenant, 1, 'boundary-visit-start-auto', {type:'saveAutoExtensionSettings',enabled:true,menuId:'extend30'});
+  const opening = await command(db, owner, tenant, 2, 'boundary-visit-seated', {type:'seat',tableIds:['a1'],setId:'set60',guests:1});
+  const [ticket] = opening.state.tickets;
+  now = ticket.endsAt;
+  const pause = {type:'pauseVisitAutoExtension',ticketId:ticket.id,source:'checkout'};
+  await assert.rejects(command(db,owner,tenant,3,'boundary-visit-pause-at',pause),{code:'auto-extension-updated',status:409});
+  const refreshed = await readState(db, owner, tenant);
+  assert.equal(refreshed.revision,4);
+  assert.equal(refreshed.state.tickets[0].autoExtensionPausedAt,undefined);
+  const extendedAmount = quote(refreshed.state,ticket.id).remaining;
+  assert(extendedAmount > quote(opening.state,ticket.id).remaining);
+  const paused = await command(db,owner,tenant,4,'boundary-visit-pause-later',pause);
+  assert.equal(paused.state.tickets[0].autoExtensionPausedAt,now);
+
+  now = paused.state.tickets[0].endsAt + 1;
+  const paid = await command(db,owner,tenant,5,'boundary-visit-paid',{
+    type:'settle',ticketId:ticket.id,payments:[{method:'cash',amount:extendedAmount}],
+  });
+  assert.equal(paid.state.tickets[0].settlement.total,extendedAmount);
+  assert.equal(paid.state.tickets[0].lines.filter(({autoExtension})=>autoExtension).length,1);
+});
+
+test('browser migration validates a visit pause timestamp and source as a pair', async () => {
+  const db = database();
+  const tenant = await store(db);
+  const now = Date.parse('2026-11-16T20:00:00+09:00');
+  const original = createDemo('live',now);
+  for (const pause of [
+    {autoExtensionPausedAt:now}, {autoExtensionPauseSource:'manual'},
+    {autoExtensionPausedAt:'0',autoExtensionPauseSource:'manual'},
+    {autoExtensionPausedAt:now,autoExtensionPauseSource:'invalid'},
+  ]) {
+    const snapshot = structuredClone(original);
+    Object.assign(snapshot.tickets[0],pause);
+    await assert.rejects(migrateState(db,owner,tenant,{operationId:'invalid-visit-pause',snapshot}),{code:'invalid-snapshot'});
+  }
+  const snapshot = structuredClone(original);
+  Object.assign(snapshot.tickets[0],{autoExtensionPausedAt:now,autoExtensionPauseSource:'manual'});
+  const migrated = await migrateState(db,owner,tenant,{operationId:'valid-visit-pause',snapshot});
+  assert.equal(migrated.state.tickets[0].autoExtensionPausedAt,now);
+  assert.equal(migrated.state.tickets[0].autoExtensionPauseSource,'manual');
+});
+
 test('cloud honors card surcharge settings only for owners and freezes exact card receipts', async () => {
   const db = database();
   const tenant = await store(db);

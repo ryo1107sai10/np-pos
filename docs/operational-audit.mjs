@@ -1,4 +1,4 @@
-import { getAutoExtensionSettings, getTableAutoExtensionEnabled } from './auto-extension.mjs';
+import { getAutoExtensionSettings, getTableAutoExtensionEnabled, isVisitAutoExtensionPaused } from './auto-extension.mjs';
 import { getCardFeeSettings } from './card-fee.mjs';
 import { getStoreSettings } from './store-settings.mjs';
 import { getReceivableBalance } from './receivables.mjs';
@@ -224,6 +224,14 @@ export function buildOperationAudit(before, after, action, at, actor) {
       const table = after.tables.find(({id}) => id === action.tableId);
       details = { target:target('table',table.id,table.name), before:{enabled:previous}, after:{enabled:current},
         reason:'卓の自動延長設定を更新' };
+    }
+  } else if (action.type === 'pauseVisitAutoExtension') {
+    const previous = before.tickets.find(({id}) => id === action.ticketId);
+    const current = after.tickets.find(({id}) => id === action.ticketId);
+    if (!isVisitAutoExtensionPaused(previous) && isVisitAutoExtensionPaused(current)) {
+      const source = current.autoExtensionPauseSource;
+      details = { target:target('ticket',current.id,`伝票 No. ${current.number}`), before:{paused:false}, after:{paused:true,source},
+        reason:source === 'checkout' ? '会計へ進むため、今回の来店の自動延長を停止' : '今回の来店の自動延長を停止' };
     }
   } else if (action.type === 'syncAutoExtensions') {
     const previousById = new Map(before.tickets.map((ticket) => [ticket.id,ticket]));

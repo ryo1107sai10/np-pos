@@ -97,3 +97,6 @@
 .card-fee-preview dl { display: grid; gap: 5px; margin: 0; }
 .card-fee-preview dl > div { display: flex; justify-content: space-between; gap: 8px; }
 .card-fee-preview dd { margin: 0; white-space: nowrap; font-weight: 700; font-variant-numeric: tabular-nums; }
+
+.toast.toast-error { color: #852c40; background: #fff1f4; border-color: #efcbd4; }
+.toast.toast-error .icon { color: #a1364d; }

@@ -1,10 +1,25 @@
 const minuteMs = 60_000;
 const maxIntervalsPerSync = 100;
 const operatorRoles = new Set(['admin', 'manager', 'staff']);
+const pauseSources = new Set(['manual', 'checkout']);
 const defaults = Object.freeze({ enabled: false, menuId: '', effectiveAt: null });
 
 function isTimestamp(value) {
   return Number.isSafeInteger(value) && value >= 0;
+}
+
+export function isAutoExtensionPauseSource(source) {
+  return pauseSources.has(source);
+}
+
+export function isVisitAutoExtensionPaused(ticket) {
+  return isTimestamp(ticket?.autoExtensionPausedAt);
+}
+
+export function isValidVisitAutoExtensionPause(ticket) {
+  const {autoExtensionPausedAt, autoExtensionPauseSource} = ticket;
+  return (autoExtensionPausedAt === undefined && autoExtensionPauseSource === undefined)
+    || (isVisitAutoExtensionPaused(ticket) && isAutoExtensionPauseSource(autoExtensionPauseSource));
 }
 
 function isPlanId(value) {
@@ -60,6 +75,7 @@ function automaticSchedule(state) {
 
 function dueAt(state, ticket, {effectiveAt, interval}) {
   if (ticket.status !== 'open' || !isTimestamp(ticket.endsAt)
+    || isVisitAutoExtensionPaused(ticket)
     || !getLinkedTablesAutoExtensionEnabled(state, ticket.tableIds)) return null;
   const resumedAt = isTimestamp(ticket.autoExtensionResumedAt) ? ticket.autoExtensionResumedAt : 0;
   const activeSince = Math.max(effectiveAt, resumedAt);
@@ -122,6 +138,18 @@ export function setTableAutoExtension(state, {tableId, enabled}, now, actor) {
     if (ticket.status === 'open' && ticket.tableIds?.includes(tableId)
       && getLinkedTablesAutoExtensionEnabled(state, ticket.tableIds)) ticket.autoExtensionResumedAt = now;
   }
+}
+
+export function pauseVisitAutoExtension(state, ticket, {source}, now, actor) {
+  if (!operatorRoles.has(actor.role)) throw new Error('来店中の自動延長を止める権限がありません。');
+  if (!isAutoExtensionPauseSource(source)) throw new Error('自動延長を止める操作を確認してください。');
+  if (isVisitAutoExtensionPaused(ticket)) return;
+  const deadline = getTicketAutoExtensionAt(state, ticket);
+  if (deadline !== null && deadline <= now) {
+    throw new Error('自動延長の予定時刻を過ぎました。最新の伝票を確認してください。');
+  }
+  ticket.autoExtensionPausedAt = now;
+  ticket.autoExtensionPauseSource = source;
 }
 
 export function syncAutomaticExtensions(state, now, actor, addExtension) {

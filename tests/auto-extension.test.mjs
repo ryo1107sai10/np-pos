@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { apply, createDemo, getLayoutAreas, getLayoutTables, quote, summary } from '../docs/engine.mjs';
 import { getAutoExtensionNotices, getAutoExtensionPlans, getAutoExtensionSettings, getNextAutoExtensionAt,
-  getTableAutoExtensionEnabled, getTicketAutoExtensionAt, isValidAutoExtensionSettings } from '../docs/auto-extension.mjs';
+  getTableAutoExtensionEnabled, getTicketAutoExtensionAt, isValidAutoExtensionSettings,
+  isValidVisitAutoExtensionPause, isVisitAutoExtensionPaused } from '../docs/auto-extension.mjs';
 
 const minute = 60_000;
 const base = Date.parse('2026-11-16T19:00:00+09:00');
@@ -19,6 +20,8 @@ const sync = (state,at) => run(state,{type:'syncAutoExtensions',now:base + 600 *
 const automaticLines = (state,index = 0) => state.tickets[index].lines.filter(({autoExtension}) => autoExtension);
 const tableExtension = (state,tableId,enabled,at = base,actor = staff) =>
   run(state,{type:'setTableAutoExtension',tableId,enabled},at,actor);
+const pauseVisit = (state,ticketId,source,at,actor = staff) =>
+  run(state,{type:'pauseVisitAutoExtension',ticketId,source,now:0},at,actor);
 
 test('default off, only the owner can change a valid auto extension plan, and no timer comes from the action payload', () => {
   const state = seat(open());
@@ -207,4 +210,70 @@ test('switching from an off table to an on table restarts overdue grace without 
   const tables = getLayoutTables(state).filter(({id}) => id !== 'a2');
   const updated = run(state,{type:'saveLayout',areas:getLayoutAreas(state),tables},resume + minute);
   assert.equal(updated.tableAutoExtension,undefined);
+});
+
+test('pausing a linked visit removes its notice, isolates other visits and leaves the table settings available for next time', () => {
+  let state = settings(open(),true);
+  state = run(state,{type:'seat',tableIds:['a1','a2'],guests:5,setId:'set60'});
+  state = seat(state,'a3');
+  const [linked,other] = state.tickets;
+  const noticeAt = base + 59 * minute;
+  assert.deepEqual(getAutoExtensionNotices(state,noticeAt).map(({ticketId}) => ticketId),[linked.id,other.id]);
+  state = pauseVisit(state,linked.id,'manual',noticeAt);
+  assert.equal(state.tickets[0].autoExtensionPausedAt,noticeAt);
+  assert.equal(state.tickets[0].autoExtensionPauseSource,'manual');
+  assert.equal(isVisitAutoExtensionPaused(state.tickets[0]),true);
+  assert.equal(isValidVisitAutoExtensionPause(state.tickets[0]),true);
+  assert.equal(state.tableAutoExtension,undefined);
+  assert.equal(getAutoExtensionSettings(state).enabled,true);
+  assert.equal(getTicketAutoExtensionAt(state,state.tickets[0]),null);
+  assert.deepEqual(getAutoExtensionNotices(state,noticeAt).map(({ticketId}) => ticketId),[other.id]);
+
+  state = sync(state,base + 61 * minute);
+  assert.equal(automaticLines(state).length,0);
+  assert.equal(automaticLines(state,1).length,1);
+  const ticketId = linked.id;
+  state = run(state,{type:'settle',ticketId,payments:[{method:'cash',amount:quote(state,ticketId).total}]},base + 62 * minute);
+  state = run(state,{type:'depart',ticketId},base + 63 * minute);
+  state = run(state,{type:'seat',tableIds:['a1','a2'],guests:5,setId:'set60'},base + 64 * minute);
+  assert.equal(isVisitAutoExtensionPaused(state.tickets[2]),false);
+  assert.equal(getTicketAutoExtensionAt(state,state.tickets[2]),base + 124 * minute);
+});
+
+test('checkout pause is operator-only and idempotent with the original timestamp and source', () => {
+  const initial = settings(seat(open()),true);
+  const {id:ticketId} = initial.tickets[0];
+  const noticeAt = base + 59 * minute;
+  assert.throws(() => pauseVisit(initial,ticketId,'checkout',noticeAt,cast),/権限/);
+  assert.throws(() => pauseVisit(initial,ticketId,'unknown',noticeAt),/操作を確認/);
+  assert.throws(() => pauseVisit(initial,'unknown','checkout',noticeAt),/伝票が見つかりません/);
+  assert.throws(() => pauseVisit(createDemo('closed',base),ticketId,'checkout',noticeAt),/開店/);
+  const stopped = pauseVisit(initial,ticketId,'checkout',noticeAt,manager);
+  assert.equal(stopped.tickets[0].autoExtensionPauseSource,'checkout');
+  assert.equal(isValidVisitAutoExtensionPause({...stopped.tickets[0],autoExtensionPauseSource:'unknown'}),false);
+  assert.equal(isValidVisitAutoExtensionPause({...stopped.tickets[0],autoExtensionPausedAt:undefined}),false);
+  assert.equal(isValidVisitAutoExtensionPause(initial.tickets[0]),true);
+  const later = base + 80 * minute;
+  assert.deepEqual(pauseVisit(stopped,ticketId,'manual',later,admin),stopped);
+  assert.deepEqual(sync(stopped,later),stopped);
+  const paid = run(stopped,{type:'settle',ticketId,payments:[{method:'cash',amount:quote(stopped,ticketId).total}]},later);
+  assert.throws(() => pauseVisit(paid,ticketId,'manual',later),/会計前/);
+  const cancelled = run(paid,{type:'cancelSettlement',ticketId,reason:'訂正'},later + minute);
+  const reopened = run(cancelled,{type:'reopenTicket',ticketId,tableIds:['a1'],reason:'入力訂正'},later + 2 * minute);
+  assert.equal(reopened.tickets[0].autoExtensionPausedAt,noticeAt);
+  assert.equal(getNextAutoExtensionAt(reopened),null);
+});
+
+test('an elapsed automatic charge remains on the receipt when the next interval is paused', () => {
+  const initial = settings(seat(open()),true);
+  const {id:ticketId} = initial.tickets[0];
+  const deadline = base + 60 * minute;
+  assert.throws(() => pauseVisit(initial,ticketId,'checkout',deadline),/予定時刻を過ぎました/);
+  const charged = sync(initial,deadline);
+  const stopped = pauseVisit(charged,ticketId,'checkout',deadline + minute);
+  assert.deepEqual(quote(stopped,ticketId),quote(charged,ticketId));
+  assert.deepEqual(automaticLines(sync(stopped,deadline + 60 * minute)),automaticLines(charged));
+  const manuallyExtended = run(stopped,{type:'extend',ticketId,menuId:'extend30'},deadline + 2 * minute);
+  assert.equal(manuallyExtended.tickets[0].lines.length,stopped.tickets[0].lines.length + 1);
+  assert.equal(getNextAutoExtensionAt(manuallyExtended),null);
 });

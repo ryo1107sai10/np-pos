@@ -16,7 +16,7 @@ const auditLabels = {
   recordCashMovement: '入出金の記録', close: '閉店・レジ締め',
   savePrintSettings: '印刷設定の変更', issuePrintDocument: '伝票・領収書の発行',
   saveAutoExtensionSettings: '自動延長設定の変更', setTableAutoExtension: '卓別の自動延長設定', syncAutoExtensions: '自動延長',
-  saveCardFeeSettings: 'カード会計加算設定の変更',
+  pauseVisitAutoExtension: '来店単位の自動延長停止', saveCardFeeSettings: 'カード会計加算設定の変更',
   importLayout: '卓レイアウトの読み込み', saveControls: '運用設定の変更', migrate: '営業データの移行',
 };
 
@@ -32,6 +32,7 @@ const valueLabels = {
   issueNumber: '発行回数', width: '用紙幅（mm）', storeName: '印字する店名', address: '住所', phone: '電話番号',
   registrationNumber: '登録番号', showItems: '明細を印字', autoReceipt: '会計時のレシート自動印刷',
   enabled: '有効', menuId: '延長プラン', rateBps: '加算率', cardFee: 'カード会計加算',
+  paused: '今回の停止', source: '操作', manual: '通知から停止', checkout: '通知から会計へ',
   method: '決済方法', reason: '理由', points: 'ポイント', cost: '原価', value: '評価額',
   request: '承認申請', approved: '承認', rejected: '却下', pending: '承認待ち', paid: '会計済み',
   cancelled: '取消済み', departed: '退店済み', open: '利用中', cash: '現金', card: 'カード', qr: 'QR決済', bank: '振込', receivable: '売掛',
