@@ -236,6 +236,18 @@ body {
 .seat .seat-name, .seat .seat-area { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .layout-stage .layout-tile .seat-name { display: block; }
 .detail-title h3, .choice strong, .choice small { min-width: 0; overflow-wrap: anywhere; }
+.line-desc, .product > span, .order-selected > div, .extend-option strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.order-qty { flex-shrink: 0; }
+.mini-tools .btn {
+  max-width: 100%;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.mini-tools .btn .icon { flex: none; }
 
 @media (max-width: 610px) {
   .workspace { padding-left: max(12px, env(safe-area-inset-left)); padding-right: max(12px, env(safe-area-inset-right)); }

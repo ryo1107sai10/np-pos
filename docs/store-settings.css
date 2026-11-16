@@ -311,7 +311,7 @@
     overflow: hidden;
     border-radius: 18px 18px 0 0;
   }
-  .store-settings-dialog > form { max-height: 91dvh; }
+  .store-settings-dialog > form { max-height: calc(91dvh - 2px); }
   .store-settings-dialog .modal-head,
   .store-settings-dialog .modal-foot { padding-inline: 12px; }
   .store-settings-dialog .modal-body { padding: 10px 11px; }
