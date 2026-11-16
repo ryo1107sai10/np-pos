@@ -4,6 +4,7 @@ import { applyCustomerCommand, customerForSeat, findCustomer, isAssignedCustomer
 import { getCustomerReceivableBalance, getReceivableBalance, getReceivableRecoveryTotals,
   receivableCollectionMethods } from './receivables.mjs';
 import { createCashMovement, getCashMovements, getDailyRecoveryRows, totalCashMovements } from './cash-ledger.mjs';
+import { applyPrintCommand } from './print-domain.mjs';
 
 const movementScale = 1_000_000;
 const pointsScale = 1_000;
@@ -771,6 +772,10 @@ export function apply(state, action, now = Date.now(), actor = demoActor) {
 
 function reduce(state, action, now, actor) {
   const next = structuredClone(state);
+  if (action.type === 'savePrintSettings' || action.type === 'issuePrintDocument') {
+    applyPrintCommand(next, action, actor, now, () => createId(next, 'print'));
+    return next;
+  }
   if (['saveCustomer', 'mergeCustomers', 'linkCustomer', 'importCustomers'].includes(action.type)) {
     applyCustomerCommand(next, action, actor, now, () => createId(next, 'customer'));
     return next;
@@ -914,6 +919,7 @@ function reduce(state, action, now, actor) {
       ticket.settlement = quote(next, ticket.id);
       ticket.status = 'paid';
       ticket.settledAt = now;
+      ticket.settlementRevision = (ticket.settlementRevision ?? 0) + 1;
       break;
     }
     case 'serve': {

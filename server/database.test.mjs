@@ -397,3 +397,120 @@ test('browser cash migration keeps archival movement detail with verified import
   assert.equal(result.cashRecoveryRows, undefined);
   assert.equal(result.closedDays[0].expectedCash, 9_000);
 });
+
+const printing = {
+  width: 80, storeName:'印刷テスト店', address:'東京都', phone:'03-1234-5678',
+  registrationNumber:'T1234567890123', showItems:false, autoReceipt:true,
+};
+
+test('cloud printing enforces settings permissions, shares reissue count and keeps invoice fields scoped', async () => {
+  const db = database();
+  const tenant = await store(db);
+  await inviteMember(db, owner, tenant, helper.email, 'manager');
+  await inviteMember(db, owner, tenant, outsider.email, 'staff');
+  await listStores(db, helper);
+  await listStores(db, outsider);
+
+  const settings = {type:'savePrintSettings', settings:printing};
+  await assert.rejects(command(db, helper, tenant, 0, 'print-manager-settings', settings), {code:'forbidden'});
+  await assert.rejects(command(db, outsider, tenant, 0, 'print-staff-settings01', settings), {code:'forbidden'});
+  const configured = await command(db, owner, tenant, 0, 'print-update-settings1', settings);
+  assert.deepEqual(configured.state.printSettings, printing);
+  const opened = await command(db, owner, tenant, 1, 'print-test-opening01', {type:'open', openingCash:1000});
+  const date = opened.state.day.date;
+  const seated = await command(db, outsider, tenant, 2, 'print-test-seating01', {
+    type:'seat', tableIds:['a1'], guests:1, setId:'set60', customer:'顧客の非公開名',
+  });
+  const {id:ticketId} = seated.state.tickets.at(-1);
+  const issue = (kind, extras = {}) => ({type:'issuePrintDocument', ticketId, date, kind, ...extras});
+
+  await assert.rejects(command(db, outsider, tenant, 3, 'print-before-payment', issue('receipt')), {code:'rejected-command'});
+  const check = await command(db, outsider, tenant, 3, 'print-confirmation01', issue('check'));
+  assert.equal(check.state.printDocuments.at(-1).number, 1);
+  assert.equal(check.state.printDocuments.at(-1).actor.id, outsider.uid);
+  const retry = await command(db, outsider, tenant, 3, 'print-confirmation01', issue('check'));
+  assert.equal(retry.revision, check.revision);
+  assert.equal(retry.state.printDocuments.length, 1);
+
+  const settled = await command(db, outsider, tenant, 4, 'print-test-settle001', {
+    type:'settle', ticketId, payments:[{method:'cash', amount:6600}],
+  });
+  const invoice = await command(db, owner, tenant, 5, 'print-test-invoice01',
+    issue('invoice', {recipient:'領収書の非公開名',purpose:'ご飲食代'}));
+  assert.equal(invoice.state.printDocuments.at(-1).recipient, '領収書の非公開名');
+  for (const user of [helper, outsider]) {
+    const state = (await readState(db, user, tenant, null)).state;
+    assert.deepEqual(state.printSettings, printing);
+    const view = state.printDocuments.at(-1);
+    assert.equal(view.number, 1);
+    assert.equal(view.actor, undefined);
+    assert.equal(view.recipient, undefined);
+    assert.equal(view.purpose, undefined);
+    assert.equal(state.tickets.at(-1).customer, '');
+  }
+
+  await assert.rejects(command(db, outsider, tenant, 6, 'print-protected-details', issue('invoice')),
+    {code:'rejected-command'});
+
+  const firstReceipt = await command(db, outsider, tenant, 6, 'print-test-receipt01', issue('receipt'));
+  assert.equal(firstReceipt.state.printDocuments.at(-1).number, 1);
+  const concurrent = await Promise.allSettled([
+    command(db, owner, tenant, 7, 'print-concurrent-one1', issue('receipt')),
+    command(db, helper, tenant, 7, 'print-concurrent-two2', issue('receipt')),
+  ]);
+  assert.equal(concurrent.filter(({status}) => status === 'fulfilled').length, 1);
+  assert.equal(concurrent.find(({status}) => status === 'rejected').reason.code, 'revision-conflict');
+  await command(db, outsider, tenant, 8, 'print-test-depart001', {type:'depart', ticketId});
+  await command(db, helper, tenant, 9, 'print-test-closing01', {type:'close', actualCash:7600});
+  const nextDate = new Date(Date.parse(date) + 86_400_000).toISOString().slice(0, 10);
+  await command(db, helper, tenant, 10, 'print-next-opening01', {type:'open', date:nextDate, openingCash:1000});
+  const staff = (await readState(db, outsider, tenant, null)).state;
+  assert.deepEqual(staff.printDocuments, []);
+  await assert.rejects(command(db, outsider, tenant, 11, 'print-staff-archive01', issue('receipt')), {code:'rejected-command'});
+
+  const historical = await command(db, helper, tenant, 11, 'print-archive-reissue', issue('receipt'));
+  const archiveIssue = historical.state.printDocuments.at(-1);
+  assert.equal(archiveIssue.number, 3);
+  assert.equal(archiveIssue.date, date);
+  assert.equal(archiveIssue.actor.id, helper.uid);
+  assert.deepEqual(historical.state.closedDays[0].ticketSnapshots[0].settlement, settled.state.tickets.at(-1).settlement);
+
+  const {events} = await listAudit(db, owner, tenant, {limit:100});
+  const issues = events.filter(({action}) => action === 'issuePrintDocument');
+  assert.equal(issues.length, 5);
+  assert.equal(issues[0].businessDate, date);
+  assert.deepEqual(issues[0].after, {kind:'レシート', issueNumber:3});
+  assert.equal(issues[0].reason, '再発行');
+  assert.equal(issues[0].actor.id, helper.uid);
+  assert.equal(JSON.stringify(issues).includes('領収書の非公開名'), false);
+  assert.equal(JSON.stringify(issues).includes('ご飲食代'), false);
+});
+
+test('browser printing migration validates issuance sequence and replaces local actor identity', async () => {
+  const db = database();
+  const tenant = await store(db);
+  const now = Date.now();
+  let sample = createDemo('live', now);
+  sample = apply(sample, {type:'savePrintSettings', settings:printing}, now);
+  const date = sample.day.date;
+  const ticketId = sample.tickets.find(({status}) => status === 'departed').id;
+  const issue = {type:'issuePrintDocument', ticketId, date, kind:'invoice', recipient:'ブラウザー宛名', purpose:'ご飲食代'};
+  const browserActor = {id:outsider.uid, label:'ブラウザー担当', role:'manager'};
+  sample = apply(sample, issue, now, browserActor);
+  const invalid = structuredClone(sample);
+  invalid.printDocuments[0].number = 2;
+  await assert.rejects(migrateState(db, owner, tenant, {operationId:'print-migrate-invalid', snapshot:invalid}),
+    {code:'invalid-snapshot'});
+  const migrated = await migrateState(db, owner, tenant, {operationId:'print-migrate-browser', snapshot:sample});
+  assert.deepEqual(migrated.state.printSettings, printing);
+  const record = migrated.state.printDocuments[0];
+  assert.equal(record.recipient, 'ブラウザー宛名');
+  assert.equal(record.actor.id, 'imported-browser');
+  assert.match(record.actor.label, /^ブラウザー移行/);
+  await inviteMember(db, owner, tenant, outsider.email, 'staff');
+  await listStores(db, outsider);
+  const staffView = (await readState(db, outsider, tenant, null)).state.printDocuments[0];
+  assert.equal(staffView.number, 1);
+  assert.equal(staffView.actor, undefined);
+  assert.equal(staffView.recipient, undefined);
+});

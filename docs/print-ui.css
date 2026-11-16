@@ -1,0 +1,114 @@
+.np-print-dialog.modal { width: min(630px, calc(100% - 24px)); }
+.np-print-options { display: grid; grid-template-columns: minmax(0, 10rem); gap: 10px; }
+.np-print-options-invoice { grid-template-columns: minmax(0, 8rem) minmax(0, 1fr); }
+.np-print-options-invoice .field:last-child { grid-column: 1 / -1; }
+.np-print-settings { display: grid; gap: 14px; }
+.np-print-switches { display: grid; gap: 7px; }
+.np-print-switches .inline-check { min-height: 36px; align-content: center; }
+.np-print-switches input { accent-color: #5949a2; width: 16px; height: 16px; flex: 0 0 auto; }
+.np-print-settings .field-help { margin: 0; }
+.np-print-preview-frame {
+  min-width: 0;
+  padding: 16px 11px;
+  border: 1px solid #e1e6f1;
+  border-radius: 13px;
+  background: linear-gradient(140deg, #f4f6fc, #edf1f9);
+}
+.np-print-paper {
+  --paper-width: 58mm;
+  --paper-inset: 5mm;
+  box-sizing: border-box;
+  width: var(--paper-width);
+  max-width: 100%;
+  margin-inline: auto;
+  padding: 4mm var(--paper-inset);
+  color: #161616;
+  background: #fff;
+  box-shadow: 0 4px 16px #17244613;
+  font-family: 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Noto Sans CJK JP', 'Noto Sans JP', sans-serif;
+  font-size: 8.6pt;
+  font-weight: 500;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.np-print-paper[data-paper-width="80"] { --paper-width: 80mm; --paper-inset: 4mm; }
+.np-print-paper :where(h3,h4,ul,dl,dd,p) { margin: 0; }
+.np-print-paper-header { display: grid; justify-items: center; gap: 1px; text-align: center; }
+.np-print-paper-header h3 { font-size: 13pt; line-height: 1.35; letter-spacing: .07em; }
+.np-print-paper-header .np-print-store-name { margin-block-start: 3px; font-size: 9.5pt; font-weight: 700; }
+.np-print-paper-header p { max-width: 100%; font-size: 8pt; }
+.np-print-address { white-space: pre-wrap; }
+.np-print-paper-header .np-print-reissue {
+  margin-block-end: 3px;
+  padding: .4mm 2mm;
+  border: 1px solid #161616;
+  font-size: 8.5pt;
+  font-weight: 800;
+  letter-spacing: .12em;
+}
+.np-print-meta {
+  display: grid;
+  gap: 1px;
+  margin-block: 2.5mm 0;
+  padding-block: 2mm;
+  border-block-start: 1px dashed #777;
+  font-size: 8pt;
+}
+.np-print-section { border-block-start: 1px dashed #777; padding-block: 2mm; }
+.np-print-section:empty { display: none; }
+.np-print-section h4 { margin-block-end: 1mm; font-size: 8.6pt; font-weight: 750; }
+.np-print-items { display: grid; gap: 1.2mm; list-style: none; padding: 0; }
+.np-print-items li, .np-print-rows > div, .np-print-amount {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2mm;
+  align-items: baseline;
+}
+.np-print-items small { display: block; font-size: 7.8pt; }
+.np-print-items strong, .np-print-rows dd, .np-print-amount strong { white-space: nowrap; }
+.np-print-rows { display: grid; gap: .65mm; }
+.np-print-amount { margin-block-start: 1.3mm; padding-block: 1.2mm .3mm; border-block-start: 1px solid #252525; }
+.np-print-amount span { font-weight: 750; }
+.np-print-amount strong { font-size: 13pt; line-height: 1.1; }
+.np-print-invoice-data { margin-block-end: 2.5mm; }
+.np-print-invoice-data > p { font-size: 8pt; }
+.np-print-invoice-data .np-print-recipient {
+  margin-block: 1.4mm;
+  border-block-end: 1px solid #4a4a4a;
+  padding-block-end: .7mm;
+  font-size: 10pt;
+  font-weight: 750;
+}
+.np-print-invoice-data .np-print-amount { border-block-start: 0; padding-block: .7mm 1.1mm; }
+.np-print-invoice-data .np-print-purpose { margin-block-start: .8mm; }
+.np-print-tax .np-print-rows { font-size: 8pt; }
+.np-print-note { margin-block-start: 1mm; font-size: 8pt; }
+#print-output { display: none; }
+
+@media (max-width: 500px) {
+  .np-print-preview-frame { padding-inline: 6px; }
+  .np-print-options-invoice { grid-template-columns: minmax(0, 6.3rem) minmax(0, 1fr); }
+}
+
+@media print {
+  @page np-pos-roll { size: auto; margin: 0; }
+  body.np-print-active {
+    margin: 0 !important;
+    padding: 0 !important;
+    min-width: 0;
+    min-height: 0;
+    background: #fff !important;
+  }
+  body.np-print-active::before, body.np-print-active::after { display: none !important; }
+  body.np-print-active > :not(#print-output) { display: none !important; }
+  body.np-print-active > #print-output { display: block !important; }
+  body.np-print-active .np-print-paper {
+    page: np-pos-roll;
+    max-width: none;
+    margin: 0;
+    box-shadow: none;
+  }
+  .np-print-paper-header, .np-print-meta, .np-print-amount, .np-print-items li, .np-print-rows > div { break-inside: avoid; }
+  .np-print-section h4 { break-after: avoid; }
+}

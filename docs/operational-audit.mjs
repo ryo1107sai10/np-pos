@@ -1,6 +1,7 @@
 import { getStoreSettings } from './store-settings.mjs';
 import { getReceivableBalance } from './receivables.mjs';
 import { cashMovementCategories, cashMovementKinds } from './cash-ledger.mjs';
+import { getPrintSettings, printDocumentKinds } from './print-domain.mjs';
 
 const ticketActions = new Set([
   'discount', 'approveDiscount', 'rejectDiscount', 'settle', 'cancelSettlement', 'reopenTicket',
@@ -201,6 +202,26 @@ export function buildOperationAudit(before, after, action, at, actor) {
         reason: 'マネージャーの値引き上限を更新',
       };
     }
+  } else if (action.type === 'savePrintSettings') {
+    const previous = getPrintSettings(before);
+    const current = getPrintSettings(after);
+    if (!sameValue(previous, current)) {
+      details = {
+        target: target('settings', null, '印刷設定'),
+        before: previous,
+        after: current,
+        reason: '印刷設定を更新',
+      };
+    }
+  } else if (action.type === 'issuePrintDocument') {
+    const {date, ticketId, ticketNumber, kind, number} = after.printDocuments.at(-1);
+    details = {
+      businessDate: date,
+      target: target('ticket', ticketId, `伝票 No. ${ticketNumber}`),
+      before: null,
+      after: {kind:printDocumentKinds[kind], issueNumber:number},
+      reason: number > 1 ? '再発行' : '発行',
+    };
   } else if (action.type === 'recordCashMovement') {
     const { id, kind, category, amount, reason, destination } = after.cashMovements.at(-1);
     const label = cashMovementKinds[kind];

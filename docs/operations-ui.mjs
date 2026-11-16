@@ -14,6 +14,7 @@ const auditLabels = {
   saveCustomer: '顧客情報の登録・変更', mergeCustomers: '顧客の統合', linkCustomer: '来店と顧客の関連づけ',
   importCustomers: '顧客の一括登録', recoverReceivable: '売掛の回収',
   recordCashMovement: '入出金の記録', close: '閉店・レジ締め',
+  savePrintSettings: '印刷設定の変更', issuePrintDocument: '伝票・領収書の発行',
   importLayout: '卓レイアウトの読み込み', saveControls: '運用設定の変更', migrate: '営業データの移行',
 };
 
@@ -26,6 +27,8 @@ const valueLabels = {
   creditOverride: '上限超過の承認', collection: '回収', changedFields: '変更項目', creditEnabled: '売掛利用',
   kind: '種類', category: '理由区分', destination: '相手先・移動先',
   expectedCash: 'レジ理論残高', actualCash: 'レジ実残高', discrepancy: 'レジ差額',
+  issueNumber: '発行回数', width: '用紙幅（mm）', storeName: '印字する店名', address: '住所', phone: '電話番号',
+  registrationNumber: '登録番号', showItems: '明細を印字', autoReceipt: '会計時のレシート自動印刷',
   method: '決済方法', reason: '理由', points: 'ポイント', cost: '原価', value: '評価額',
   request: '承認申請', approved: '承認', rejected: '却下', pending: '承認待ち', paid: '会計済み',
   cancelled: '取消済み', departed: '退店済み', open: '利用中', cash: '現金', card: 'カード', qr: 'QR決済', bank: '振込', receivable: '売掛',

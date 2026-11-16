@@ -1,9 +1,10 @@
 import { exportStoreConfiguration, parseStoreConfiguration, quote, summary } from '../docs/engine.mjs';
 import { isAssignedCustomer } from '../docs/customers.mjs';
 import { getRecoveryRows, isValidCashMovement } from '../docs/cash-ledger.mjs';
+import { isValidPrintDocument, normalizePrintSettings } from '../docs/print-domain.mjs';
 
 export const roles = new Set(['admin', 'manager', 'staff', 'cast', 'trainee']);
-const staffCommands = ['seat', 'move', 'order', 'extend', 'deposit', 'settle', 'depart', 'serve'];
+const staffCommands = ['seat', 'move', 'order', 'extend', 'deposit', 'settle', 'depart', 'serve', 'issuePrintDocument'];
 const managerCommands = [...staffCommands, 'open', 'close', 'discount', 'stockAdjust', 'cancelDeposit', 'cancelLine', 'void',
   'saveCustomer', 'recoverReceivable', 'recordCashMovement'];
 const roleCommands = {
@@ -11,7 +12,7 @@ const roleCommands = {
   manager: new Set(managerCommands),
   admin: new Set([...managerCommands, 'saveLayout', 'importLayout', 'saveStoreSettings', 'importStoreConfiguration',
     'approveDiscount', 'rejectDiscount', 'saveControls', 'cancelSettlement', 'reopenTicket',
-    'mergeCustomers', 'linkCustomer', 'importCustomers']),
+    'mergeCustomers', 'linkCustomer', 'importCustomers', 'savePrintSettings']),
 };
 const reasonCommands = new Set(['discount', 'cancelSettlement', 'reopenTicket', 'cancelLine', 'recordCashMovement']);
 const paymentMethods = new Set(['cash', 'card', 'qr']);
@@ -86,6 +87,10 @@ export function projectState(state, role, actorUid) {
   if (role !== 'manager' && role !== 'staff') return null;
   const next = structuredClone(state);
   delete next.auditLog;
+  if (next.printDocuments) {
+    next.printDocuments = next.printDocuments.filter(({ date }) => role === 'manager' || date === state.day.date)
+      .map((document) => document.actor?.id === actorUid ? document : printDocumentMetadata(document));
+  }
   const assigned = new Set(role === 'manager' ? (state.customers ?? [])
     .filter((customer) => isAssignedCustomer(state, customer, actorUid)).map(({id}) => id) : []);
   next.customers = (next.customers ?? []).map((customer) => {
@@ -175,6 +180,7 @@ function validPayments(records, allowReceivable = false) {
 
 function validTicket(ticket) {
   return ticketStatuses.has(ticket.status) && Array.isArray(ticket.tableIds)
+    && (ticket.settlementRevision === undefined || (Number.isSafeInteger(ticket.settlementRevision) && ticket.settlementRevision >= 0))
     && uniqueRecords(ticket.lines) && ticket.lines.every((line) =>
       typeof line.name === 'string' && typeof line.menuId === 'string'
       && Number.isInteger(line.quantity) && line.quantity > 0
@@ -273,6 +279,23 @@ function validArchivedCash(day) {
       && ['cash', 'card', 'qr'].every((name) => validTotal(day[key][name]))));
 }
 
+function printDocumentMetadata({ id, ticketId, ticketNumber, date, kind, version, number, at }) {
+  return { id, ticketId, ticketNumber, date, kind, version, number, at };
+}
+
+function validPrintDocuments(state, operatingDates) {
+  const rows = state.printDocuments;
+  if (rows === undefined) return true;
+  if (!uniqueRecords(rows) || !rows.every((entry) => operatingDates.has(entry.date) && isValidPrintDocument(entry))) return false;
+  const counts = new Map();
+  for (const {ticketId, date, kind, version, number} of rows) {
+    const key = JSON.stringify([ticketId, date, kind, version]);
+    if ((counts.get(key) ?? 0) + 1 !== number) return false;
+    counts.set(key, number);
+  }
+  return true;
+}
+
 export function validateSnapshot(state) {
   const message = 'このブラウザーの営業データを読み取れません。';
   requireCondition(isRecord(state) && isRecord(state.day) && ['open', 'closed'].includes(state.day.status)
@@ -295,15 +318,17 @@ export function validateSnapshot(state) {
   requireCondition(uniqueRecords(customers) && customers.every(validCustomer) && uniqueRecords(receivables),
     400, 'invalid-snapshot', message);
   const operatingDates = new Set([state.day.date, ...state.closedDays.map(({ date }) => date)]);
-  requireCondition(state.cashMovements === undefined || validCashMovements(state.cashMovements, operatingDates),
-    400, 'invalid-snapshot', message);
+  requireCondition((state.cashMovements === undefined || validCashMovements(state.cashMovements, operatingDates))
+    && validPrintDocuments(state, operatingDates), 400, 'invalid-snapshot', message);
   const customerIds = new Set(customers.map(({ id }) => id));
   requireCondition(receivables.every((entry) => validReceivable(entry, customerIds))
     && validReceivableLinks(state, receivables)
     && allSnapshotTickets(state).every((ticket) => ticket.customerId == null || customerIds.has(ticket.customerId)),
   400, 'invalid-snapshot', message);
 
+  let normalizedPrintSettings;
   try {
+    if (state.printSettings !== undefined) normalizedPrintSettings = normalizePrintSettings(state.printSettings);
     parseStoreConfiguration(JSON.stringify(exportStoreConfiguration(state)));
     for (const ticket of state.tickets) quote(state, ticket.id);
     summary({ ...state, recoveryTotalsForDay: undefined, recoveryRowsForDay: undefined });
@@ -323,6 +348,16 @@ export function validateSnapshot(state) {
     const { label, role } = movement.actor;
     const source = 'ブラウザー移行 · ';
     movement.actor = { id: 'imported-browser', label: (label.startsWith(source) ? label : source + label).slice(0, 320), role };
+  }
+  if (normalizedPrintSettings !== undefined) migrated.printSettings = normalizedPrintSettings;
+  if (migrated.printDocuments) {
+    migrated.printDocuments = migrated.printDocuments.map((document) => {
+      const {recipient, purpose, actor} = document;
+      const source = 'ブラウザー移行 · ';
+      const label = actor.label.startsWith(source) ? actor.label : source + actor.label;
+      return {...printDocumentMetadata(document), recipient, purpose,
+        actor:{id:'imported-browser',label:label.slice(0, 320),role:actor.role}};
+    });
   }
   for (const customer of migrated.customers ?? []) delete customer.createdByUid;
   for (const ticket of allSnapshotTickets(migrated)) {
