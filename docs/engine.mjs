@@ -1,3 +1,5 @@
+import { getStoreSettings, normalizeStoreSettings, replaceStoreSettings } from './store-settings.mjs';
+
 const movementScale = 1_000_000;
 const pointsScale = 1_000;
 const minute = 60_000;
@@ -14,6 +16,8 @@ const layoutNameMaxLength = 24;
 const newTableId = /^table-[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 const layoutFileFormat = 'np-pos.layout';
 const layoutFileVersion = 1;
+const storeFileFormat = 'np-pos.settings';
+const storeFileVersion = 1;
 
 function isLayoutPosition(x, y) {
   return Number.isInteger(x) && x >= 0 && x + layoutGrid.tableWidth <= layoutGrid.columns
@@ -54,14 +58,39 @@ export function exportLayout(state) {
   };
 }
 
-export function parseLayoutFile(text) {
-  let file;
+function parseSettingsJson(text, label) {
   try {
-    file = JSON.parse(text.replace(/^\uFEFF/, ''));
+    return JSON.parse(text.replace(/^\uFEFF/, ''));
   } catch {
-    throw new Error('卓配置ファイルを読み取れませんでした。JSON形式のファイルを選択してください。');
+    throw new Error(`${label}を読み取れませんでした。JSON形式のファイルを選択してください。`);
   }
-  return normalizeLayoutFile(file);
+}
+
+export function parseLayoutFile(text) {
+  return normalizeLayoutFile(parseSettingsJson(text, '卓配置ファイル'));
+}
+
+function validatedStoreSettings(settings, state) {
+  return normalizeStoreSettings(settings, {
+    menuIds: new Set(menu.map(({ id }) => id)),
+    castIds: new Set(cast.map(({ id }) => id)),
+    stockIds: state ? new Set(state.stock.map(({ id }) => id)) : null,
+  });
+}
+
+export function exportStoreConfiguration(state) {
+  return {
+    format: storeFileFormat, version: storeFileVersion,
+    layout: exportLayout(state), settings: getStoreSettings(state),
+  };
+}
+
+export function parseStoreConfiguration(text) {
+  const file = parseSettingsJson(text, '店舗設定ファイル');
+  if (file?.format === layoutFileFormat) return { layout: normalizeLayoutFile(file), settings: null };
+  assert(file?.format === storeFileFormat, 'NP POSの店舗設定ファイルを選択してください。');
+  assert(file.version === storeFileVersion, 'このバージョンの店舗設定ファイルには対応していません。');
+  return { layout: normalizeLayoutFile(file.layout), settings: validatedStoreSettings(file.settings) };
 }
 
 export function yen(amount) {
@@ -184,6 +213,14 @@ function exactRate(total, rate) {
   return Number(BigInt(total) * BigInt(rate) / 10_000n);
 }
 
+export function getItemCommission(item, person) {
+  return { rate: 0, fixed: 0, points: 0, ...item.commission, ...person?.commissionOverride };
+}
+
+function equalShare(total, count, index) {
+  return Math.floor(total / count) + (index < total % count ? 1 : 0);
+}
+
 function addCommission(map, castId, sales, amount, pointsInUnits) {
   const current = map.get(castId) ?? { castId, sales: 0, amount: 0, pointsInUnits: 0 };
   current.sales += sales;
@@ -213,12 +250,13 @@ export function quote(state, ticketId) {
   lines.forEach((line, index) => {
     groupedTax.set(line.taxRate, (groupedTax.get(line.taxRate) ?? 0) + netByLine[index] + serviceByLine[index]);
     if (line.castIds.length === 0) return;
-    const weights = line.castIds.map(() => 1);
-    const sales = allocate(netByLine[index], weights);
-    const fixed = allocate(line.commission.fixed * line.quantity, weights);
-    const points = allocate(Math.round(line.commission.points * pointsScale) * line.quantity, weights);
+    const count = line.castIds.length;
     line.castIds.forEach((castId, castIndex) => {
-      addCommission(commission, castId, sales[castIndex], fixed[castIndex] + exactRate(sales[castIndex], line.commission.rate * 100), points[castIndex]);
+      const rule = line.castCommissions?.[castIndex] ?? line.commission;
+      const sales = equalShare(netByLine[index], count, castIndex);
+      const fixed = equalShare(rule.fixed * line.quantity, count, castIndex);
+      const points = equalShare(Math.round(rule.points * pointsScale) * line.quantity, count, castIndex);
+      addCommission(commission, castId, sales, fixed + exactRate(sales, Math.round(rule.rate * 100)), points);
     });
   });
 
@@ -245,18 +283,21 @@ function newStockMovement(state, stock, amount, kind, reason, now, ticketId = nu
     unit: stock.unit, unitCost, cost: Math.abs(oldValue - stock.value), reason, kind, at: now, ticketId, sourceLineId });
 }
 
-function addLine(state, ticket, menuId, quantity, castIds, now) {
-  const menu = state.menu.find((entry) => entry.id === menuId);
-  assert(menu, 'メニューが見つかりません。');
-  positiveInteger(quantity, '数量');
+function addLine(state, ticket, menu, quantity, castIds, now, { includeHistoricalCast = false } = {}) {
+  const people = includeHistoricalCast
+    ? [...(state.archivedCast ?? []), ...state.cast]
+    : state.cast.filter((person) => person.enabled !== false);
+  positiveInteger(quantity, '数量', includeHistoricalCast ? people.length : 100);
+  const castById = new Map(people.map((person) => [person.id, person]));
   assert(Array.isArray(castIds) && new Set(castIds).size === castIds.length
-    && castIds.every((id) => state.cast.some((entry) => entry.id === id)), '歩合対象者を確認してください。');
+    && castIds.every((id) => castById.has(id)), '歩合対象者を確認してください。');
   assert(!menu.requiresCast || castIds.length > 0, `${menu.name}の担当キャストを選択してください。`);
   const line = {
-    id: createId(state, 'line'), menuId, name: menu.name, category: menu.category, quantity, price: menu.price,
+    id: createId(state, 'line'), menuId: menu.id, name: menu.name, category: menu.category, quantity, price: menu.price,
     total: menu.price * quantity, castIds: castIds.slice(), createdAt: now, stockUses: [], cancelledAt: null,
     providedAt: null, taxRate: menu.taxRate ?? 1_000, serviceEligible: menu.serviceEligible !== false,
-    commission: { rate: 0, fixed: 0, points: 0, ...menu.commission },
+    commission: getItemCommission(menu),
+    castCommissions: castIds.map((id) => getItemCommission(menu, castById.get(id))),
   };
   for (const use of menu.recipe ?? []) {
     const stock = state.stock.find((entry) => entry.id === use.stockId);
@@ -296,7 +337,7 @@ function doSeat(state, action, now) {
   currentDay(state);
   const guests = positiveInteger(action.guests, '来店人数');
   const tableIds = tableSet(state, action.tableIds, guests);
-  const set = state.menu.find((entry) => entry.id === action.setId && entry.category === 'セット');
+  const set = state.menu.find((entry) => entry.id === action.setId && entry.category === 'セット' && entry.enabled !== false);
   assert(set, '初回セットを選択してください。');
   const ticket = {
     id: createId(state, 'ticket'), number: state.nextTicket++, tableIds, guests,
@@ -306,7 +347,7 @@ function doSeat(state, action, now) {
     departedAt: null, serviceRate: 2_000, settlement: null,
   };
   state.tickets.push(ticket);
-  addLine(state, ticket, set.id, guests, [], now);
+  addLine(state, ticket, set, guests, [], now);
 }
 
 function doClose(state, action, now) {
@@ -479,6 +520,17 @@ export function apply(state, action, now = Date.now()) {
     doImportLayout(next, action.layout);
     return next;
   }
+  if (action.type === 'saveStoreSettings') {
+    replaceStoreSettings(next, validatedStoreSettings(action.settings, next));
+    return next;
+  }
+  if (action.type === 'importStoreConfiguration') {
+    const { layout, settings } = action.configuration ?? {};
+    const validated = settings === null ? null : validatedStoreSettings(settings, next);
+    doImportLayout(next, layout);
+    if (validated) replaceStoreSettings(next, validated);
+    return next;
+  }
   if (action.type === 'open') {
     doOpen(next, action, now);
     return next;
@@ -518,16 +570,21 @@ export function apply(state, action, now = Date.now()) {
       for (const item of action.items) {
         const menu = next.menu.find((entry) => entry.id === item.menuId);
         assert(menu && !['セット', '延長'].includes(menu.category), '初回セットと延長は専用画面で登録してください。');
-        addLine(next, ticket, item.menuId, item.quantity, item.castIds ?? [], now);
+        assert(menu.enabled !== false, 'このメニューは提供を停止しています。');
+        addLine(next, ticket, menu, item.quantity, item.castIds ?? [], now);
       }
       break;
     case 'extend': {
-      const menu = next.menu.find((entry) => entry.category === '延長' && entry.duration === Number(action.minutes));
+      const menu = next.menu.find((entry) => entry.category === '延長' && entry.enabled !== false && Number.isInteger(entry.duration)
+        && (action.menuId === undefined ? entry.duration === Number(action.minutes) : entry.id === action.menuId));
       assert(menu, '延長時間を選択してください。');
+      const surcharge = next.menu.find((entry) => entry.id === 'nominationExtra' && entry.enabled !== false);
       const relatedCast = [...new Set(ticket.lines.filter((line) => line.category === '指名' && line.cancelledAt === null)
         .flatMap((line) => line.castIds))];
-      addLine(next, ticket, menu.id, ticket.guests, [], now);
-      if (relatedCast.length) addLine(next, ticket, 'nominationExtra', relatedCast.length, relatedCast, now);
+      addLine(next, ticket, menu, ticket.guests, [], now);
+      if (surcharge && relatedCast.length) {
+        addLine(next, ticket, surcharge, relatedCast.length, relatedCast, now, { includeHistoricalCast: true });
+      }
       ticket.endsAt += menu.duration * minute;
       break;
     }

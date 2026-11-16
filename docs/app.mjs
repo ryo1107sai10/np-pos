@@ -1,8 +1,10 @@
-import { apply, businessDate, createDemo, exportLayout, getLayoutAreas, getLayoutTables, getTableLabel, getTicketForTable, parseLayoutFile, quote, summary, tableStatus, yen } from './engine.mjs';
+import { apply, businessDate, createDemo, exportStoreConfiguration, getItemCommission, getLayoutAreas, getLayoutTables, getTableLabel, getTicketForTable, parseStoreConfiguration, quote, summary, tableStatus, yen } from './engine.mjs';
 import { icon } from './icons.mjs';
 import { renderReport } from './reports.mjs';
 import { bindLayoutEditor, commitLayoutFields, floorLayoutStage, handleLayoutEditorAction, layoutAreaTabs, newLayoutDraft, renderLayoutEditor } from './floor-layout.mjs';
 import { renderLayoutTransfer } from './layout-transfer.mjs';
+import { getStoreSettings } from './store-settings.mjs';
+import { commitStoreSettingsEditor, handleStoreSettingsEditorAction, renderStoreSettingsEditor } from './store-settings-editor.mjs';
 
 const app = document.querySelector('#app');
 const dialog = document.querySelector('#dialog');
@@ -135,7 +137,12 @@ function tableName(id) {
 }
 
 function staffName(id) {
-  return state.cast.find((person) => person.id === id)?.name ?? id;
+  return state.cast.find((person) => person.id === id)?.name
+    ?? state.archivedCast?.find((person) => person.id === id)?.name ?? id;
+}
+
+function extensionPlans() {
+  return state.menu.filter((item) => item.enabled !== false && item.category === '延長' && item.duration);
 }
 
 function titles(ticket) {
@@ -218,7 +225,9 @@ function renderFloor() {
     : `<div class="table-grid">${visible.length ? visible.map(renderTable).join('') : emptyState}</div>`;
   return `${!isOpen ? `<div class="notice"><span>${icon('info',17)}開店すると、空席から来店を登録できます。</span></div>` : ''}${renderMetrics()}
     <div class="floor-layout">
-      <section class="floor" aria-labelledby="floor-title"><div class="floor-heading"><h2 id="floor-title">${icon('grid',17)}${showingPlan ? '店内レイアウト' : '座席一覧'}</h2><div class="floor-heading-actions">${viewSwitch}${button('レイアウト編集', 'edit-layout', { glyph: 'move' })}${button('設定の移行', 'layout-transfer', { glyph: 'download' })}</div></div>
+      <section class="floor" aria-labelledby="floor-title"><div class="floor-heading">
+      <div class="floor-heading-main"><h2 id="floor-title">${icon('grid',17)}${showingPlan ? '店内レイアウト' : '座席一覧'}</h2>${viewSwitch}</div>
+      <div class="floor-heading-actions">${button('レイアウト編集', 'edit-layout', { glyph: 'move' })}${button('店舗設定', 'store-settings', { glyph: 'settings' })}${button('設定の移行', 'layout-transfer', { glyph: 'download' })}</div></div>
       ${areas.length ? `<div class="seating-toolbar glass${showingPlan ? ' seating-plan-toolbar' : ''}"><div class="seg" role="group" aria-label="卓の状態で絞り込む">${[['all','すべて'],['used','使用中'],['available','空席'],['urgent','要対応']].map(([key,text])=>`<button type="button" data-action="filter" data-id="${key}" aria-pressed="${key===filter}">${text}<small>${counts[key]}</small></button>`).join('')}</div>${areaPicker}</div>` : ''}
       ${floorContent}</section>
       ${mobileDetails ? `<button type="button" class="detail-shade" data-action="hide-detail" aria-hidden="true" tabindex="-1"></button>` : ''}${renderDetail()}
@@ -248,6 +257,8 @@ function renderDetail() {
   const status = tableStatus(state,selected);
   const settled = ticket.status === 'paid';
   const lines = ticket.lines.filter((line)=>!line.cancelledAt);
+  const quickItem = state.menu.find((item) => item.id === 'highball' && item.enabled !== false
+    && ['ドリンク','ボトル','フード','指名'].includes(item.category));
   return `<aside class="detail ${mobileDetails ? 'mobile-visible' : ''}" aria-label="伝票詳細" data-ticket="${escape(ticket.id)}">
     <div class="detail-head"><h2>${icon('ticket',17)}伝票詳細</h2><span class="detail-number">No. ${ticket.number}</span>${detailClose}</div>
     <div class="detail-inner"><div class="detail-title"><h3>${escape(tableName(selected))}</h3>${pill(status)}</div>
@@ -256,8 +267,8 @@ function renderDetail() {
     <div class="detail-aux"><h3>注文明細 <small>${lines.length}</small></h3>${settled ? '' : button('卓移動・連結','move',{glyph:'move',id:ticket.id})}</div>
     <ul class="ticket-lines">${lines.length ? lines.map((line) => `<li class="ticket-line"><span class="line-desc">${escape(line.name)} <em>×${line.quantity}</em>${line.castIds.length ? `<small>${line.castIds.map(staffName).map(escape).join('・')}</small>` : ''}</span><span class="money">${yen(line.total)}</span>${!settled && !['セット','延長'].includes(line.category) ? `<button class="line-remove" type="button" data-action="cancel-line" data-id="${escape(line.id)}" data-ticket="${escape(ticket.id)}" aria-label="${escape(line.name)}を取り消す">${icon('x',13)}</button>` : ''}</li>`).join('') : '<li class="lines-empty">注文明細はありません。</li>'}</ul>
     ${totalRows(q,{settlement:settled})}
-    ${!settled ? `<div class="mini-tools">${button('前受金','deposit',{glyph:'wallet',tone:'quiet',id:ticket.id})}${button('値引き','discount',{glyph:'minus',tone:'quiet',id:ticket.id})}${button('ハイボール','order',{glyph:'plus',tone:'quiet',id:ticket.id,data:'data-product="highball"'})}${button('卓履歴','seat-history',{glyph:'history',tone:'quiet',id:ticket.id})}</div>` : ''}
-    <div class="detail-actions">${!settled ? `${button('注文','order',{glyph:'plus',tone:'secondary',id:ticket.id})}${button('延長','extend',{glyph:'clock',id:ticket.id})}${button('会計へ進む','settle',{glyph:'arrow-right',tone:'primary',id:ticket.id,cls:'btn-block'})}` : `${button('会計内訳','receipt',{glyph:'ticket',id:ticket.id,cls:'btn-block'})}${button('退店・卓を解放','depart',{glyph:'checkout',tone:'primary',id:ticket.id,cls:'btn-block'})}`}</div></div></aside>`;
+    ${!settled ? `<div class="mini-tools">${button('前受金','deposit',{glyph:'wallet',tone:'quiet',id:ticket.id})}${button('値引き','discount',{glyph:'minus',tone:'quiet',id:ticket.id})}${quickItem ? button(escape(quickItem.name),'order',{glyph:'plus',tone:'quiet',id:ticket.id,data:'data-product="highball"'}) : ''}${button('卓履歴','seat-history',{glyph:'history',tone:'quiet',id:ticket.id})}</div>` : ''}
+    <div class="detail-actions">${!settled ? `${button('注文','order',{glyph:'plus',tone:'secondary',id:ticket.id})}${button('延長','extend',{glyph:'clock',id:ticket.id,disabled:!extensionPlans().length})}${button('会計へ進む','settle',{glyph:'arrow-right',tone:'primary',id:ticket.id,cls:'btn-block'})}` : `${button('会計内訳','receipt',{glyph:'ticket',id:ticket.id,cls:'btn-block'})}${button('退店・卓を解放','depart',{glyph:'checkout',tone:'primary',id:ticket.id,cls:'btn-block'})}`}</div></div></aside>`;
 }
 
 function render({ preserveFocus = false } = {}) {
@@ -280,8 +291,11 @@ function toast(message) {
 }
 
 function showError(message) {
-  const box = dialog.querySelector('.form-error');
-  if (box) { box.textContent = message; box.hidden = false; }
+  const box = dialog.querySelector('.modal-body > .form-error');
+  if (!box) return;
+  box.textContent = message;
+  box.hidden = false;
+  box.scrollIntoView({ block: 'nearest' });
 }
 
 async function commit(command, message, after) {
@@ -294,7 +308,7 @@ async function commit(command, message, after) {
     if (!dialog.open || modal !== activeModal) return;
     let latest;
     try { latest = readSavedState(); } catch { /* Storage can be disabled. */ }
-    const freshImport = command.type === 'importLayout' && activeModal.fresh;
+    const freshImport = command.type === 'importStoreConfiguration' && activeModal.fresh;
     if (modal?.stale || (latest && (freshImport || latest !== JSON.stringify(state)))) {
       modal.stale = true;
       pendingStorage = true;
@@ -320,39 +334,39 @@ function freshLayoutTarget() {
   catch { return false; }
 }
 
-function exportLayoutFile() {
-  const text = `${JSON.stringify(exportLayout(state), null, 2)}\n`;
+function exportStoreFile() {
+  const text = `${JSON.stringify(exportStoreConfiguration(state), null, 2)}\n`;
   const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
   const link = document.createElement('a');
   link.href = url;
-  link.download = `np-pos-layout-${businessDate()}.json`;
+  link.download = `np-pos-settings-${businessDate()}.json`;
   document.body.append(link);
   link.click();
   link.remove();
   setTimeout(() => URL.revokeObjectURL(url), 30_000);
-  toast('レイアウトの設定を書き出しました。');
+  toast('店舗設定と卓レイアウトを書き出しました。');
 }
 
-async function readLayoutFile(input) {
+async function readStoreFile(input) {
   const file = input.files[0];
   if (modal?.type !== 'layout-transfer' || !file) return;
   const activeModal = modal;
   const request = Symbol('layout file');
-  Object.assign(activeModal, { request, fileName: file.name, layout: null, error: '', loading: true });
+  Object.assign(activeModal, { request, fileName: file.name, configuration: null, error: '', loading: true });
   paintDialog(input);
   try {
     const text = await file.text().catch(() => { throw new Error('ファイルを開けませんでした。もう一度選んでください。'); });
     if (modal !== activeModal || request !== activeModal.request || !dialog.open) return;
-    const layout = parseLayoutFile(text);
-    apply(activeModal.fresh ? createDemo('closed') : state, { type: 'importLayout', layout });
-    activeModal.layout = layout;
+    const configuration = parseStoreConfiguration(text);
+    apply(activeModal.fresh ? createDemo('closed') : state, { type: 'importStoreConfiguration', configuration });
+    activeModal.configuration = configuration;
   } catch (error) {
     if (modal !== activeModal || request !== activeModal.request || !dialog.open) return;
     activeModal.error = error.message;
   }
   activeModal.loading = false;
   paintDialog(input);
-  if (activeModal.layout) dialog.querySelector('#submit-dialog')?.focus({ preventScroll: true });
+  if (activeModal.configuration) dialog.querySelector('#submit-dialog')?.focus({ preventScroll: true });
 }
 
 function openDialog(type, data = {}) {
@@ -392,8 +406,9 @@ function paintDialog(layoutFileInput) {
   switch (modal.type) {
     case 'layout-transfer': {
       const fileFocused = document.activeElement === layoutFileInput;
-      present('レイアウトの書き出し・読み込み', renderLayoutTransfer(modal, { escape, icon }),
-        modal.layout ? 'このレイアウトを読み込む' : null, { style: 'layout-transfer-dialog' });
+      const confirm = modal.configuration?.settings ? 'この設定を読み込む' : 'このレイアウトを読み込む';
+      present('設定の書き出し・読み込み', renderLayoutTransfer(modal, { escape, icon }),
+        modal.configuration ? confirm : null, { style: 'layout-transfer-dialog' });
       if (layoutFileInput) {
         const replacement = dialog.querySelector('#layout-transfer-file');
         layoutFileInput.setAttribute('aria-describedby', replacement.getAttribute('aria-describedby'));
@@ -404,11 +419,16 @@ function paintDialog(layoutFileInput) {
       }
       return;
     }
+    case 'store-settings':
+      present('店舗設定', renderStoreSettingsEditor(modal.editor, { escape, icon, stock: state.stock, yen }),
+        '店舗設定を保存', { style: 'store-settings-dialog' });
+      dialog.querySelector('#submit-dialog').formNoValidate = true;
+      return;
     case 'edit-layout':
       present('ホールのレイアウト編集', renderLayoutEditor(modal.layout, escape), 'レイアウトを保存', { style: 'modal-layout' });
       return;
     case 'demo':
-      present('サンプル操作',`<p class="form-copy">開店から試すと、現在の卓配置で営業をやり直せます。営業中のサンプルを読み込むと、配置と操作履歴がサンプルの初期状態に戻ります。</p><div class="demo-options">${button('開店から試す','demo-start',{glyph:'power',tone:'primary'})}${button('営業中のサンプルを読み込む','demo-live',{glyph:'refresh'})}</div>`,null);
+      present('サンプル操作',`<p class="form-copy">開店から試すと、現在の卓配置と店舗設定で営業をやり直せます。営業中のサンプルを読み込むと、店舗設定・卓配置・操作履歴がサンプルの初期状態に戻ります。</p><div class="demo-options">${button('開店から試す','demo-start',{glyph:'power',tone:'primary'})}${button('営業中のサンプルを読み込む','demo-live',{glyph:'refresh'})}</div>`,null);
       return;
     case 'open': {
       const current = businessDate();
@@ -420,7 +440,7 @@ function paintDialog(layoutFileInput) {
     case 'seat': {
       const first = modal.tableId ? [modal.tableId] : [];
       const isVip = state.tables.some((table) => table.id === modal.tableId && table.area === 'VIP');
-      const options = state.menu.filter((item)=>item.category==='セット').map((item)=>`<option value="${item.id}" ${isVip && item.id==='vip60' ? 'selected' : ''}>${escape(item.name)} · ${yen(item.price)}/人</option>`).join('');
+      const options = state.menu.filter((item)=>item.category==='セット' && item.enabled !== false).map((item)=>`<option value="${escape(item.id)}" ${isVip && item.id==='vip60' ? 'selected' : ''}>${escape(item.name)}${item.name.includes(`${item.duration}分`) ? '' : ` · ${item.duration}分`} · ${yen(item.price)}/人</option>`).join('');
       present('来店登録',`<div class="form-grid">${label('来店人数','<input name="guests" type="number" min="1" max="100" step="1" value="2" required inputmode="numeric">')}${label('お客様名（任意）','<input name="customer" maxlength="60" placeholder="例　佐藤様">')}</div>${label('初回セット',`<select name="setId">${options}</select>`)}${seatPicker(first,{primary:modal.tableId})}<p class="field-help">同じグループで複数卓を使う場合は、追加の卓も選択します。伝票・残り時間・会計は全卓で共有します。</p>`,'来店を確定',{style:'modal-wide'});
       return;
     }
@@ -431,11 +451,11 @@ function paintDialog(layoutFileInput) {
       present('注文を追加',`${headline}<div class="order-tools"><div class="seg order-seg" role="group" aria-label="メニューのカテゴリ">${categories.map((text)=>`<button type="button" data-action="category" data-id="${text}" aria-pressed="${modal.category===text}">${text}</button>`).join('')}</div><label class="field"><span class="sr-only">メニュー検索</span><input id="menu-search" placeholder="メニューを検索" value="${escape(modal.search)}"></label></div><div id="order-products">${renderProducts()}</div><div id="order-selection">${renderProductDetails()}</div>`,'注文を確定',{style:'modal-wide'});
       return;
     case 'extend': {
-      const options = [30,60].map((minutes)=> {
-        const next = apply(state,{type:'extend',ticketId:id,minutes});
+      const options = extensionPlans().map((plan, index)=> {
+        const next = apply(state,{type:'extend',ticketId:id,menuId:plan.id});
         const final = quote(next,id);
         const newTicket = next.tickets.find((current)=>current.id===id);
-        return `<label class="extend-option"><input type="radio" name="minutes" value="${minutes}" ${minutes===30?'checked':''}><span><strong>${minutes}分延長</strong><small>終了予定 ${dateTime.format(newTicket.endsAt)}</small></span><span><strong class="money">+${yen(final.total-q.total)}</strong><small>延長後 ${yen(final.total)}</small></span></label>`;
+        return `<label class="extend-option"><input type="radio" name="extensionId" value="${escape(plan.id)}" ${index === 0 ? 'checked' : ''}><span><strong>${escape(plan.name)}</strong><small>${plan.duration}分 · 終了予定 ${dateTime.format(newTicket.endsAt)}</small></span><span><strong class="money">+${yen(final.total-q.total)}</strong><small>延長後 ${yen(final.total)}</small></span></label>`;
       }).join('');
       present('セットを延長',`${headline}<p class="form-copy">人数、指名料、サービス料・税を含めた追加額です。</p><fieldset class="choices extend-choices"><legend class="sr-only">延長時間</legend>${options}</fieldset>`,'延長を確定');
       return;
@@ -487,24 +507,43 @@ function paintDialog(layoutFileInput) {
 function renderProducts() {
   const query = modal.search.trim().toLowerCase();
   const options = state.menu.filter((item) => {
-    if (!['ドリンク','ボトル','フード','指名'].includes(item.category)) return false;
+    if (item.enabled === false || !['ドリンク','ボトル','フード','指名'].includes(item.category)) return false;
     return query ? `${item.name} ${item.category}`.toLowerCase().includes(query) : modal.category === 'よく使う' ? item.popular : item.category === modal.category;
   });
   if (!options.length) return '<p class="form-copy">該当するメニューはありません。</p>';
-  return `<div class="product-grid">${options.map((item) => `<button type="button" class="product" data-action="product" data-id="${item.id}" aria-pressed="${item.id===modal.product}"><span>${escape(item.name)}</span><strong>${yen(item.price)}</strong></button>`).join('')}</div>`;
+  return `<div class="product-grid">${options.map((item) => `<button type="button" class="product" data-action="product" data-id="${escape(item.id)}" aria-pressed="${item.id===modal.product}"><span>${escape(item.name)}</span><strong>${yen(item.price)}</strong></button>`).join('')}</div>`;
+}
+
+function commissionLabel({ fixed, rate, points }) {
+  return [fixed && `${yen(fixed)}/点`, rate && `${rate}%`, points && `${points} Pt/点`].filter(Boolean).join(' · ');
 }
 
 function renderProductDetails() {
-  const item = state.menu.find((product)=>product.id === modal.product);
+  const item = state.menu.find((product)=>product.id === modal.product && product.enabled !== false);
   if (!item) return '<p class="form-copy order-tip">追加するメニューを選択してください。</p>';
   const stockInfo = item.recipe?.map((need)=> {
     const stock = state.stock.find((goods)=>goods.id===need.stockId);
     return `${escape(stock.name)} ${number.format(need.quantity)}${escape(stock.unit)}`;
   }).join('・');
-  const commissionInfo = item.commission ? [item.commission.fixed && `${yen(item.commission.fixed)} / 点`,item.commission.rate && `${item.commission.rate}%`,item.commission.points && `${item.commission.points} Pt / 点`].filter(Boolean).join(' · ') : '';
+  const availableCast = state.cast.filter((person) => person.enabled !== false);
+  const baseCommission = commissionLabel(getItemCommission(item));
+  const usesOverrides = availableCast.some((person) => person.commissionOverride);
+  const showChoices = item.requiresCast || availableCast.some((person) => commissionLabel(getItemCommission(item, person)));
+  let castChoices = '';
+  if (showChoices && availableCast.length) {
+    const choices = availableCast.map((person) => {
+      const rule = usesOverrides ? commissionLabel(getItemCommission(item, person)) || '歩合なし' : '';
+      return `<label class="choice"><input name="castIds" type="checkbox" value="${escape(person.id)}"><span><strong>${escape(person.name)}</strong>${rule ? `<small>${rule}</small>` : ''}</span></label>`;
+    }).join('');
+    castChoices = `<fieldset class="choices cast-choices"><legend>歩合を付けるキャスト${item.requiresCast ? '（必須）' : '（任意）'}</legend><div class="choice-grid">${choices}</div>${usesOverrides
+      ? '<p class="field-help">複数のキャストを選ぶと、売上・固定額・ポイントを按分します。</p>'
+      : baseCommission ? `<p class="field-help">${icon('users',14)} ${baseCommission}</p>` : ''}</fieldset>`;
+  } else if (item.requiresCast) {
+    castChoices = '<p class="field-help">店舗設定で注文に使うキャストを有効にしてください。</p>';
+  }
   return `<section class="order-selection"><div class="order-selected"><div><h3>${escape(item.name)}</h3><p>${yen(item.price)} / 点</p></div><label class="field order-qty"><span>数量</span><input name="quantity" type="number" min="1" max="100" step="1" inputmode="numeric" value="1" required></label></div>
     ${stockInfo ? `<p class="field-help">${icon('box',14)} 在庫引き落とし / 点　${stockInfo}</p>` : ''}
-    ${commissionInfo || item.requiresCast ? `<fieldset class="choices cast-choices"><legend>歩合を付けるキャスト${item.requiresCast ? '（必須）' : '（任意）'}</legend><div class="choice-grid">${state.cast.map((person)=>`<label class="choice"><input name="castIds" type="checkbox" value="${person.id}"><span><strong>${escape(person.name)}</strong></span></label>`).join('')}</div>${commissionInfo ? `<p class="field-help">${icon('users',14)} ${commissionInfo}${item.requiresCast ? '' : ' · 対象者を選んだ場合に反映'}</p>` : ''}</fieldset>` : ''}</section>`;
+    ${castChoices}</section>`;
 }
 
 function renderPayment(entry,index) {
@@ -565,10 +604,18 @@ function clickAction(target) {
     return;
   }
   if (action === 'layout-transfer') {
-    openDialog(action, { fileName: '', layout: null, error: '', loading: false, fresh: freshLayoutTarget() });
+    openDialog(action, { fileName: '', configuration: null, error: '', loading: false, fresh: freshLayoutTarget() });
     return;
   }
-  if (action === 'layout-export') { exportLayoutFile(); return; }
+  if (action === 'layout-export') { exportStoreFile(); return; }
+  if (action === 'store-settings') {
+    openDialog(action, { editor: { settings: getStoreSettings(state), tab: 'menu', selected: {} } });
+    return;
+  }
+  if (action.startsWith('store-editor-') && modal?.editor) {
+    if (handleStoreSettingsEditorAction(dialog, modal.editor, target)) paintDialog();
+    return;
+  }
   if (action === 'edit-layout') {
     const preferredArea = floorView === 'plan' ? planArea : area;
     openDialog(action, { layout: newLayoutDraft(state, preferredArea, selected) });
@@ -599,6 +646,7 @@ function clickAction(target) {
       sample.tables = structuredClone(state.tables);
       sample.layoutAreas = getLayoutAreas(state);
       sample.archivedTables = structuredClone(state.archivedTables ?? []);
+      Object.assign(sample, getStoreSettings(state));
     }
     saveState(sample);
     selected = fromOpening ? null : 'a1';
@@ -655,13 +703,18 @@ function submitDialog(form) {
   const id = modal.ticketId;
   switch(modal.type) {
     case 'layout-transfer': {
-      if (!modal.layout) return;
-      commit({ type: 'importLayout', layout: modal.layout }, 'レイアウトの設定を読み込みました。', (next) => {
+      if (!modal.configuration) return;
+      const message = modal.configuration.settings ? '店舗設定と卓レイアウトを読み込みました。' : '卓レイアウトを読み込みました。';
+      commit({ type: 'importStoreConfiguration', configuration: modal.configuration }, message, (next) => {
         setFloorView('plan', getLayoutAreas(next)[0] ?? null);
         area = null; filter = 'all'; mobileDetails = false; syncFloorSelection();
       });
       break;
     }
+    case 'store-settings':
+      if (!commitStoreSettingsEditor(dialog, modal.editor)) return;
+      commit({ type: 'saveStoreSettings', settings: structuredClone(modal.editor.settings) }, '店舗設定を保存しました。');
+      break;
     case 'edit-layout': {
       const layout = modal.layout;
       if (!commitLayoutFields(dialog, layout, escape).ok) return;
@@ -689,9 +742,12 @@ function submitDialog(form) {
       if (!modal.product) { showError('追加するメニューを選択してください。'); return; }
       commit({type:'order',ticketId:id,items:[{menuId:modal.product,quantity:numeric('quantity'),castIds:data.getAll('castIds')}]},'注文を確定しました。在庫と歩合見込を更新しました。');
       break;
-    case 'extend':
-      commit({type:'extend',ticketId:id,minutes:numeric('minutes')},`${numeric('minutes')}分延長しました。`);
+    case 'extend': {
+      const plan = extensionPlans().find((item) => item.id === value('extensionId'));
+      if (!plan) { showError('延長プランを選択してください。'); return; }
+      commit({type:'extend',ticketId:id,menuId:plan.id},`${plan.duration}分延長しました。`);
       break;
+    }
     case 'deposit':
       commit({type:'deposit',ticketId:id,method:value('method'),amount:numeric('amount')},'前受金を記録しました。');
       break;
@@ -732,13 +788,12 @@ app.addEventListener('change',(event)=> {
   if (event.target.id==='area-filter') { area=event.target.value || null;render();app.querySelector('#area-filter')?.focus(); }
 });
 dialog.addEventListener('change', (event) => {
-  if (event.target.name === 'layout-file') readLayoutFile(event.target);
+  if (event.target.name === 'layout-file') readStoreFile(event.target);
 });
 dialog.addEventListener('input',(event)=> {
   if (event.target.id==='menu-search') {modal.search=event.target.value;reviseProduct();}
   if (event.target.name==='paymentAmount') updatePaymentNote();
-  const error=dialog.querySelector('.form-error');
-  if (error) error.hidden=true;
+  for (const error of dialog.querySelectorAll('.form-error')) error.hidden = true;
 });
 dialog.addEventListener('submit',(event)=> {
   event.preventDefault();

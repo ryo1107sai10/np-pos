@@ -21,6 +21,7 @@ const paths = {
   ticket: '<path d="M4 4h16v16l-3-1.6-2.5 1.6-2.5-1.6-2.5 1.6L7 18.4 4 20V4Zm4 5h8m-8 4h6"/>',
   move: '<path d="M3 7h17m-4-4 4 4-4 4m5 6H4m4-4-4 4 4 4"/>',
   filter: '<path d="M3 6h18M7 12h10m-7 6h4"/>',
+  settings: '<path d="M5 3v5m0 4v9m7-18v9m0 4v5m7-18v3m0 4v11"/><circle cx="5" cy="10" r="2"/><circle cx="12" cy="14" r="2"/><circle cx="19" cy="8" r="2"/>',
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5m0-8h.01"/>',
   alert: '<path d="M10.3 4a2 2 0 0 1 3.4 0l7.5 13a2 2 0 0 1-1.7 3H4.5a2 2 0 0 1-1.7-3l7.5-13ZM12 9v4m0 3h.01"/>',
   download: '<path d="M12 3v12m-4-4 4 4 4-4M5 16v4h14v-4"/>',

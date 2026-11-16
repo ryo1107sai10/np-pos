@@ -163,7 +163,8 @@
   padding: 7px 10px;
 }
 
-.layout-transfer-totals > div + div { border-inline-start: 1px solid #e7ebf4; }
+.layout-transfer-totals > div:nth-child(even) { border-inline-start: 1px solid #e7ebf4; }
+.layout-transfer-totals > div:nth-child(n+3) { border-top: 1px solid #e7ebf4; }
 .layout-transfer-totals dt { color: #4c5a76; }
 .layout-transfer-totals dd { margin: 0; color: #252f4a; font-size: 1.07rem; font-weight: 710; font-variant-numeric: tabular-nums; }
 

@@ -88,8 +88,10 @@ function renderCommission(state, api, result) {
   const pending = result.pendingCommission || [];
   const earnedByCast = new Map(earned.map((item) => [item.castId, item]));
   const pendingByCast = new Map(pending.map((item) => [item.castId, item]));
-  const names = byId(state.cast);
-  const castRows = state.cast.map(({id, name}) => {
+  const previousCast = state.archivedCast ?? [];
+  const names = byId([...previousCast, ...state.cast]);
+  const roster = [...state.cast, ...previousCast.filter(({id}) => earnedByCast.has(id) || pendingByCast.has(id))];
+  const castRows = roster.map(({id, name}) => {
     const final = earnedByCast.get(id) || {};
     const estimate = pendingByCast.get(id) || {};
     return `<tr><td><span class="lr-person"><span class="lr-avatar" aria-hidden="true">${escape(Array.from(name).at(0) || '')}</span>${escape(name)}</span></td>

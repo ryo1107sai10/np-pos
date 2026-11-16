@@ -11,6 +11,14 @@
 .floor-heading-actions,
 .layout-editor-actions { justify-content: flex-end; }
 
+.floor-heading { flex-wrap: wrap; }
+
+.floor-heading-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .floor-view-switch {
   display: inline-flex;
   align-items: center;
@@ -570,7 +578,11 @@
 }
 
 @media (max-width: 610px) {
-  .floor-heading { flex-wrap: wrap; align-items: center; }
+  .floor-heading { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .floor-heading-main { justify-content: space-between; }
+  .floor-heading-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .floor-heading-actions .btn { min-width: 0; padding-inline: 5px; gap: 4px; font-size: 11px; white-space: normal; }
+  .floor-heading-actions .btn .icon { flex: none; width: 13px; height: 13px; }
   .floor-heading-actions, .layout-editor-actions { gap: 5px; }
   .layout-toolbar { margin-bottom: 8px; gap: 6px 8px; }
   .floor-view-switch button, .layout-areas button { min-height: 44px; padding-inline: 8px; }
@@ -612,7 +624,7 @@
 .seating-plan-toolbar { flex-wrap: wrap; }
 .seating-plan-toolbar .layout-areas { border-color: transparent; background: transparent; }
 @media (max-width: 480px) {
-  .floor-heading-actions .btn { min-height: 44px; padding-inline: 7px; }
+  .floor-heading-actions .btn { min-height: 44px; }
   .seating-plan-toolbar .layout-areas { padding: 0; }
 }
 
