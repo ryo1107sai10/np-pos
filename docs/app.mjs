@@ -1,7 +1,8 @@
-import { apply, businessDate, createDemo, getLayoutAreas, getLayoutTables, getTableLabel, getTicketForTable, quote, summary, tableStatus, yen } from './engine.mjs';
+import { apply, businessDate, createDemo, exportLayout, getLayoutAreas, getLayoutTables, getTableLabel, getTicketForTable, parseLayoutFile, quote, summary, tableStatus, yen } from './engine.mjs';
 import { icon } from './icons.mjs';
 import { renderReport } from './reports.mjs';
 import { bindLayoutEditor, commitLayoutFields, floorLayoutStage, handleLayoutEditorAction, layoutAreaTabs, newLayoutDraft, renderLayoutEditor } from './floor-layout.mjs';
+import { renderLayoutTransfer } from './layout-transfer.mjs';
 
 const app = document.querySelector('#app');
 const dialog = document.querySelector('#dialog');
@@ -43,9 +44,13 @@ function escape(value = '') {
   return String(value).replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 }
 
+function readSavedState() {
+  return localStorage.getItem(storageKey) ?? localStorage.getItem(legacyStorageKey);
+}
+
 function loadState() {
   try {
-    const stored = JSON.parse((localStorage.getItem(storageKey) ?? localStorage.getItem(legacyStorageKey)));
+    const stored = JSON.parse(readSavedState());
     if (stored?.day && Array.isArray(stored.tables) && Array.isArray(stored.tickets) && Array.isArray(stored.menu)) return stored;
   } catch { /* A fresh sample is available when storage is blocked. */ }
   return createDemo();
@@ -213,7 +218,7 @@ function renderFloor() {
     : `<div class="table-grid">${visible.length ? visible.map(renderTable).join('') : emptyState}</div>`;
   return `${!isOpen ? `<div class="notice"><span>${icon('info',17)}開店すると、空席から来店を登録できます。</span></div>` : ''}${renderMetrics()}
     <div class="floor-layout">
-      <section class="floor" aria-labelledby="floor-title"><div class="floor-heading"><h2 id="floor-title">${icon('grid',17)}${showingPlan ? '店内レイアウト' : '座席一覧'}</h2><div class="floor-heading-actions">${viewSwitch}${button('レイアウト編集', 'edit-layout', { glyph: 'move' })}</div></div>
+      <section class="floor" aria-labelledby="floor-title"><div class="floor-heading"><h2 id="floor-title">${icon('grid',17)}${showingPlan ? '店内レイアウト' : '座席一覧'}</h2><div class="floor-heading-actions">${viewSwitch}${button('レイアウト編集', 'edit-layout', { glyph: 'move' })}${button('設定の移行', 'layout-transfer', { glyph: 'download' })}</div></div>
       ${areas.length ? `<div class="seating-toolbar glass${showingPlan ? ' seating-plan-toolbar' : ''}"><div class="seg" role="group" aria-label="卓の状態で絞り込む">${[['all','すべて'],['used','使用中'],['available','空席'],['urgent','要対応']].map(([key,text])=>`<button type="button" data-action="filter" data-id="${key}" aria-pressed="${key===filter}">${text}<small>${counts[key]}</small></button>`).join('')}</div>${areaPicker}</div>` : ''}
       ${floorContent}</section>
       ${mobileDetails ? `<button type="button" class="detail-shade" data-action="hide-detail" aria-hidden="true" tabindex="-1"></button>` : ''}${renderDetail()}
@@ -288,13 +293,14 @@ async function commit(command, message, after) {
   const update = () => {
     if (!dialog.open || modal !== activeModal) return;
     let latest;
-    try { latest = localStorage.getItem(storageKey); } catch { /* Storage can be disabled. */ }
-    if (modal?.stale || (latest && latest !== JSON.stringify(state))) {
+    try { latest = readSavedState(); } catch { /* Storage can be disabled. */ }
+    const freshImport = command.type === 'importLayout' && activeModal.fresh;
+    if (modal?.stale || (latest && (freshImport || latest !== JSON.stringify(state)))) {
       modal.stale = true;
       pendingStorage = true;
       throw new Error('別のタブでデータが更新されました。画面を閉じ、最新状態を確認してください。');
     }
-    const next = apply(state, command);
+    const next = apply(freshImport ? createDemo('closed') : state, command);
     saveState(next);
     if (after) after(next);
     dialog.close();
@@ -307,6 +313,46 @@ async function commit(command, message, after) {
     else update();
   } catch (error) { showError(error.message); }
   finally { committing = false; if (submit?.isConnected) submit.disabled = false; }
+}
+
+function freshLayoutTarget() {
+  try { return saveAvailable && readSavedState() === null; }
+  catch { return false; }
+}
+
+function exportLayoutFile() {
+  const text = `${JSON.stringify(exportLayout(state), null, 2)}\n`;
+  const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `np-pos-layout-${businessDate()}.json`;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  toast('レイアウトの設定を書き出しました。');
+}
+
+async function readLayoutFile(input) {
+  const file = input.files[0];
+  if (modal?.type !== 'layout-transfer' || !file) return;
+  const activeModal = modal;
+  const request = Symbol('layout file');
+  Object.assign(activeModal, { request, fileName: file.name, layout: null, error: '', loading: true });
+  paintDialog(input);
+  try {
+    const text = await file.text().catch(() => { throw new Error('ファイルを開けませんでした。もう一度選んでください。'); });
+    if (modal !== activeModal || request !== activeModal.request || !dialog.open) return;
+    const layout = parseLayoutFile(text);
+    apply(activeModal.fresh ? createDemo('closed') : state, { type: 'importLayout', layout });
+    activeModal.layout = layout;
+  } catch (error) {
+    if (modal !== activeModal || request !== activeModal.request || !dialog.open) return;
+    activeModal.error = error.message;
+  }
+  activeModal.loading = false;
+  paintDialog(input);
+  if (activeModal.layout) dialog.querySelector('#submit-dialog')?.focus({ preventScroll: true });
 }
 
 function openDialog(type, data = {}) {
@@ -338,12 +384,26 @@ function seatPicker(selectedIds,{ticketId,primary=null}={}) {
   }).join('')}</div></fieldset>`;
 }
 
-function paintDialog() {
+function paintDialog(layoutFileInput) {
   const ticket = modal.ticketId ? state.tickets.find((item)=>item.id===modal.ticketId) : null;
   const id = modal.ticketId;
   const q = ticket ? quote(state,id) : null;
   const headline = ticket ? `<div class="modal-context">${icon('table',16)}<strong>${escape(titles(ticket))}</strong><span>${ticket.guests}名${ticket.customer ? ` · ${escape(ticket.customer)}` : ''}</span></div>` : '';
   switch (modal.type) {
+    case 'layout-transfer': {
+      const fileFocused = document.activeElement === layoutFileInput;
+      present('レイアウトの書き出し・読み込み', renderLayoutTransfer(modal, { escape, icon }),
+        modal.layout ? 'このレイアウトを読み込む' : null, { style: 'layout-transfer-dialog' });
+      if (layoutFileInput) {
+        const replacement = dialog.querySelector('#layout-transfer-file');
+        layoutFileInput.setAttribute('aria-describedby', replacement.getAttribute('aria-describedby'));
+        if (modal.error) layoutFileInput.setAttribute('aria-invalid', 'true');
+        else layoutFileInput.removeAttribute('aria-invalid');
+        replacement.replaceWith(layoutFileInput);
+        if (fileFocused) layoutFileInput.focus({ preventScroll: true });
+      }
+      return;
+    }
     case 'edit-layout':
       present('ホールのレイアウト編集', renderLayoutEditor(modal.layout, escape), 'レイアウトを保存', { style: 'modal-layout' });
       return;
@@ -504,6 +564,11 @@ function clickAction(target) {
     render({preserveFocus:true});
     return;
   }
+  if (action === 'layout-transfer') {
+    openDialog(action, { fileName: '', layout: null, error: '', loading: false, fresh: freshLayoutTarget() });
+    return;
+  }
+  if (action === 'layout-export') { exportLayoutFile(); return; }
   if (action === 'edit-layout') {
     const preferredArea = floorView === 'plan' ? planArea : area;
     openDialog(action, { layout: newLayoutDraft(state, preferredArea, selected) });
@@ -589,6 +654,14 @@ function submitDialog(form) {
   const numeric = (key) => Number(value(key));
   const id = modal.ticketId;
   switch(modal.type) {
+    case 'layout-transfer': {
+      if (!modal.layout) return;
+      commit({ type: 'importLayout', layout: modal.layout }, 'レイアウトの設定を読み込みました。', (next) => {
+        setFloorView('plan', getLayoutAreas(next)[0] ?? null);
+        area = null; filter = 'all'; mobileDetails = false; syncFloorSelection();
+      });
+      break;
+    }
     case 'edit-layout': {
       const layout = modal.layout;
       if (!commitLayoutFields(dialog, layout, escape).ok) return;
@@ -658,6 +731,9 @@ document.addEventListener('click',(event)=> {
 app.addEventListener('change',(event)=> {
   if (event.target.id==='area-filter') { area=event.target.value || null;render();app.querySelector('#area-filter')?.focus(); }
 });
+dialog.addEventListener('change', (event) => {
+  if (event.target.name === 'layout-file') readLayoutFile(event.target);
+});
 dialog.addEventListener('input',(event)=> {
   if (event.target.id==='menu-search') {modal.search=event.target.value;reviseProduct();}
   if (event.target.name==='paymentAmount') updatePaymentNote();
@@ -685,7 +761,7 @@ document.addEventListener('keydown', (event) => {
 });
 window.addEventListener('hashchange',()=>{page=readPage(); render();});
 window.addEventListener('storage',(event)=>{
-  if (event.key!==storageKey) return;
+  if (event.key!==storageKey && event.key!==legacyStorageKey) return;
   if (dialog.open) { pendingStorage = true; return; }
   state=loadState(); syncFloorSelection(); render({preserveFocus:true});
 });

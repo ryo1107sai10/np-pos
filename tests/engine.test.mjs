@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createDemo, apply, quote, summary, getTicketForTable, tableStatus, businessDate,
-  getLayoutTables, getLayoutAreas, getTableLabel, layoutGrid, removeLayoutArea } from '../docs/engine.mjs';
+  getLayoutTables, getLayoutAreas, getTableLabel, layoutGrid, removeLayoutArea, exportLayout, parseLayoutFile } from '../docs/engine.mjs';
 
 const now = Date.parse('2026-11-16T14:41:00Z');
 const minutes = (count) => count * 60_000;
@@ -312,4 +312,102 @@ test('the last empty area can be removed and saved, then a new area and table ca
   state = saveConfiguration(state, { areas: ['テラス'], tables: [newTable] });
   assert.deepEqual(getLayoutAreas(state), ['テラス']);
   assert.equal(getTableLabel(state, newTable.id), '新卓');
+});
+
+function importConfiguration(state, layout) {
+  return apply(state, { type: 'importLayout', layout }, now);
+}
+
+test('the portable file contains only layout data and is normalized on reading', () => {
+  const state = createDemo('live', now);
+  state.tables[0].notes = '持ち出さないメモ';
+  const layout = exportLayout(state);
+  assert.deepEqual(Object.keys(layout), ['format', 'version', 'areas', 'tables']);
+  assert.equal(layout.format, 'np-pos.layout');
+  assert.equal(layout.version, 1);
+  assert.deepEqual(Object.keys(layout.tables[0]), ['id', 'name', 'area', 'x', 'y', 'capacity']);
+  assert.deepEqual(parseLayoutFile(JSON.stringify(layout)), layout);
+  const unnormalized = { ...layout, tickets: state.tickets, areas: layout.areas.map((area) => ` ${area} `),
+    tables: layout.tables.map((table) => ({ ...table, name: ` ${table.name} `, notes: '付加情報' })) };
+  assert.deepEqual(parseLayoutFile(`\uFEFF${JSON.stringify(unnormalized)}`), layout);
+});
+
+test('invalid layout files are refused before importing any table', () => {
+  const layout = exportLayout(createDemo('closed', now));
+  const parse = (value) => parseLayoutFile(JSON.stringify(value));
+  assert.throws(() => parseLayoutFile('{bad'), /JSON形式/);
+  assert.throws(() => parse({ ...layout, format: 'other.format' }), /NP POS/);
+  assert.throws(() => parse({ ...layout, version: 2 }), /バージョン/);
+  assert.throws(() => parse({ ...layout, tables: {} }), /卓の配置/);
+  const replaceFirst = (patch) => ({ ...layout, tables: [{ ...layout.tables[0], ...patch }, ...layout.tables.slice(1)] });
+  assert.throws(() => parse(replaceFirst({ id: 'a7' })), /無効な卓ID/);
+  assert.throws(() => parse(replaceFirst({ id: 'a2' })), /重複/);
+  assert.throws(() => parse(replaceFirst({ area: '存在しない' })), /エリア/);
+  assert.throws(() => parse(replaceFirst({ x: 4 })), /重なっ/);
+  assert.throws(() => parse(replaceFirst({ capacity: 0 })), /定員/);
+  assert.throws(() => parse(replaceFirst({ name: undefined })), /卓名/);
+  assert.throws(() => importConfiguration(createDemo('closed', now), replaceFirst({ id: 'a7' })), /無効な卓ID/);
+});
+
+test('import preserves matching destination IDs and rejects changes that invalidate active or paid tickets', () => {
+  const state = createDemo('live', now);
+  state.tables[0].notes = '店舗固有メモ';
+  const source = exportLayout(state);
+  source.tables[0].name = '新しい卓名';
+  source.tables[0].x = 1;
+  const next = importConfiguration(state, source);
+  assert.deepEqual(exportLayout(next), source);
+  assert.equal(next.tables[0].notes, '店舗固有メモ');
+  assert.equal(ticketAt(next).id, ticketAt(state).id);
+  assert.deepEqual(next.tickets, state.tickets);
+  assert.deepEqual(next.stock, state.stock);
+  assert.deepEqual(next.movements, state.movements);
+  assert.deepEqual(next.day, state.day);
+  assert.deepEqual(next.closedDays, state.closedDays);
+
+  const refused = structuredClone(next);
+  for (const id of ['a1', 'b2', 'v1']) {
+    const withoutOccupied = { ...source, tables: source.tables.filter((table) => table.id !== id) };
+    assert.throws(() => importConfiguration(next, withoutOccupied), /使用中か退店待ち/);
+  }
+  const tooSmall = { ...source, tables: source.tables.map((table) => table.id === 'a1' ? { ...table, capacity: 1 } : table) };
+  assert.throws(() => importConfiguration(next, tooSmall), /合計定員/);
+  assert.deepEqual(next, refused);
+});
+
+test('import accepts registered sample IDs absent locally and replaces empty layouts', () => {
+  const layout = exportLayout(createDemo('closed', now));
+  const blank = { ...createDemo('closed', now), layoutAreas: [], tables: [] };
+  const imported = importConfiguration(blank, layout);
+  assert.deepEqual(exportLayout(imported), layout);
+  const empty = { ...layout, areas: [], tables: [] };
+  const cleared = importConfiguration(imported, empty);
+  assert.deepEqual(exportLayout(cleared), empty);
+  assert.deepEqual(cleared.stock, imported.stock);
+  const custom = { ...layout, areas: ['テラス', '空のエリア'], tables: [newTable] };
+  const normalized = parseLayoutFile(JSON.stringify(custom));
+  assert.deepEqual(exportLayout(importConfiguration(cleared, custom)), normalized);
+});
+
+test('repeated imports update the alias of an archived table while leaving historical links intact', () => {
+  const state = createDemo('live', now);
+  const original = exportLayout(state);
+  const departed = state.tickets.find((ticket) => ticket.tableIds.includes('b4'));
+  const archived = importConfiguration(state, { ...original, tables: original.tables.filter((table) => table.id !== 'b4') });
+  const replacement = { ...original, tables: original.tables.map((table) => table.id === 'b4' ? { ...table, name: '新B-04' } : table) };
+  let next = importConfiguration(archived, replacement);
+  const alias = next.tables.find((table) => table.layoutSourceId === 'b4');
+  assert.match(alias.id, /^table-/);
+  assert.equal(alias.name, '新B-04');
+  assert.equal(getTableLabel(next, departed.tableIds[0]), 'B-04');
+  assert.deepEqual(exportLayout(next), replacement);
+
+  next = seatSample(next, [alias.id]);
+  const placement = { ...replacement, tables: replacement.tables.map((table) => table.id === 'b4' ? { ...table, name: '更新B-04' } : table) };
+  const repeated = importConfiguration(next, placement);
+  assert.equal(repeated.tables.find((table) => table.layoutSourceId === 'b4').id, alias.id);
+  assert.equal(ticketAt(repeated, alias.id).id, ticketAt(next, alias.id).id);
+  assert.equal(getTableLabel(repeated, 'b4'), 'B-04');
+  assert.deepEqual(exportLayout(repeated), placement);
+  assert.deepEqual(repeated.archivedTables, archived.archivedTables);
 });

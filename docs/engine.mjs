@@ -12,6 +12,8 @@ const moneyFormatter = new Intl.NumberFormat('ja-JP');
 export const layoutGrid = Object.freeze({ columns: 12, rows: 8, tableWidth: 3, tableHeight: 2 });
 const layoutNameMaxLength = 24;
 const newTableId = /^table-[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
+const layoutFileFormat = 'np-pos.layout';
+const layoutFileVersion = 1;
 
 function isLayoutPosition(x, y) {
   return Number.isInteger(x) && x >= 0 && x + layoutGrid.tableWidth <= layoutGrid.columns
@@ -39,6 +41,27 @@ export function getTableLabel(state, id) {
   return state.tables.find((table) => table.id === id)?.name
     ?? state.archivedTables?.find((table) => table.id === id)?.name
     ?? id;
+}
+
+export function exportLayout(state) {
+  return {
+    format: layoutFileFormat,
+    version: layoutFileVersion,
+    areas: getLayoutAreas(state),
+    tables: getLayoutTables(state).map(({ id, layoutSourceId, name, area, x, y, capacity }) => ({
+      id: layoutSourceId ?? id, name, area, x, y, capacity,
+    })),
+  };
+}
+
+export function parseLayoutFile(text) {
+  let file;
+  try {
+    file = JSON.parse(text.replace(/^\uFEFF/, ''));
+  } catch {
+    throw new Error('卓配置ファイルを読み取れませんでした。JSON形式のファイルを選択してください。');
+  }
+  return normalizeLayoutFile(file);
 }
 
 export function yen(amount) {
@@ -330,33 +353,24 @@ export function removeLayoutArea(areas, tables, area) {
   return areas.filter((name) => !isTarget(name));
 }
 
-function doSaveLayout(state, { areas, tables }) {
-  const legacySave = areas === undefined;
-  assert(Array.isArray(tables) && (!legacySave || tables.length === state.tables.length),
-    'すべての卓の配置を指定してください。');
-  const areaList = legacySave ? getLayoutAreas(state) : areas;
-  assert(Array.isArray(areaList) && (areaList.length > 0 || tables.length === 0),
+function validateLayout(areas, tables, findCurrentTable) {
+  assert(Array.isArray(tables), 'すべての卓の配置を指定してください。');
+  assert(Array.isArray(areas) && (areas.length > 0 || tables.length === 0),
     '卓が残っている間は、エリアを1つ以上指定してください。');
   const areasByKey = new Map();
-  for (const entry of areaList) {
+  for (const entry of areas) {
     const area = layoutName(entry, 'エリア名');
     const key = layoutNameKey(area);
     assert(!areasByKey.has(key), `エリア名「${area}」が重複しています。`);
     areasByKey.set(key, area);
   }
 
-  const existing = getLayoutTables(state);
-  const tablesById = new Map(existing.map((table) => [table.id, table]));
-  const archive = state.archivedTables ?? [];
-  const archivedIds = new Set(archive.map((table) => table.id));
   const updatedById = new Map();
   const namesByArea = new Map();
   for (const placement of tables) {
     const id = placement?.id;
-    const current = tablesById.get(id);
     assert(!updatedById.has(id), '卓の指定が重複しています。');
-    assert(current || (!legacySave && typeof id === 'string' && newTableId.test(id) && !archivedIds.has(id)),
-      '卓IDが無効か、削除済みです。');
+    const current = findCurrentTable(id);
     const { x, y, capacity } = placement;
     const name = layoutName(placement.name === undefined ? current?.name : placement.name, '卓名');
     const area = areasByKey.get(layoutNameKey(layoutName(placement.area, 'エリア名')));
@@ -375,6 +389,24 @@ function doSaveLayout(state, { areas, tables }) {
     }
     updatedById.set(id, { ...current, id, name, area, x, y, capacity });
   }
+  return { areas: [...areasByKey.values()], tables: updatedById };
+}
+
+function doSaveLayout(state, { areas, tables }, allowSampleTableIds = false) {
+  const legacySave = areas === undefined;
+  assert(!legacySave || (Array.isArray(tables) && tables.length === state.tables.length),
+    'すべての卓の配置を指定してください。');
+  const existing = getLayoutTables(state);
+  const tablesById = new Map(existing.map((table) => [table.id, table]));
+  const archive = state.archivedTables ?? [];
+  const archivedIds = new Set(archive.map((table) => table.id));
+  const layout = validateLayout(legacySave ? getLayoutAreas(state) : areas, tables, (id) => {
+    const current = tablesById.get(id);
+    assert(current || (!legacySave && typeof id === 'string' && !archivedIds.has(id)
+      && (newTableId.test(id) || (allowSampleTableIds && sampleTableIds.has(id)))), '卓IDが無効か、削除済みです。');
+    return current;
+  });
+  const updatedById = layout.tables;
   for (const ticket of state.tickets) {
     if (!occupiedStatuses.has(ticket.status)) continue;
     let capacity = 0;
@@ -386,16 +418,65 @@ function doSaveLayout(state, { areas, tables }) {
     assert(capacity >= ticket.guests, `伝票 No. ${ticket.number} の利用人数より合計定員が少なくなります。`);
   }
 
-  state.layoutAreas = [...areasByKey.values()];
+  state.layoutAreas = layout.areas;
   state.archivedTables = [...archive, ...existing.filter((table) => !updatedById.has(table.id))];
   state.tables = [...existing.map((table) => updatedById.get(table.id)).filter(Boolean),
     ...[...updatedById.values()].filter((table) => !tablesById.has(table.id))];
+}
+
+function normalizeLayoutFile(file) {
+  assert(file?.format === layoutFileFormat, 'NP POSの卓配置ファイルを選択してください。');
+  assert(file.version === layoutFileVersion, 'このバージョンの卓配置ファイルには対応していません。');
+  const layout = validateLayout(file.areas, file.tables, (id) => {
+    assert(typeof id === 'string' && (newTableId.test(id) || sampleTableIds.has(id)),
+      '卓配置ファイルに無効な卓IDが含まれています。');
+  });
+  return { format: layoutFileFormat, version: layoutFileVersion, areas: layout.areas, tables: [...layout.tables.values()] };
+}
+
+function allocateTableAlias(reservedIds) {
+  assert(typeof globalThis.crypto?.randomUUID === 'function', 'この環境では新しい卓IDを発行できません。');
+  let id;
+  do { id = `table-${globalThis.crypto.randomUUID()}`; } while (reservedIds.has(id));
+  reservedIds.add(id);
+  return id;
+}
+
+function doImportLayout(state, file) {
+  const layout = normalizeLayoutFile(file);
+  const activeIds = new Set(state.tables.map((table) => table.id));
+  const activeAliases = new Map(state.tables.filter((table) => table.layoutSourceId)
+    .map((table) => [table.layoutSourceId, table.id]));
+  const archivedIds = new Set((state.archivedTables ?? []).map((table) => table.id));
+  const reservedIds = new Set([...activeIds, ...archivedIds, ...layout.tables.map((table) => table.id)]);
+  const allocatedAliases = new Map();
+  const tables = layout.tables.map((table) => {
+    const sourceId = table.id;
+    const activeAlias = activeAliases.get(sourceId);
+    if (activeIds.has(sourceId)) return table;
+    if (activeAlias) return { ...table, id: activeAlias };
+    if (!archivedIds.has(sourceId)) return table;
+    const id = allocateTableAlias(reservedIds);
+    allocatedAliases.set(id, sourceId);
+    return { ...table, id };
+  });
+  doSaveLayout(state, { areas: layout.areas, tables }, true);
+  const tablesById = new Map(state.tables.map((table) => [table.id, table]));
+  state.tables = tables.map(({ id }) => {
+    const table = tablesById.get(id);
+    const sourceId = allocatedAliases.get(id);
+    return sourceId ? { ...table, layoutSourceId: sourceId } : table;
+  });
 }
 
 export function apply(state, action, now = Date.now()) {
   const next = structuredClone(state);
   if (action.type === 'saveLayout') {
     doSaveLayout(next, action);
+    return next;
+  }
+  if (action.type === 'importLayout') {
+    doImportLayout(next, action.layout);
     return next;
   }
   if (action.type === 'open') {
@@ -569,6 +650,10 @@ const rooms = [
   ['v', 'VIP', [8, 6]],
 ];
 export const layoutAreas = Object.freeze(rooms.map(([, area]) => area));
+const sampleTables = rooms.flatMap(([prefix, area, capacities]) => capacities.map((capacity, index) => ({
+  id: `${prefix}${index + 1}`, name: `${prefix.toUpperCase()}-${String(index + 1).padStart(2, '0')}`, area, capacity,
+})));
+const sampleTableIds = new Set(sampleTables.map((table) => table.id));
 const cast = [
   { id: 'cast1', name: '美月', initials: '美', color: 'violet' },
   { id: 'cast2', name: '凛', initials: '凛', color: 'rose' },
@@ -619,9 +704,7 @@ const stockSeed = [
 export function createDemo(mode = 'live', now = Date.now()) {
   let state = {
     day: { status: 'closed', date: businessDate(now), openingCash: 0, openedAt: null, closedAt: null, closingCash: null },
-    tables: rooms.flatMap(([prefix, area, capacities]) => capacities.map((capacity, index) => ({
-      id: `${prefix}${index + 1}`, name: `${prefix.toUpperCase()}-${String(index + 1).padStart(2, '0')}`, area, capacity,
-    }))),
+    tables: structuredClone(sampleTables),
     tickets: [], menu: structuredClone(menu), cast: structuredClone(cast),
     stock: stockSeed.map(([id, name, category, unit, quantity, minimum, unitCost]) => ({ id, name, category, unit, quantity,
       minimum, unitCost, value: quantity * unitCost })),
