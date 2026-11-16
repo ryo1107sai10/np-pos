@@ -44,10 +44,10 @@ function rowSummary(item, { escape, yen }) {
 
 function itemRow(item, selected, api) {
   const { escape, icon } = api;
-  const active = item.enabled !== false;
+  const status = item.hidden === true ? '非表示' : item.enabled === false ? '停止中' : '';
   return `<li><button class="store-editor-row" type="button" data-action="store-editor-select" data-id="${escape(item.id)}" aria-pressed="${item === selected}">
     <span><strong>${escape(item.name)}</strong><small>${rowSummary(item, api)}</small></span>
-    ${active ? '' : '<span class="store-editor-off">停止中</span>'}${icon('chevron-right', 14)}</button></li>`;
+    ${status ? `<span class="store-editor-off">${status}</span>` : ''}${icon('chevron-right', 14)}</button></li>`;
 }
 
 function addButton(kind, label, icon) {
@@ -103,12 +103,13 @@ function toggle(label, name, checked) {
 }
 
 function stockInputs(item, stock, { escape, icon }) {
-  if (!stock.length) return '';
   const recipe = new Map(item.recipe?.map(({ stockId, quantity }) => [stockId, quantity]));
+  const choices = stock.filter((entry) => entry.hidden !== true || recipe.has(entry.id));
+  if (!choices.length) return '';
   return `<details class="store-editor-advanced"><summary>${icon('box', 16)}<span>在庫連動</span>
     <small>${recipe.size}品目</small>${icon('chevron-down', 14)}</summary>
     <div class="store-editor-advanced-body"><p class="field-help">1点注文するごとに引き落とす数量を入力します。</p>
-    <div class="store-editor-stock-grid">${stock.map((entry) => `<label class="field"><span>${escape(entry.name)}（${escape(entry.unit)}）</span>
+    <div class="store-editor-stock-grid">${choices.map((entry) => `<label class="field"><span>${escape(entry.name)}（${escape(entry.unit)}）${entry.hidden === true ? '［非表示］' : ''}</span>
       <input type="number" name="store-stock-quantity" data-stock-id="${escape(entry.id)}" value="${escape(recipe.get(entry.id) ?? '')}" min="0" max="1000000" step="0.000001" inputmode="decimal" placeholder="0"></label>`).join('')}</div></div>
   </details>`;
 }
@@ -123,7 +124,27 @@ function castInspector(person, api) {
     ${toggle('注文の歩合対象に表示する', 'enabled', person.enabled !== false)}`;
 }
 
-function stockInspector(item, { escape }) {
+function stockRemovalPanel(item, editor, { escape, icon, stockDeletionBlocker }) {
+  if (editor.additions?.has(item.id)) return '';
+  const id = escape(item.id);
+  const reason = stockDeletionBlocker?.(item.id, editor.settings.menu);
+  if (editor.stockRemoval === item.id && !reason) {
+    return `<div class="store-editor-stock-removal is-confirming" role="group" aria-labelledby="store-stock-delete-confirmation">
+      <p id="store-stock-delete-confirmation"><strong>「${escape(item.name)}」を削除しますか？</strong><span>店舗設定を保存すると反映されます。入出庫履歴は残ります。</span></p>
+      <div class="store-editor-stock-removal-actions">
+        <button type="button" class="btn btn-quiet" data-action="store-editor-cancel-stock-delete" data-id="${id}">削除をやめる</button>
+        <button type="button" class="btn btn-danger" data-action="store-editor-confirm-stock-delete" data-id="${id}">削除を確定</button>
+      </div>
+    </div>`;
+  }
+  return `<div class="store-editor-stock-removal">
+    <button type="button" class="btn btn-danger" data-action="store-editor-delete-stock" data-id="${id}"${reason ? ' disabled aria-describedby="store-stock-delete-reason"' : ''}>${icon('x', 15)}品目を削除</button>
+    ${reason ? `<p class="field-help" id="store-stock-delete-reason">${escape(reason)}</p>` : ''}
+  </div>`;
+}
+
+function stockInspector(item, editor, api) {
+  const { escape } = api;
   return `<h3 id="store-inspector-heading">在庫品目の設定</h3>
     ${textInput('品目名', item.name, nameLimits.stock, escape)}
     <div class="store-editor-basic-grid">
@@ -131,7 +152,9 @@ function stockInspector(item, { escape }) {
       ${numberInput('在庫の下限', 'minimum', item.minimum, { max: stockMinimumMax, step: stockPrecision, required: true })}
       ${numberInput('仕入原価（円 / 単位）', 'unit-cost', item.defaultUnitCost, { max: priceMax, step: stockPrecision, required: true })}
     </div>
-    <p class="field-help">補充時は、設定した1単位あたりの原価を使います。単位の変更後も在庫数量やメニューの使用量は同じ数値を引き継ぎます。</p>`;
+    <p class="field-help">補充時は、設定した1単位あたりの原価を使います。単位の変更後も在庫数量やメニューの使用量は同じ数値を引き継ぎます。</p>
+    <div class="store-editor-toggles">${toggle('在庫一覧に表示する', 'stock-visible', item.hidden !== true)}</div>
+    ${stockRemovalPanel(item, editor, api)}`;
 }
 
 function menuInspector(item, editor, api) {
@@ -155,7 +178,7 @@ function menuInspector(item, editor, api) {
 }
 
 function itemInspector(selected, editor, api) {
-  if (editor.tab === 'stock') return stockInspector(selected, api);
+  if (editor.tab === 'stock') return stockInspector(selected, editor, api);
   if (editor.tab === 'cast') return castInspector(selected, api);
   return menuInspector(selected, editor, api);
 }
@@ -164,6 +187,7 @@ export function renderStoreSettingsEditor(editor, api) {
   const items = visibleItems(editor);
   const selected = selectedItem(editor, items);
   const inspector = selected && itemInspector(selected, editor, api);
+  const pendingCount = editor.removeStockIds?.size ?? 0;
   const note = editor.tab === 'stock' ? '品目を追加したら、メニューの「在庫連動」で1点あたりの使用量を指定できます。'
     : '料金と歩合は、保存後の新しい注文明細に適用されます。';
   const discard = selected && editor.additions?.has(selected.id) ? `<button type="button" class="btn btn-quiet store-editor-discard"
@@ -174,6 +198,7 @@ export function renderStoreSettingsEditor(editor, api) {
     <div class="store-editor-tabs" role="group" aria-label="設定の種類">${tabs.map(({ id, label, glyph }) =>
       `<button type="button" data-action="store-editor-tab" data-id="${id}" aria-pressed="${id === editor.tab}">${api.icon(glyph, 15)}<span>${label}</span></button>`).join('')}</div>
     <p class="form-copy store-editor-note">${note}</p>
+    ${pendingCount ? `<p class="field-help store-editor-removal-note" role="status">${pendingCount}品目の削除予定があります。店舗設定を保存すると反映されます。</p>` : ''}
     <div class="store-editor-main">
       ${itemList(editor, items, selected, api)}
       ${inspector ? `<section class="store-editor-inspector" aria-labelledby="store-inspector-heading">${inspector}${discard}
@@ -247,6 +272,8 @@ export function commitStoreSettingsEditor(dialog, editor) {
     entry.unit = unit;
     entry.minimum = read('minimum').valueAsNumber;
     entry.defaultUnitCost = read('unit-cost').valueAsNumber;
+    if (read('stock-visible').checked) delete entry.hidden;
+    else entry.hidden = true;
     return true;
   }
   if (read('enabled').checked) delete entry.enabled;
@@ -311,7 +338,11 @@ function restoreNavigation(dialog, action, id, listTop) {
       const name = dialog.querySelector('[name="store-name"]');
       name?.focus();
       name?.select();
-    } else if (action === 'store-editor-select' || action === 'store-editor-discard-new') {
+    } else if (action === 'store-editor-delete-stock') {
+      dialog.querySelector('[data-action="store-editor-cancel-stock-delete"]')?.focus();
+    } else if (action === 'store-editor-cancel-stock-delete') {
+      dialog.querySelector('[data-action="store-editor-delete-stock"]')?.focus();
+    } else if (action === 'store-editor-select' || action === 'store-editor-confirm-stock-delete' || action === 'store-editor-discard-new') {
       const focus = list?.querySelector('[aria-pressed="true"]') ?? dialog.querySelector('.store-editor-add button');
       focus?.focus({ preventScroll: true });
     } else {
@@ -320,7 +351,32 @@ function restoreNavigation(dialog, action, id, listTop) {
   });
 }
 
-export function handleStoreSettingsEditorAction(dialog, editor, target) {
+function changeStockRemoval(dialog, editor, action, id, stockDeletionBlocker) {
+  if (editor.tab !== 'stock' || selectedItem(editor)?.id !== id || editor.additions?.has(id)) return false;
+  if (action === 'store-editor-cancel-stock-delete') {
+    editor.stockRemoval = null;
+    return true;
+  }
+  const reason = stockDeletionBlocker?.(id, editor.settings.menu);
+  if (reason) {
+    const error = dialog.querySelector('.form-error');
+    error.textContent = reason;
+    error.hidden = false;
+    return false;
+  }
+  if (action === 'store-editor-delete-stock') {
+    editor.stockRemoval = id;
+    return true;
+  }
+  if (editor.stockRemoval !== id) return false;
+  editor.settings.stock = editor.settings.stock.filter((item) => item.id !== id);
+  (editor.removeStockIds ??= new Set()).add(id);
+  delete editor.selected.stock;
+  editor.stockRemoval = null;
+  return true;
+}
+
+export function handleStoreSettingsEditorAction(dialog, editor, target, { stockDeletionBlocker } = {}) {
   const { action, id } = target.dataset;
   if (action !== 'store-editor-discard-new' && !commitStoreSettingsEditor(dialog, editor)) return false;
   const listTop = dialog.querySelector('.store-editor-list')?.scrollTop ?? 0;
@@ -328,14 +384,17 @@ export function handleStoreSettingsEditorAction(dialog, editor, target) {
     case 'store-editor-tab':
       if (editor.tab === id) return false;
       editor.tab = id;
+      editor.stockRemoval = null;
       break;
     case 'store-editor-select':
       editor.selected[editor.tab] = id;
+      editor.stockRemoval = null;
       break;
     case 'store-editor-add': {
       const item = newItem(editor, id);
       editor.selected[editor.tab] = item.id;
       (editor.additions ??= new Set()).add(item.id);
+      editor.stockRemoval = null;
       break;
     }
     case 'store-editor-discard-new': {
@@ -353,6 +412,11 @@ export function handleStoreSettingsEditorAction(dialog, editor, target) {
       delete editor.selected[editor.tab];
       break;
     }
+    case 'store-editor-delete-stock':
+    case 'store-editor-cancel-stock-delete':
+    case 'store-editor-confirm-stock-delete':
+      if (!changeStockRemoval(dialog, editor, action, id, stockDeletionBlocker)) return false;
+      break;
     default:
       return false;
   }

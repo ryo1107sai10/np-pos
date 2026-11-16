@@ -185,6 +185,11 @@
 .lr-table tr:last-child td { border-bottom: 0; }
 .lr-table tbody tr:hover, .lr-table tbody tr:focus-within { background: #f7f7fe; }
 .lr-stock-table td:first-child { min-width: 10ch; white-space: normal; overflow-wrap: anywhere; }
+.lr-stock-name { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 7px; }
+.lr-stock-name strong { min-width: 0; }
+.lr-stock-filter { min-height: 44px; padding: 5px 8px; gap: 5px; }
+.lr-stock-filter .lr-count { padding: 2px 6px; }
+.lr-stock-filter[aria-pressed="true"] { border-color: #cec1ed; background: #f2edfd; color: #4f3d95; }
 .lr-stock-history td:nth-child(2) { min-width: 8ch; white-space: normal; overflow-wrap: anywhere; }
 .lr-commission-roster th:not(:first-child), .lr-commission-roster td:not(:first-child),
 .lr-payment-table th:last-child, .lr-payment-table td:last-child { text-align: right; }

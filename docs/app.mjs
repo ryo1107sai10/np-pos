@@ -3,7 +3,7 @@ import { icon } from './icons.mjs';
 import { renderReport } from './reports.mjs';
 import { bindLayoutEditor, commitLayoutFields, floorLayoutStage, handleLayoutEditorAction, layoutAreaTabs, newLayoutDraft, renderLayoutEditor } from './floor-layout.mjs';
 import { renderLayoutTransfer } from './layout-transfer.mjs';
-import { getStoreSettings } from './store-settings.mjs';
+import { getStoreSettings, stockDeletionBlocker } from './store-settings.mjs';
 import { commitStoreSettingsEditor, handleStoreSettingsEditorAction, renderStoreSettingsEditor } from './store-settings-editor.mjs';
 
 const app = document.querySelector('#app');
@@ -33,6 +33,7 @@ let selected = state.tables.find((table) => getTicketForTable(state, table.id))?
 let area = null;
 let { view: floorView, area: planArea } = loadFloorView();
 let filter = 'all';
+let showHiddenStock = false;
 let mobileDetails = false;
 let modal = null;
 let priorFocus = null;
@@ -278,7 +279,7 @@ function render({ preserveFocus = false } = {}) {
   const focusId = focused?.dataset.id;
   lastStatuses = state.tables.map((table)=>tableStatus(state,table.id)).join('|');
   lastMinute = dateTime.format(Date.now());
-  app.innerHTML = `<div class="shell">${renderSide()}<main class="workspace" id="workspace" tabindex="-1">${renderTop()}${page==='floor' ? renderFloor() : renderReport(page,state,{yen,summary,quote,escape,icon})}</main></div>`;
+  app.innerHTML = `<div class="shell">${renderSide()}<main class="workspace" id="workspace" tabindex="-1">${renderTop()}${page==='floor' ? renderFloor() : renderReport(page,state,{yen,summary,quote,escape,icon,showHiddenStock})}</main></div>`;
   document.title = `NP POS | ${pages[page].title}`;
   if (focusAction) [...app.querySelectorAll('[data-action]')].find((el) => el.dataset.action === focusAction && el.dataset.id === focusId)?.focus({ preventScroll: true });
 }
@@ -315,7 +316,7 @@ async function commit(command, message, after) {
       pendingStorage = true;
       throw new Error('別のタブでデータが更新されました。画面を閉じ、最新状態を確認してください。');
     }
-    const next = apply(freshImport ? createDemo('closed') : state, command);
+    const next = apply(storeImportTarget(command.configuration, freshImport), command);
     saveState(next);
     if (after) after(next);
     dialog.close();
@@ -333,6 +334,20 @@ async function commit(command, message, after) {
 function freshLayoutTarget() {
   try { return saveAvailable && readSavedState() === null; }
   catch { return false; }
+}
+
+function storeImportTarget(configuration, fresh) {
+  if (!fresh) return state;
+  const target = createDemo('closed');
+  if (configuration.settings?.stock) {
+    const importedIds = new Set(configuration.settings.stock.map(({ id }) => id));
+    target.stock = target.stock.filter(({ id }) => importedIds.has(id));
+  }
+  return target;
+}
+
+function checkStockDeletion(id, menu) {
+  return stockDeletionBlocker(state, id, menu);
 }
 
 function exportStoreFile() {
@@ -359,7 +374,7 @@ async function readStoreFile(input) {
     const text = await file.text().catch(() => { throw new Error('ファイルを開けませんでした。もう一度選んでください。'); });
     if (modal !== activeModal || request !== activeModal.request || !dialog.open) return;
     const configuration = parseStoreConfiguration(text);
-    apply(activeModal.fresh ? createDemo('closed') : state, { type: 'importStoreConfiguration', configuration });
+    apply(storeImportTarget(configuration, activeModal.fresh), { type: 'importStoreConfiguration', configuration });
     activeModal.configuration = configuration;
   } catch (error) {
     if (modal !== activeModal || request !== activeModal.request || !dialog.open) return;
@@ -421,7 +436,7 @@ function paintDialog(layoutFileInput) {
       return;
     }
     case 'store-settings':
-      present('店舗設定', renderStoreSettingsEditor(modal.editor, { escape, icon, yen }),
+      present('店舗設定', renderStoreSettingsEditor(modal.editor, { escape, icon, yen, stockDeletionBlocker: checkStockDeletion }),
         '店舗設定を保存', { style: 'store-settings-dialog' });
       dialog.querySelector('#submit-dialog').formNoValidate = true;
       return;
@@ -591,6 +606,11 @@ function clickAction(target) {
   const {action,id} = target.dataset;
   if (action === 'navigate') { mobileDetails = false; go(id); return; }
   if (action === 'filter') { filter=id; render({preserveFocus:true}); return; }
+  if (action === 'toggle-hidden-stock') {
+    showHiddenStock = !showHiddenStock;
+    render({ preserveFocus: true });
+    return;
+  }
   if (action === 'floor-view') {
     const nextArea = area ?? planArea;
     setFloorView(id, nextArea);
@@ -616,7 +636,7 @@ function clickAction(target) {
     return;
   }
   if (action.startsWith('store-editor-') && modal?.editor) {
-    if (handleStoreSettingsEditorAction(dialog, modal.editor, target)) paintDialog();
+    if (handleStoreSettingsEditorAction(dialog, modal.editor, target, { stockDeletionBlocker: checkStockDeletion })) paintDialog();
     return;
   }
   if (action === 'edit-layout') {
@@ -649,11 +669,13 @@ function clickAction(target) {
       sample.tables = structuredClone(state.tables);
       sample.layoutAreas = getLayoutAreas(state);
       sample.archivedTables = structuredClone(state.archivedTables ?? []);
+      const retainedStock = new Set(state.stock.map(({ id }) => id));
+      sample.stock = sample.stock.filter(({ id }) => retainedStock.has(id));
       sample = apply(sample, { type: 'saveStoreSettings', settings: getStoreSettings(state) });
     }
     saveState(sample);
     selected = fromOpening ? null : 'a1';
-    area=null; filter='all'; mobileDetails=false;
+    area=null; filter='all'; showHiddenStock=false; mobileDetails=false;
     if (!fromOpening) setFloorView('list', getLayoutAreas(state)[0]);
     go('floor');
     if (action==='demo-start') openDialog('open');
@@ -710,14 +732,19 @@ function submitDialog(form) {
       const message = modal.configuration.settings ? '店舗設定と卓レイアウトを読み込みました。' : '卓レイアウトを読み込みました。';
       commit({ type: 'importStoreConfiguration', configuration: modal.configuration }, message, (next) => {
         setFloorView('plan', getLayoutAreas(next)[0] ?? null);
-        area = null; filter = 'all'; mobileDetails = false; syncFloorSelection();
+        area = null; filter = 'all'; showHiddenStock = false; mobileDetails = false; syncFloorSelection();
       });
       break;
     }
-    case 'store-settings':
+    case 'store-settings': {
       if (!commitStoreSettingsEditor(dialog, modal.editor)) return;
-      commit({ type: 'saveStoreSettings', settings: structuredClone(modal.editor.settings) }, '店舗設定を保存しました。');
+      const removeStockIds = [...(modal.editor.removeStockIds ?? [])];
+      const settings = structuredClone(modal.editor.settings);
+      commit({ type: 'saveStoreSettings', settings, removeStockIds }, '店舗設定を保存しました。', () => {
+        showHiddenStock = false;
+      });
       break;
+    }
     case 'edit-layout': {
       const layout = modal.layout;
       if (!commitLayoutFields(dialog, layout, escape).ok) return;

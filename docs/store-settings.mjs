@@ -6,7 +6,7 @@ const stockIdPattern = /^[a-zA-Z0-9_-]+$/;
 const menuFields = ['id', 'name', 'category', 'price', 'duration', 'enabled', 'popular', 'requiresCast',
   'taxRate', 'serviceEligible'];
 const castFields = ['id', 'name', 'initials', 'color', 'enabled'];
-const stockFields = ['id', 'name', 'category', 'unit', 'minimum'];
+const stockFields = ['id', 'name', 'category', 'unit', 'minimum', 'hidden'];
 const commissionFields = ['fixed', 'rate', 'points'];
 
 function assert(condition, message) {
@@ -134,7 +134,10 @@ function normalizeStock(item, stockMasterIds) {
     `「${name}」の下限は0以上の数値を小数第6位まで入力してください。`);
   assert(isAmount(item.defaultUnitCost, 0, 100_000_000, 1_000_000),
     `「${name}」の仕入原価は0円以上の数値を小数第6位まで入力してください。`);
-  return { id: item.id, name, category, unit, minimum: item.minimum, defaultUnitCost: item.defaultUnitCost };
+  validateBoolean(item.hidden, `「${name}」の表示`);
+  const definition = { id: item.id, name, category, unit, minimum: item.minimum, defaultUnitCost: item.defaultUnitCost };
+  if (item.hidden !== undefined) definition.hidden = item.hidden;
+  return definition;
 }
 
 export function normalizeStoreSettings(settings, { menuIds, castIds, stockMasterIds, localStockIds, requireStock }) {
@@ -155,20 +158,51 @@ export function normalizeStoreSettings(settings, { menuIds, castIds, stockMaster
   return stock ? { menu, cast, stock } : { menu, cast };
 }
 
-export function replaceStoreSettings(state, { menu, cast, stock }) {
+export function stockDeletionBlocker(state, stockId, menu = state.menu) {
+  const item = state.stock.find(({ id }) => id === stockId);
+  if (!item) return '削除する在庫品目が見つかりません。';
+  const label = `「${item.name}」`;
+  if (item.quantity !== 0) return `${label}は在庫が残っているため削除できません。`;
+  if (menu.some((product) => product.recipe?.some((use) => use.stockId === stockId))) {
+    return `${label}はメニューにひもづいているため削除できません。`;
+  }
+  const hasPendingReturn = state.tickets.some((ticket) => ticket.status === 'open' && ticket.lines.some((line) =>
+    line.cancelledAt === null && line.providedAt === null && line.stockUses?.some((use) => use.stockId === stockId)));
+  if (hasPendingReturn) return `${label}は未提供の注文に使われているため削除できません。`;
+  return '';
+}
+
+export function replaceStoreSettings(state, { menu, cast, stock }, removeStockIds = []) {
+  assert(Array.isArray(removeStockIds) && removeStockIds.every((id) => typeof id === 'string')
+    && new Set(removeStockIds).size === removeStockIds.length, '削除する在庫品目の指定を確認してください。');
+  for (const id of removeStockIds) {
+    const blocker = stockDeletionBlocker(state, id, menu);
+    assert(!blocker, blocker);
+    assert(!stock?.some((item) => item.id === id), '同じ在庫品目の更新と削除を同時に指定できません。');
+  }
   const archive = new Map((state.archivedCast ?? []).map((person) => [person.id, person]));
   for (const person of state.cast) archive.set(person.id, projectCast(person));
   for (const person of cast) archive.delete(person.id);
   if (archive.size || state.archivedCast) state.archivedCast = [...archive.values()];
   state.menu = menu;
   state.cast = cast;
-  if (!stock) return;
+  if (!stock && !removeStockIds.length) return;
   const existingStock = new Map(state.stock.map((item) => [item.id, item]));
-  for (const item of stock) {
+  const archivedStock = new Map((state.archivedStock ?? []).map((item) => [item.id, item]));
+  for (const item of stock ?? []) {
     const existing = existingStock.get(item.id);
-    existingStock.set(item.id, existing ? { ...existing, ...item } : {
+    const updated = existing ? { ...existing, ...item } : {
       ...item, quantity: 0, unitCost: item.defaultUnitCost, value: 0,
-    });
+    };
+    if (item.hidden === undefined) delete updated.hidden;
+    existingStock.set(item.id, updated);
+    archivedStock.delete(item.id);
+  }
+  for (const id of removeStockIds) {
+    const { name, unit } = existingStock.get(id);
+    archivedStock.set(id, { id, name, unit });
+    existingStock.delete(id);
   }
   state.stock = [...existingStock.values()];
+  if (archivedStock.size || state.archivedStock) state.archivedStock = [...archivedStock.values()];
 }

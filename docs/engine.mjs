@@ -526,7 +526,7 @@ export function apply(state, action, now = Date.now()) {
     return next;
   }
   if (action.type === 'saveStoreSettings') {
-    replaceStoreSettings(next, validatedStoreSettings(action.settings, next));
+    replaceStoreSettings(next, validatedStoreSettings(action.settings, next), action.removeStockIds);
     return next;
   }
   if (action.type === 'importStoreConfiguration') {
