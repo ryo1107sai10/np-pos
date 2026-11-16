@@ -233,18 +233,18 @@ export function renderRecoveryForm(state, id, api) {
 
 export function renderSeatCustomerResults(state, query, selected, api) {
   const {escape} = api;
+  if (!query?.trim()) return '';
   const staff = !canView(api);
-  const selectedCustomer = selected ? findCustomer(state, selected) : null;
   const searchable = (state.customers ?? []).map((customer) => staff ? { id:customer.id, name:customer.name }
     : customer.restricted ? { id:customer.id, name:customer.name, kana:customer.kana } : customer);
-  const matches = searchCustomers({customers:searchable}, query);
-  const candidates = (selectedCustomer ? [selectedCustomer, ...matches.filter((customer) => customer.id !== selected)] : matches).slice(0, 8);
-  const option = (customer) => `<label class="np-seat-customer-choice"><input type="radio" name="customerId" value="${escape(customer?.id || '')}"${(customer ? customer.id === selected : !selected) ? ' checked' : ''}>
-    <span><strong>${escape(customer?.name || '指定なし')}</strong>${!staff && customer?.kana ? `<small>${escape(customer.kana)}</small>` : ''}</span></label>`;
-  return `${option(null)}${candidates.map(option).join('')}${!matches.length && query.trim() ? '<p role="status" class="field-help">検索に一致する顧客が見つかりません。</p>' : ''}`;
+  const candidates = searchCustomers({customers:searchable}, query).slice(0, 8);
+  return candidates.length ? candidates.map((customer) =>
+    `<label class="np-seat-customer-choice"><input type="radio" name="customerId" value="${escape(customer.id)}"${customer.id === selected ? ' checked' : ''}>
+      <span><strong>${escape(customer.name)}</strong>${!staff && customer.kana ? `<small>${escape(customer.kana)}</small>` : ''}</span></label>`).join('')
+    : '<p role="status" class="field-help">検索に一致する顧客が見つかりません。</p>';
 }
 
-export function renderSeatCustomerSuggestion(state, id, api) {
+function renderSeatCustomerSuggestion(state, id, api) {
   if (!canViewCustomer(findCustomer(state, id), api)) return '';
   const detail = getCustomerDetail(state, id);
   const preferred = detail.preferredCast?.name;
@@ -253,14 +253,18 @@ export function renderSeatCustomerSuggestion(state, id, api) {
   return preferred || last ? `<div class="np-seat-customer-hints">${preferred ? `<span>担当キャスト <strong>${escape(preferred)}</strong></span>` : ''}${last ? `<span>前回の指名 <strong>${escape(last)}</strong></span>` : ''}</div>` : '';
 }
 
-export function renderSeatCustomer(state, api, {query = '', selected = '', mode = 'find'} = {}) {
+export function renderSeatCustomerSelection(state, id, api) {
+  const customer = findCustomer(state, id);
+  if (!customer) return '';
+  return `<div class="np-seat-customer-current"><span>指定した顧客 <strong>${api.escape(customer.name)}</strong></span>
+    ${action(api, '選択を解除', 'seat-customer-clear')}</div>${renderSeatCustomerSuggestion(state, id, api)}`;
+}
+
+export function renderSeatCustomer(state, api, {query = '', selected = ''} = {}) {
   const {escape} = api;
   return `<fieldset class="np-seat-customer"><legend>お客様（任意）</legend>
-    <div class="np-seat-customer-modes">${[['find','顧客を選択'],['new','新規登録'],['guest','名前だけ入力']].map(([key,label]) => `<label><input type="radio" name="customerMode" value="${key}"${key === mode ? ' checked' : ''}><span>${label}</span></label>`).join('')}</div>
-    <div class="np-seat-customer-find">${field('顧客を検索', `<input name="customerQuery" type="search" autocomplete="off" value="${escape(query)}" placeholder="${canView(api) ? '表示名・ふりがな・電話番号' : '表示名'}" maxlength="100">`)}
+    ${field('顧客を検索', `<input name="customerQuery" type="search" autocomplete="off" value="${escape(query)}" placeholder="${canView(api) ? '表示名・ふりがな・電話番号' : '表示名'}" maxlength="100" aria-controls="seat-customer-results">`, '登録済みのお客様を検索できます。顧客の指定は任意です。')}
     <div id="seat-customer-results" class="np-seat-customer-results" role="group" aria-label="顧客の検索候補">${renderSeatCustomerResults(state, query, selected, api)}</div>
-    <div id="seat-customer-suggestion" aria-live="polite">${renderSeatCustomerSuggestion(state, selected, api)}</div></div>
-    <div class="np-seat-customer-new form-grid">${field('表示名', '<input name="newCustomerName" maxlength="60" autocomplete="off" placeholder="例　佐藤様">')}
-    ${canView(api) ? field('ふりがな（任意）', '<input name="newCustomerKana" maxlength="60" autocomplete="off">') : ''}</div>
-    <div class="np-seat-customer-guest">${field('お客様名（任意）', '<input name="customer" maxlength="60" autocomplete="off" placeholder="例　佐藤様">')}</div></fieldset>`;
+    <div id="seat-customer-selection" aria-live="polite">${renderSeatCustomerSelection(state, selected, api)}</div>
+  </fieldset>`;
 }

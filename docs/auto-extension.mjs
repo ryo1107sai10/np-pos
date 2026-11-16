@@ -152,6 +152,14 @@ export function pauseVisitAutoExtension(state, ticket, {source}, now, actor) {
   ticket.autoExtensionPauseSource = source;
 }
 
+export function resumeVisitAutoExtension(ticket, now, actor) {
+  if (!operatorRoles.has(actor.role)) throw new Error('来店中の自動延長を再開する権限がありません。');
+  if (!isVisitAutoExtensionPaused(ticket)) return;
+  delete ticket.autoExtensionPausedAt;
+  delete ticket.autoExtensionPauseSource;
+  ticket.autoExtensionResumedAt = now;
+}
+
 export function syncAutomaticExtensions(state, now, actor, addExtension) {
   if (!operatorRoles.has(actor.role)) throw new Error('自動延長を反映する権限がありません。');
   const schedule = automaticSchedule(state);

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { apply, createDemo, quote, summary } from '../docs/engine.mjs';
+import { renderSeatCustomer, renderSeatCustomerResults, renderSeatCustomerSelection } from '../docs/customer-ui.mjs';
 import { findCustomer, getCustomerDetail, isAssignedCustomer, listUnlinkedVisits, parseCustomersCsv,
   searchCustomers } from '../docs/customers.mjs';
 
@@ -48,15 +49,16 @@ test('customer registration supports Japanese search, scopes profile edits, and 
   assert.throws(() => register(state, { name: '無効日', birthday: '2026-02-29' }), /誕生日/);
 });
 
-test('enrolling from the floor stores the visit and appointment across business days', () => {
-  let state = seat(opened(), { newCustomer: { name: '初来店', kana: 'はつらいてん', creditLimit: 90_000 } }, staff);
+test('selecting a customer from the floor stores the visit and appointment across business days', () => {
+  let state = register(opened(), { name: '初来店', kana: 'はつらいてん' });
   const [customer] = state.customers;
+  assert.equal(customer.firstVisitDate, '');
+  state = seat(state, { customerId: customer.id }, staff);
   const [{ id: first, seatedByUid, customer: snapshotName }] = state.tickets;
   assert.equal(seatedByUid, staff.id);
   assert.equal(snapshotName, customer.name);
-  assert.equal(customer.creditLimit, 0);
-  assert.equal(customer.firstVisitDate, '2026-11-16');
-  assert.equal(state.auditLog[0].actor.id, staff.id);
+  assert.equal(findCustomer(state, customer.id).firstVisitDate, '2026-11-16');
+  assert.equal(state.auditLog[0].actor.id, admin.id);
   state = run(state, { type: 'order', ticketId: first, items: [
     { menuId: 'nomination', quantity: 1, castIds: ['cast3'] },
   ] });
@@ -77,8 +79,43 @@ test('enrolling from the floor stores the visit and appointment across business 
   assert.equal(details.lastNomination.ticketId, first);
   assert.equal(details.totalSales, totals.sales);
   assert.equal(isAssignedCustomer(state, details.customer, manager.id), false);
-  assert.ok(isAssignedCustomer(state, details.customer, staff.id));
+  assert.equal(isAssignedCustomer(state, details.customer, staff.id), false);
+  assert.ok(isAssignedCustomer(state, details.customer, admin.id));
   assert.throws(() => run(state, { type: 'saveCustomer', customerId: customer.id, customer: { name: '担当外' } }, manager), /担当/);
+});
+
+test('visits cannot create customer profiles and can remain unlinked', () => {
+  const state = opened();
+  for (const actor of [admin, manager, staff]) {
+    assert.throws(() => seat(state, { newCustomer: { name: '新規のお客様' } }, actor), /顧客管理/);
+  }
+  assert.throws(() => seat(state, { customerId: 'missing' }), /顧客が見つかりません/);
+  const guest = seat(state, {}, staff);
+  assert.equal(guest.tickets[0].customer, '');
+  assert.equal(guest.tickets[0].customerId, undefined);
+  assert.deepEqual(guest.customers ?? [], []);
+});
+
+test('the arrival picker displays candidates only when searched and keeps the chosen customer separate', () => {
+  const state = register(opened(), { name: '山本 花子', kana: 'ヤマモト ハナコ', phone: '090-1111-2222' });
+  const [{id}] = state.customers;
+  const api = { role: 'admin', escape: String, icon: () => '' };
+  const initial = renderSeatCustomer(state, api);
+  assert.match(initial, /name="customerQuery"/);
+  assert.doesNotMatch(initial, /山本 花子|name="customerId"|name="(customerMode|newCustomerName|customer)"/);
+  assert.equal(renderSeatCustomerResults(state, '　 ', '', api), '');
+  assert.match(renderSeatCustomerResults(state, 'やまもと', '', api), /山本 花子/);
+  assert.match(renderSeatCustomerResults(state, '山本花子', '', api), /山本 花子/);
+  assert.match(renderSeatCustomerResults(state, 'やまもとはなこ', '', api), /山本 花子/);
+  assert.match(renderSeatCustomerResults(state, '1111', '', api), /山本 花子/);
+  assert.doesNotMatch(renderSeatCustomerResults(state, '不一致', id, api), /山本 花子/);
+  const seatStaff = { ...api, role: 'staff' };
+  assert.doesNotMatch(renderSeatCustomerResults(state, 'やまもと', '', seatStaff), /山本 花子/);
+  assert.match(renderSeatCustomerResults(state, '山本', '', seatStaff), /山本 花子/);
+  assert.doesNotMatch(renderSeatCustomerResults(state, '山本', '', seatStaff), /ヤマモト|090/);
+  const selected = renderSeatCustomerSelection(state, id, api);
+  assert.match(selected, /山本 花子/);
+  assert.match(selected, /data-action="seat-customer-clear"/);
 });
 
 test('legacy linking and duplicate merging retain receipt totals and redirect active receivables', () => {

@@ -22,6 +22,8 @@ const tableExtension = (state,tableId,enabled,at = base,actor = staff) =>
   run(state,{type:'setTableAutoExtension',tableId,enabled},at,actor);
 const pauseVisit = (state,ticketId,source,at,actor = staff) =>
   run(state,{type:'pauseVisitAutoExtension',ticketId,source,now:0},at,actor);
+const resumeVisit = (state,ticketId,at,actor = staff) =>
+  run(state,{type:'resumeVisitAutoExtension',ticketId,now:0},at,actor);
 
 test('default off, only the owner can change a valid auto extension plan, and no timer comes from the action payload', () => {
   const state = seat(open());
@@ -276,4 +278,64 @@ test('an elapsed automatic charge remains on the receipt when the next interval 
   const manuallyExtended = run(stopped,{type:'extend',ticketId,menuId:'extend30'},deadline + 2 * minute);
   assert.equal(manuallyExtended.tickets[0].lines.length,stopped.tickets[0].lines.length + 1);
   assert.equal(getNextAutoExtensionAt(manuallyExtended),null);
+});
+
+test('resuming overdue checkout waits a full interval and retains previously accrued charges', () => {
+  const initial = settings(seat(open()),true);
+  const {id:ticketId} = initial.tickets[0];
+  const charged = sync(initial,base + 60 * minute);
+  const paused = pauseVisit(charged,ticketId,'checkout',base + 89 * minute);
+  const resumeAt = base + 160 * minute;
+  const resumed = resumeVisit(paused,ticketId,resumeAt);
+
+  assert.equal(isVisitAutoExtensionPaused(resumed.tickets[0]),false);
+  assert.equal(resumed.tickets[0].autoExtensionPauseSource,undefined);
+  assert.equal(resumed.tickets[0].autoExtensionResumedAt,resumeAt);
+  assert.deepEqual(quote(resumed,ticketId),quote(charged,ticketId));
+  assert.deepEqual(automaticLines(resumed),automaticLines(charged));
+  assert.deepEqual(resumeVisit(resumed,ticketId,resumeAt + minute),resumed);
+  assert.deepEqual(sync(resumed,resumeAt + 29 * minute),resumed);
+  const deadline = resumeAt + 30 * minute;
+  assert.deepEqual(getAutoExtensionNotices(resumed,deadline - minute),[
+    {ticketId,tableIds:['a1'],deadline},
+  ]);
+  const extended = sync(resumed,deadline);
+  assert.deepEqual(automaticLines(extended).map(({createdAt}) => createdAt),[base + 60 * minute,deadline]);
+  assert.deepEqual(sync(extended,deadline),extended);
+});
+
+test('resuming before expiry keeps the future deadline and checks role and active visit', () => {
+  const initial = settings(seat(open()),true);
+  const {id:ticketId} = initial.tickets[0];
+  const pausedAt = base + 20 * minute;
+  const resumedAt = base + 45 * minute;
+  const paused = pauseVisit(initial,ticketId,'manual',pausedAt,manager);
+  assert.throws(() => resumeVisit(paused,ticketId,resumedAt,cast),/権限/);
+  assert.throws(() => resumeVisit(paused,'missing',resumedAt),/伝票が見つかりません/);
+  assert.throws(() => resumeVisit(createDemo('closed',base),ticketId,resumedAt),/開店/);
+  const paid = run(paused,{type:'settle',ticketId,payments:[{method:'cash',amount:quote(paused,ticketId).total}]},resumedAt);
+  assert.throws(() => resumeVisit(paid,ticketId,resumedAt),/会計前/);
+  const resumed = resumeVisit(paused,ticketId,resumedAt,manager);
+  assert.equal(getTicketAutoExtensionAt(resumed,resumed.tickets[0]),base + 60 * minute);
+  assert.equal(automaticLines(sync(resumed,base + 60 * minute)).length,1);
+});
+
+test('resuming a linked visit leaves master and table settings in force', () => {
+  let state = settings(open(),true);
+  state = run(state,{type:'seat',tableIds:['a1','a2'],guests:5,setId:'set60'});
+  const {id:ticketId} = state.tickets[0];
+  state = pauseVisit(state,ticketId,'manual',base + 59 * minute);
+  state = settings(state,false,base + 70 * minute);
+  state = tableExtension(state,'a2',false,base + 80 * minute);
+  state = resumeVisit(state,ticketId,base + 90 * minute);
+  assert.equal(isVisitAutoExtensionPaused(state.tickets[0]),false);
+  assert.equal(getAutoExtensionSettings(state).enabled,false);
+  assert.equal(getTableAutoExtensionEnabled(state,'a2'),false);
+  assert.equal(getNextAutoExtensionAt(state),null);
+  state = settings(state,true,base + 95 * minute);
+  assert.equal(getNextAutoExtensionAt(state),null);
+  state = tableExtension(state,'a2',true,base + 100 * minute);
+  assert.equal(getNextAutoExtensionAt(state),base + 130 * minute);
+  assert.equal(automaticLines(sync(state,base + 129 * minute)).length,0);
+  assert.equal(automaticLines(sync(state,base + 130 * minute)).length,1);
 });

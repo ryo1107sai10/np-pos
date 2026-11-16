@@ -73,9 +73,13 @@ test('cloud projections restrict customer detail, ticket links, receivables, and
   assert.equal(state.customers[0].createdByUid, manager.id);
 });
 
-test('cloud command policy permits floor enrollment and restricts receivables and customer administration', () => {
+test('cloud command policy permits selecting an existing customer at arrival and restricts inline registration', () => {
   for (const role of ['admin', 'manager', 'staff']) {
-    assert.doesNotThrow(() => verifyCommand(role, { type: 'seat', newCustomer: { name: '来店登録' } }));
+    assert.doesNotThrow(() => verifyCommand(role, { type: 'seat', customerId: 'registered-customer' }));
+    assert.doesNotThrow(() => verifyCommand(role, { type: 'seat', customer: '旧来の入力形式' }));
+    assert.doesNotThrow(() => verifyCommand(role, { type: 'seat' }));
+    assert.throws(() => verifyCommand(role, { type: 'seat', newCustomer: { name: '来店登録' } }),
+      { code: 'invalid-command' });
     assert.doesNotThrow(() => verifyCommand(role, { type: 'settle', payments: [{ method: 'cash', amount: 1_000 }] }));
   }
   assert.throws(() => verifyCommand('staff', { type: 'settle', payments: [{ method: 'receivable', amount: 1_000 }] }),

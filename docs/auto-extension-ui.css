@@ -192,3 +192,16 @@
 
 .auto-extension-detail-warning .seat-auto-extension { padding-inline: 2px; background: transparent; font-size: 11px; }
 .auto-extension-detail-warning strong { white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+.visit-auto-extension-controls {
+  display: grid;
+  grid-template-columns: minmax(0,1fr) auto;
+  align-items: center;
+  gap: 6px;
+}
+.visit-auto-extension-controls .btn { min-height: 44px; }
+.next-auto-extension { margin: 0; color: #555f79; font-size: 12px; }
+@media (max-width: 480px) {
+  .visit-auto-extension-controls { grid-template-columns: minmax(0,1fr); }
+  .visit-auto-extension-controls .btn { justify-self: start; }
+}

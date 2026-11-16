@@ -8,7 +8,7 @@ import { isValidPrintDocument, normalizePrintSettings } from '../docs/print-doma
 
 export const roles = new Set(['admin', 'manager', 'staff', 'cast', 'trainee']);
 const staffCommands = ['seat', 'move', 'order', 'extend', 'deposit', 'settle', 'depart', 'serve', 'issuePrintDocument',
-  'syncAutoExtensions', 'setTableAutoExtension', 'pauseVisitAutoExtension'];
+  'syncAutoExtensions', 'setTableAutoExtension', 'pauseVisitAutoExtension', 'resumeVisitAutoExtension'];
 const managerCommands = [...staffCommands, 'open', 'close', 'discount', 'stockAdjust', 'cancelDeposit', 'cancelLine', 'void',
   'saveCustomer', 'recoverReceivable', 'recordCashMovement'];
 const roleCommands = {
@@ -51,6 +51,10 @@ export function verifyCommand(role, command) {
     requireCondition(typeof command.reason === 'string' && command.reason.trim().length > 0,
       400, 'reason-required', '操作の理由を入力してください。');
   }
+  if (command.type === 'seat') {
+    requireCondition(command.newCustomer == null, 400, 'invalid-command',
+      '顧客の新規登録は顧客管理から行ってください。来店登録では登録済みの顧客を選べます。');
+  }
   if (command.type === 'order') {
     requireCondition(Array.isArray(command.items) && command.items.length <= 100 && command.items.every(isRecord),
       400, 'invalid-command', '注文内容を確認してください。');
@@ -60,10 +64,11 @@ export function verifyCommand(role, command) {
       && command.tableId.trim() === command.tableId && typeof command.enabled === 'boolean',
     400, 'invalid-command', '卓と自動延長の設定を確認してください。');
   }
-  if (command.type === 'pauseVisitAutoExtension') {
+  if (command.type === 'pauseVisitAutoExtension' || command.type === 'resumeVisitAutoExtension') {
     requireCondition(typeof command.ticketId === 'string' && command.ticketId.length > 0 && command.ticketId.length <= 100
-      && command.ticketId.trim() === command.ticketId && isAutoExtensionPauseSource(command.source),
-    400, 'invalid-command', '伝票と自動延長の停止方法を確認してください。');
+      && command.ticketId.trim() === command.ticketId
+      && (command.type === 'resumeVisitAutoExtension' || isAutoExtensionPauseSource(command.source)),
+    400, 'invalid-command', '伝票と自動延長の操作内容を確認してください。');
   }
   if (command.type === 'settle') {
     requireCondition(Array.isArray(command.payments) && command.payments.length <= 10 && command.payments.every(isRecord),

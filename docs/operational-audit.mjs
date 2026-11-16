@@ -187,7 +187,7 @@ export function buildOperationAudit(before, after, action, at, actor) {
     details = auditTicket(before, after, action);
   } else if (settingActions.has(action.type)) {
     details = auditSettings(before, after, action);
-  } else if (customerActions.has(action.type) || (action.type === 'seat' && action.newCustomer)) {
+  } else if (customerActions.has(action.type)) {
     details = auditCustomers(before, after, action);
   } else if (action.type === 'stockAdjust') {
     const previous = before.stock.find(({ id }) => id === action.stockId);
@@ -232,6 +232,14 @@ export function buildOperationAudit(before, after, action, at, actor) {
       const source = current.autoExtensionPauseSource;
       details = { target:target('ticket',current.id,`伝票 No. ${current.number}`), before:{paused:false}, after:{paused:true,source},
         reason:source === 'checkout' ? '会計へ進むため、今回の来店の自動延長を停止' : '今回の来店の自動延長を停止' };
+    }
+  } else if (action.type === 'resumeVisitAutoExtension') {
+    const previous = before.tickets.find(({id}) => id === action.ticketId);
+    const current = after.tickets.find(({id}) => id === action.ticketId);
+    if (isVisitAutoExtensionPaused(previous) && !isVisitAutoExtensionPaused(current)) {
+      details = { target:target('ticket',current.id,`伝票 No. ${current.number}`),
+        before:{paused:true,source:previous.autoExtensionPauseSource},
+        after:{paused:false}, reason:'今回の来店の自動延長を再開' };
     }
   } else if (action.type === 'syncAutoExtensions') {
     const previousById = new Map(before.tickets.map((ticket) => [ticket.id,ticket]));

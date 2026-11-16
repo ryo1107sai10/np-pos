@@ -16,7 +16,7 @@ const auditLabels = {
   recordCashMovement: '入出金の記録', close: '閉店・レジ締め',
   savePrintSettings: '印刷設定の変更', issuePrintDocument: '伝票・領収書の発行',
   saveAutoExtensionSettings: '自動延長設定の変更', setTableAutoExtension: '卓別の自動延長設定', syncAutoExtensions: '自動延長',
-  pauseVisitAutoExtension: '来店単位の自動延長停止', saveCardFeeSettings: 'カード会計加算設定の変更',
+  pauseVisitAutoExtension: '来店単位の自動延長停止', resumeVisitAutoExtension: '来店単位の自動延長再開', saveCardFeeSettings: 'カード会計加算設定の変更',
   importLayout: '卓レイアウトの読み込み', saveControls: '運用設定の変更', migrate: '営業データの移行',
 };
 

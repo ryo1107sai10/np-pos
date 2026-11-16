@@ -2,7 +2,7 @@ import { apply, businessDate, createDemo, discountReasonCodes, exportStoreConfig
 import { icon } from './icons.mjs';
 import { renderReport } from './reports.mjs';
 import { getAutoExtensionNotices, getAutoExtensionPlans, getAutoExtensionSettings, getAutomaticExtensionPlan,
-  getNextAutoExtensionAt, getTableAutoExtensionEnabled, isVisitAutoExtensionPaused } from './auto-extension.mjs';
+  getNextAutoExtensionAt, getTableAutoExtensionEnabled, getTicketAutoExtensionAt, isVisitAutoExtensionPaused } from './auto-extension.mjs';
 import { formatAutoExtensionCountdown, renderAutoExtensionBadge, renderAutoExtensionWarnings, renderTableAutoExtensionControl,
   renderTableAutoExtensionSettings, renderVisitAutoExtensionPaused } from './auto-extension-ui.mjs';
 import { getCardFee, getCardFeeSettings } from './card-fee.mjs';
@@ -79,7 +79,7 @@ let modal = null;
 let priorFocus = null;
 let lastStatuses = '';
 let lastAutoExtensionNotices = '';
-let pendingAutoNoticeTicket = null;
+let pendingVisitAutoExtensionTicket = null;
 const announcedAutoExtensions = new Map();
 let lastMinute = '';
 let saveAvailable = true;
@@ -199,7 +199,7 @@ function permittedAction(action) {
   if (store && ['demo', 'demo-start', 'demo-live', 'demo-cash', 'demo-reports', 'demo-billing', 'demo-role'].includes(action)) return false;
   if (ownerActions.has(action) || action.startsWith('store-editor-') || action.startsWith('layout-editor-')) return role === 'admin';
   if (managerActions.has(action)) return role === 'admin' || role === 'manager';
-  if (['table-auto-extension','auto-extension-pause','auto-extension-checkout'].includes(action)) {
+  if (['table-auto-extension','auto-extension-pause','auto-extension-checkout','auto-extension-resume'].includes(action)) {
     return ['admin','manager','staff'].includes(role);
   }
   return true;
@@ -345,7 +345,7 @@ function renderFloor(notices, now) {
     : showingPlan ? planHint + floorLayoutStage(visible, planArea, { renderSeat, escape })
     : `<div class="table-grid">${visible.length ? visible.map(renderSeat).join('') : emptyState}</div>`;
   return `${!isOpen ? `<div class="notice"><span>${icon('info',17)}開店すると、空席から来店を登録できます。</span></div>` : ''}${renderAutoExtensionWarnings(notices,now,{
-    escape,icon,tableName, pendingTicketId:pendingAutoNoticeTicket,
+    escape,icon,tableName, pendingTicketId:pendingVisitAutoExtensionTicket,
     canCheckout:(id) => !state.tickets.find((ticket) => ticket.id === id)?.discountRequest,
   })}${renderMetrics()}
     <div class="floor-layout">
@@ -428,6 +428,7 @@ function renderDetail(notices, now) {
   const q = quote(state,ticket.id);
   const selectedTable = state.tables.find(({id}) => id === selected);
   const warning = notices.find(({ticketId}) => ticketId === ticket.id);
+  const nextAutoExtension = getTicketAutoExtensionAt(state,ticket);
   const autoModel = tableAutoExtensionModel(selected);
   const status = tableStatus(state,selected);
   const settled = ticket.status === 'paid';
@@ -445,7 +446,12 @@ function renderDetail(notices, now) {
     ${ticket.tableIds.length > 1 ? `<div class="detail-links" aria-label="同じ伝票の卓">${ticket.tableIds.map(id=>`<span class="detail-link">${escape(tableName(id))}</span>`).join('')}</div>` : ''}
     ${warning ? `<div class="auto-extension-detail-warning" role="group" aria-label="自動延長まで1分以内">${renderAutoExtensionBadge('soon',{icon})}
       <strong data-auto-extension-deadline="${warning.deadline}">${formatAutoExtensionCountdown(warning.deadline,now)}</strong></div>` : ''}
-    ${!settled && isVisitAutoExtensionPaused(ticket) ? renderVisitAutoExtensionPaused({icon}) : ''}
+    ${!warning && nextAutoExtension > ticket.endsAt ? `<p class="next-auto-extension">次の自動延長予定 <strong>${dateTime.format(nextAutoExtension)}</strong></p>` : ''}
+    ${!settled && isVisitAutoExtensionPaused(ticket) ? `<div class="visit-auto-extension-controls">
+      ${renderVisitAutoExtensionPaused({icon})}
+      ${button('自動延長を再開','auto-extension-resume',{id:ticket.id,glyph:'refresh',tone:'secondary',
+        disabled:pendingVisitAutoExtensionTicket === ticket.id})}
+    </div>` : ''}
     ${!settled && selectedTable && permittedAction('table-auto-extension')
       ? renderTableAutoExtensionControl(selectedTable,autoModel,{escape,icon,tableName}) : ''}
     <div class="detail-aux"><h3>注文明細 <small>${lines.length}</small></h3>${settled ? '' : button('卓移動・連結','move',{glyph:'move',id:ticket.id})}</div>
@@ -1106,7 +1112,8 @@ function paintDialog(layoutFileInput) {
       const first = modal.tableId ? [modal.tableId] : [];
       const isVip = state.tables.some((table) => table.id === modal.tableId && table.area === 'VIP');
       const options = state.menu.filter((item)=>item.category==='セット' && item.enabled !== false).map((item)=>`<option value="${escape(item.id)}" ${isVip && item.id==='vip60' ? 'selected' : ''}>${escape(item.name)}${item.name.includes(`${item.duration}分`) ? '' : ` · ${item.duration}分`} · ${yen(item.price)}/人</option>`).join('');
-      present('来店登録',`<div class="form-grid">${label('来店人数','<input name="guests" type="number" min="1" max="100" step="1" value="2" required inputmode="numeric">')}${label('初回セット',`<select name="setId">${options}</select>`)}</div>${customerUI.renderSeatCustomer(customerWorkspaceState(),customerUIApi())}${seatPicker(first,{primary:modal.tableId})}<p class="field-help">同じグループで複数卓を使う場合は、追加の卓も選択します。伝票・残り時間・会計は全卓で共有します。</p>`,'来店を確定',{style:'modal-wide'});
+      present('来店登録',`<div class="form-grid">${label('来店人数','<input name="guests" type="number" min="1" max="100" step="1" value="2" required inputmode="numeric">')}${label('初回セット',`<select name="setId">${options}</select>`)}</div>${customerUI.renderSeatCustomer(customerWorkspaceState(),customerUIApi(),
+        {query:modal.seatCustomerQuery ?? '',selected:modal.seatCustomerId ?? ''})}${seatPicker(first,{primary:modal.tableId})}<p class="field-help">同じグループで複数卓を使う場合は、追加の卓も選択します。伝票・残り時間・会計は全卓で共有します。</p>`,'来店を確定',{style:'modal-wide'});
       return;
     }
     case 'move':
@@ -1496,23 +1503,29 @@ function openSettlement(ticketId) {
   openDialog('settle',{ticketId,payments:[{method:'cash',amount:quote(state,ticketId).remaining}]});
 }
 
-async function pauseAutoExtensionFromNotice(ticketId, source) {
-  if (page !== 'floor' || dialog.open || committing || pendingAutoNoticeTicket) return;
+async function changeVisitAutoExtension(ticketId, source) {
+  if (page !== 'floor' || dialog.open || committing || pendingVisitAutoExtensionTicket) return;
   const ticket = state.tickets.find((entry) => entry.id === ticketId && entry.status === 'open');
-  if (!ticket) return;
+  const resuming = source === 'resume';
+  if (!ticket || (resuming && !isVisitAutoExtensionPaused(ticket))) return;
   const checkout = source === 'checkout';
+  const command = resuming ? {type:'resumeVisitAutoExtension',ticketId} : {type:'pauseVisitAutoExtension',ticketId,source};
   if (checkout && ticket.discountRequest) {
     toast('値引きの承認後に会計できます。',{error:true});
     return;
   }
-  pendingAutoNoticeTicket = ticketId;
+  pendingVisitAutoExtensionTicket = ticketId;
   render({preserveFocus:true});
   try {
-    await commit({type:'pauseVisitAutoExtension',ticketId,source},
-      checkout ? null : '今回の来店の自動延長を止めました。', (next) => {
+    await commit(command,checkout || resuming ? null : '今回の来店の自動延長を止めました。', (next) => {
         const current = next.tickets.find((entry) => entry.id === ticketId && entry.status === 'open');
         if (!current) return;
-        if (checkout && !current.discountRequest) {
+        if (resuming) {
+          const deadline = getTicketAutoExtensionAt(next,current);
+          toast(deadline == null ? '今回の停止を解除しました。店舗と卓の設定に従います。'
+            : `自動延長を再開しました。次の自動延長は${dateTime.format(deadline)}です。`);
+          app.querySelector('.detail [data-action=table-auto-extension]')?.focus({preventScroll:true});
+        } else if (checkout && !current.discountRequest) {
           revealTable(current.tableIds[0]);
           mobileDetails = true;
           openSettlement(ticketId);
@@ -1524,7 +1537,7 @@ async function pauseAutoExtensionFromNotice(ticketId, source) {
         }
       },{fromFloor:true});
   } finally {
-    pendingAutoNoticeTicket = null;
+    pendingVisitAutoExtensionTicket = null;
     render({preserveFocus:true});
   }
 }
@@ -1561,8 +1574,16 @@ function clickAction(target) {
     if (state.tables.some((table) => table.id === tableId)) openDialog(action,{autoTableId:tableId});
     return;
   }
-  if (action === 'auto-extension-pause' || action === 'auto-extension-checkout') {
-    void pauseAutoExtensionFromNotice(id,action === 'auto-extension-checkout' ? 'checkout' : 'manual');
+  if (['auto-extension-pause','auto-extension-checkout','auto-extension-resume'].includes(action)) {
+    const source = action === 'auto-extension-resume' ? 'resume' : action === 'auto-extension-checkout' ? 'checkout' : 'manual';
+    void changeVisitAutoExtension(id,source);
+    return;
+  }
+  if (action === 'seat-customer-clear' && modal?.type === 'seat') {
+    modal.seatCustomerId = '';
+    renderSeatCustomerMatches();
+    renderSeatCustomerSelection();
+    dialog.querySelector('[name=customerQuery]')?.focus({preventScroll:true});
     return;
   }
   if (action === 'auto-extension-focus') {
@@ -1841,10 +1862,8 @@ function submitDialog(form) {
     case 'seat': {
       const selectedIds=data.getAll('tableIds');
       const tableIds=modal.tableId ? [modal.tableId,...selectedIds] : selectedIds;
-      const mode = value('customerMode');
-      const guest = mode === 'new' ? {newCustomer:{name:value('newCustomerName'),kana:value('newCustomerKana')}}
-        : mode === 'guest' ? {customer:value('customer')} : {customerId:value('customerId') || modal.seatCustomerId};
-      commit({type:'seat',tableIds,guests:numeric('guests'),...guest,setId:value('setId')},'来店を登録しました。',()=>{revealTable(tableIds[0]); area=null;filter='all';mobileDetails=true;});
+      const customerId = modal.seatCustomerId || value('customerId') || undefined;
+      commit({type:'seat',tableIds,guests:numeric('guests'),customerId,setId:value('setId')},'来店を登録しました。',()=>{revealTable(tableIds[0]); area=null;filter='all';mobileDetails=true;});
       break;
     }
     case 'move': {
@@ -2005,8 +2024,7 @@ dialog.addEventListener('change', (event) => {
   if (event.target.name === 'paymentMethod') updatePaymentNote();
   if (event.target.name === 'customerId' && modal?.type === 'seat') {
     modal.seatCustomerId = event.target.value;
-    const suggestion = dialog.querySelector('#seat-customer-suggestion');
-    if (suggestion) suggestion.innerHTML = customerUI.renderSeatCustomerSuggestion(customerWorkspaceState(),modal.seatCustomerId,customerUIApi());
+    renderSeatCustomerSelection();
   }
   if (event.target.name === 'layout-file') readStoreFile(event.target);
   if (event.target.name === 'discountMode') {
@@ -2018,11 +2036,23 @@ dialog.addEventListener('change', (event) => {
     input.closest('label').querySelector('span').textContent = rate ? '値引き率（%）' : '値引き額（円）';
   }
 });
-function updateSeatCustomerSearch(event) {
-  if (event.target.name !== 'customerQuery' || event.isComposing || modal.seatCustomerQuery === event.target.value) return;
-  modal.seatCustomerQuery = event.target.value;
+function renderSeatCustomerMatches() {
   const results = dialog.querySelector('#seat-customer-results');
-  results.innerHTML = customerUI.renderSeatCustomerResults(customerWorkspaceState(),event.target.value,modal.seatCustomerId,customerUIApi());
+  if (results) results.innerHTML = customerUI.renderSeatCustomerResults(customerWorkspaceState(),
+    modal.seatCustomerQuery ?? '',modal.seatCustomerId,customerUIApi());
+}
+
+function renderSeatCustomerSelection() {
+  const selection = dialog.querySelector('#seat-customer-selection');
+  if (selection) selection.innerHTML = customerUI.renderSeatCustomerSelection(customerWorkspaceState(),
+    modal.seatCustomerId,customerUIApi());
+}
+
+function updateSeatCustomerSearch(event) {
+  if (modal?.type !== 'seat' || event.target.name !== 'customerQuery' || event.isComposing
+    || modal.seatCustomerQuery === event.target.value) return;
+  modal.seatCustomerQuery = event.target.value;
+  renderSeatCustomerMatches();
 }
 
 dialog.addEventListener('compositionend',updateSeatCustomerSearch);

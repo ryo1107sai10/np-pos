@@ -6,8 +6,8 @@ import { getCustomerReceivableBalance, getReceivableBalance, getReceivableRecove
   receivableCollectionMethods } from './receivables.mjs';
 import { createCashMovement, getCashMovements, getDailyRecoveryRows, totalCashMovements } from './cash-ledger.mjs';
 import { applyPrintCommand } from './print-domain.mjs';
-import { getLinkedTablesAutoExtensionEnabled, pauseVisitAutoExtension, saveAutoExtensionSettings, setTableAutoExtension,
-  syncAutomaticExtensions } from './auto-extension.mjs';
+import { getLinkedTablesAutoExtensionEnabled, pauseVisitAutoExtension, resumeVisitAutoExtension, saveAutoExtensionSettings,
+  setTableAutoExtension, syncAutomaticExtensions } from './auto-extension.mjs';
 
 const movementScale = 1_000_000;
 const pointsScale = 1_000;
@@ -464,7 +464,7 @@ function doSeat(state, action, now, actor) {
   const tableIds = tableSet(state, action.tableIds, guests);
   const set = state.menu.find((entry) => entry.id === action.setId && entry.category === 'セット' && entry.enabled !== false);
   assert(set, '初回セットを選択してください。');
-  const customer = customerForSeat(state, action, actor, now, () => createId(state, 'customer'));
+  const customer = customerForSeat(state, action);
   const ticket = {
     id: createId(state, 'ticket'), number: state.nextTicket++, tableIds, guests,
     tableHistory: tableIds.map((tableId) => ({ tableId, attachedAt: now, releasedAt: null })),
@@ -903,6 +903,9 @@ function reduce(state, action, now, actor) {
   switch (action.type) {
     case 'pauseVisitAutoExtension':
       pauseVisitAutoExtension(next, ticket, action, now, actor);
+      break;
+    case 'resumeVisitAutoExtension':
+      resumeVisitAutoExtension(ticket, now, actor);
       break;
     case 'move': {
       const tableIds = tableSet(next, action.tableIds, ticket.guests, ticket.id);

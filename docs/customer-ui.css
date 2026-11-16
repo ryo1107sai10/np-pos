@@ -214,28 +214,8 @@
   background: linear-gradient(145deg, #fff, #f6f3ff);
 }
 .np-seat-customer > legend { padding: 0 5px; color: var(--text); font-size: 12px; font-weight: 700; }
-.np-seat-customer-modes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 3px; padding: 3px; border: 1px solid #e8e4f0; border-radius: 10px; background: #eeebf7; }
-.np-seat-customer-modes label { position: relative; min-width: 0; cursor: pointer; }
-.np-seat-customer-modes input { position: absolute; width: 1px; height: 1px; opacity: 0; }
-.np-seat-customer-modes span {
-  display: grid;
-  place-items: center;
-  min-height: 40px;
-  padding: 3px;
-  border: 1px solid transparent;
-  border-radius: 8px;
-  color: #4a5370;
-  font-size: 12px;
-  font-weight: 650;
-  text-align: center;
-}
-.np-seat-customer-modes input:checked + span { color: #543eab; border-color: #e1d8f3; background: #fff; box-shadow: 0 1px 3px #49347a15; }
-.np-seat-customer-modes input:focus-visible + span { outline: 2px solid #6953cb; outline-offset: 1px; }
-.np-seat-customer :is(.np-seat-customer-find, .np-seat-customer-new, .np-seat-customer-guest) { display: none; }
-.np-seat-customer:has(input[value=find]:checked) > .np-seat-customer-find,
-.np-seat-customer:has(input[value=new]:checked) > .np-seat-customer-new,
-.np-seat-customer:has(input[value=guest]:checked) > .np-seat-customer-guest { display: grid; gap: 8px; }
 .np-seat-customer-results { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; }
+.np-seat-customer-results:empty { display: none; }
 .np-seat-customer-results p { grid-column: 1 / -1; }
 .np-seat-customer-choice {
   display: flex;
@@ -255,8 +235,24 @@
 .np-seat-customer-choice span { display: grid; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
 .np-seat-customer-choice strong { color: var(--text); font-size: 12px; font-weight: 660; }
 .np-seat-customer-choice small { color: #56617b; font-size: 10px; }
+#seat-customer-selection { display: grid; gap: 6px; }
+#seat-customer-selection:empty { display: none; }
+.np-seat-customer-current {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid #d6caef;
+  border-radius: 8px;
+  color: #50447b;
+  background: #f4efff;
+  font-size: 12px;
+}
+.np-seat-customer-current span { display: grid; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
+.np-seat-customer-current strong { color: var(--text); }
+.np-seat-customer-current .btn { flex: none; min-height: 44px; }
 .np-seat-customer-hints { display: flex; flex-wrap: wrap; gap: 5px 13px; padding: 8px; border-radius: 7px; color: #50447b; background: #ece7f9; font-size: 11px; }
-#seat-customer-suggestion:empty { display: none; }
 @media (max-width: 600px) {
   .np-directory { gap: 12px; }
   .np-directory-page-actions { justify-content: flex-start; }
@@ -284,9 +280,9 @@
   .np-directory-history li { padding-inline: 10px; }
   .np-directory-bottle-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .np-seat-customer-results { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .np-seat-customer input[type=search] { font-size: 16px; }
   .modal .field :is(textarea[name=memo], textarea[name=csv], textarea[name=creditOverrideReason]), .np-directory-toolbar :is(input,select) { font-size: 16px; }
 }
 @media (hover: none) {
-  .np-seat-customer-modes span { min-height: 44px; }
   .np-directory-toolbar :is(input,select), .np-seat-customer :is(input:not([type=radio]),select) { min-height: 44px; }
 }

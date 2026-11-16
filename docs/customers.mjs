@@ -54,9 +54,9 @@ function comparable(value) {
 export function searchCustomers(state, query = '') {
   const terms = comparable(query).trim().split(/\s+/).filter(Boolean);
   return (state.customers ?? []).filter((customer) => {
-    const name = comparable(`${customer.name} ${customer.kana ?? ''}`);
+    const names = [customer.name, customer.kana].map((name) => comparable(name).replace(/\s+/g, ''));
     const phone = comparable(customer.phone).replace(/\D/g, '');
-    return terms.every((term) => name.includes(term) || (/^[+()\d-]+$/.test(term) && term.replace(/\D/g, '').length > 0
+    return terms.every((term) => names.some((name) => name.includes(term)) || (/^[+()\d-]+$/.test(term) && term.replace(/\D/g, '').length > 0
       && phone.includes(term.replace(/\D/g, ''))));
   });
 }
@@ -146,18 +146,11 @@ function firstVisit(customer, date) {
   if (date && (!customer.firstVisitDate || customer.firstVisitDate > date)) customer.firstVisitDate = date;
 }
 
-export function customerForSeat(state, action, actor, now, allocateId) {
-  let customer;
-  if (action.customerId) {
-    check(!action.newCustomer, '既存の顧客か新規登録のどちらかを選んでください。');
-    customer = findCustomer(state, action.customerId);
-    check(customer, '顧客が見つかりません。選び直してください。');
-  } else if (action.newCustomer != null) {
-    check(record(action.newCustomer), '新規の顧客情報を確認してください。');
-    const {name, kana} = action.newCustomer;
-    customer = writeCustomer(state, customerInput(state, {name, kana}), null, actor, now, allocateId);
-  }
-  if (!customer) return {customer:String(action.customer ?? '').trim().slice(0, 60)};
+export function customerForSeat(state, action) {
+  check(action.newCustomer == null, '新しいお客様は顧客管理から登録してください。');
+  if (!action.customerId) return {customer:String(action.customer ?? '').trim().slice(0, 60)};
+  const customer = findCustomer(state, action.customerId);
+  check(customer, '顧客が見つかりません。選び直してください。');
   firstVisit(customer, state.day.date);
   return { customer: customer.name, customerId: customer.id };
 }

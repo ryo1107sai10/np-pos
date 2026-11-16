@@ -747,6 +747,97 @@ test('a pause at the exact deadline retains the already accrued extension', asyn
   assert.equal(paid.state.tickets[0].lines.filter(({autoExtension})=>autoExtension).length,1);
 });
 
+test('cloud resumes a paused visit without billing any elapsed stopped intervals', async (t) => {
+  const db = database();
+  const tenant = await store(db);
+  await inviteMember(db, owner, tenant, helper.email, 'staff');
+  await inviteMember(db, owner, tenant, outsider.email, 'cast');
+  await Promise.all([listStores(db, helper), listStores(db, outsider)]);
+
+  const minute = 60_000;
+  let now = Date.parse('2026-11-16T20:00:00+09:00');
+  t.mock.method(Date, 'now', () => now);
+  const run = (actor, revision, name, value) => command(db, actor, tenant, revision, `visit-resume-${name}`, value);
+
+  await run(owner, 0, 'opening', {type:'open',openingCash:0});
+  await run(owner, 1, 'store-on', {type:'saveAutoExtensionSettings',enabled:true,menuId:'extend30'});
+  await run(owner, 2, 'other-table-off', {type:'setTableAutoExtension',tableId:'a3',enabled:false});
+  const seated = await run(helper, 3, 'shared-seat', {type:'seat',tableIds:['a1','a2'],setId:'set60',guests:1});
+  const [ticket] = seated.state.tickets;
+  const resume = {type:'resumeVisitAutoExtension',ticketId:ticket.id};
+  await assert.rejects(run(outsider, 4, 'cast-denied', resume), {code:'forbidden'});
+  await assert.rejects(run(helper, 4, 'invalid-ticket', {...resume,ticketId:''}), {code:'invalid-command'});
+  await assert.rejects(run(helper, 4, 'missing-ticket', {...resume,ticketId:'unknown'}), {code:'rejected-command'});
+
+  now = ticket.endsAt;
+  const extended = await readState(db, owner, tenant);
+  assert.equal(extended.revision, 5);
+  assert.equal(extended.state.tickets[0].lines.filter(({autoExtension})=>autoExtension).length, 1);
+  const accrued = quote(extended.state, ticket.id).remaining;
+  await run(helper, 5, 'checkout-pause', {type:'pauseVisitAutoExtension',ticketId:ticket.id,source:'checkout'});
+
+  now += 120 * minute;
+  const resumedAt = now;
+  assert.equal((await readState(db, owner, tenant)).revision, 6);
+  await assert.rejects(run(helper, 5, 'stale', resume), {code:'revision-conflict'});
+  const resumed = await run(helper, 6, 'after-pause', resume);
+  assert.equal(resumed.revision, 7);
+  assert.equal(resumed.state.tickets[0].autoExtensionPausedAt, undefined);
+  assert.equal(resumed.state.tickets[0].autoExtensionPauseSource, undefined);
+  assert.equal(resumed.state.tickets[0].autoExtensionResumedAt, resumedAt);
+  assert.equal(quote(resumed.state, ticket.id).remaining, accrued);
+  assert.deepEqual(resumed.state.tableAutoExtension, {a3:false});
+  assert.equal(resumed.state.autoExtensionSettings.enabled, true);
+
+  now += 10 * minute;
+  const replayed = await run(helper, 6, 'after-pause', resume);
+  assert.equal(replayed.revision, 7);
+  const repeated = await run(owner, 7, 'repeated', resume);
+  assert.equal(repeated.state.tickets[0].autoExtensionResumedAt, resumedAt);
+  now = resumedAt + 30 * minute - 1;
+  assert.equal((await readState(db, owner, tenant)).revision, 8);
+  assert.equal(quote(repeated.state, ticket.id).remaining, accrued);
+  now++;
+  const views = await Promise.all([readState(db, owner, tenant), readState(db, helper, tenant)]);
+  for (const view of views) {
+    assert.equal(view.revision, 9);
+    assert.equal(view.state.tickets[0].lines.filter(({autoExtension})=>autoExtension).length, 2);
+    assert.equal(quote(view.state, ticket.id).remaining - accrued, accrued - quote(seated.state, ticket.id).remaining);
+  }
+
+  const resumes = (await listAudit(db, owner, tenant)).events.filter(({action}) => action === 'resumeVisitAutoExtension');
+  assert.equal(resumes.length, 1);
+  assert.equal(resumes[0].target.id, ticket.id);
+  assert.equal(resumes[0].actor.id, helper.uid);
+  assert.deepEqual(resumes[0].before, {paused:true,source:'checkout'});
+  assert.deepEqual(resumes[0].after, {paused:false});
+});
+
+test('cloud blocks inline customer registration while retaining existing-customer seating', async () => {
+  const db = database();
+  const tenant = await store(db);
+  await inviteMember(db, owner, tenant, helper.email, 'staff');
+  await listStores(db, helper);
+  await command(db, owner, tenant, 0, 'customer-entry-opening', {type:'open',openingCash:0});
+  const registered = await command(db, owner, tenant, 1, 'register-from-customers', {
+    type:'saveCustomer',customer:{name:'登録済みテスト顧客'},
+  });
+  const [customer] = registered.state.customers;
+  const seat = {type:'seat',tableIds:['a1'],setId:'set60',guests:1};
+  for (const [actor, key] of [[owner, 'owner'], [helper, 'staff']]) {
+    await assert.rejects(command(db, actor, tenant, 2, `inline-registration-${key}`,
+      {...seat,newCustomer:{name:'来店からの登録'}}), {code:'invalid-command'});
+  }
+  const seated = await command(db, helper, tenant, 2, 'seat-registered-customer', {...seat,customerId:customer.id});
+  assert.equal(seated.revision, 3);
+  const current = (await readState(db, owner, tenant)).state;
+  assert.equal(current.tickets[0].customerId, customer.id);
+  assert.equal(current.tickets[0].customer, customer.name);
+  assert.equal(current.customers.length, 1);
+  const registrations = (await listAudit(db, owner, tenant)).events.filter(({action})=>action === 'saveCustomer');
+  assert.equal(registrations.length, 1);
+});
+
 test('browser migration validates a visit pause timestamp and source as a pair', async () => {
   const db = database();
   const tenant = await store(db);
