@@ -1,11 +1,14 @@
 import { getStoreSettings, normalizeStoreSettings, replaceStoreSettings } from './store-settings.mjs';
 import { buildOperationAudit } from './operational-audit.mjs';
+import { applyCustomerCommand, customerForSeat, findCustomer, isAssignedCustomer } from './customers.mjs';
+import { getCustomerReceivableBalance, getReceivableBalance, getReceivableRecoveryTotals,
+  receivableCollectionMethods } from './receivables.mjs';
 
 const movementScale = 1_000_000;
 const pointsScale = 1_000;
 const minute = 60_000;
 const methods = ['cash', 'card', 'qr'];
-const methodLabel = { cash: '現金', card: 'カード', qr: 'QR決済' };
+const methodLabel = { cash: '現金', card: 'カード', qr: 'QR決済', receivable: '売掛' };
 const occupiedStatuses = new Set(['open', 'paid']);
 const japanDate = new Intl.DateTimeFormat('en-CA', {
   timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit',
@@ -289,8 +292,10 @@ function calculateQuote(ticket) {
   const tax = taxBreakdown.reduce((total, group) => total + group.tax, 0);
   const total = subtotal - discount + service + tax;
   const deposit = totalOf(ticket.deposits);
-  const paid = totalOf(ticket.payments);
-  return { subtotal, discount, service, tax, total, deposit, paid, remaining: Math.max(0, total - deposit - paid),
+  const receivable = totalOf(ticket.payments.filter(({ method }) => method === 'receivable'));
+  const paid = totalOf(ticket.payments) - receivable;
+  return { subtotal, discount, service, tax, total, deposit, paid, ...(receivable > 0 ? { receivable } : {}),
+    remaining: Math.max(0, total - deposit - paid - receivable),
     commission: outputCommission(commission), commissionDetails, taxBreakdown };
 }
 
@@ -358,8 +363,53 @@ function currentDay(state) {
   assert(state.day.status === 'open', '最初に開店してください。');
 }
 
-function validateMethod(method) {
-  assert(methods.includes(method), '支払方法を選択してください。');
+function validateMethod(method, { allowReceivable = false } = {}) {
+  assert(methods.includes(method) || (allowReceivable && method === 'receivable'), '支払方法を選択してください。');
+}
+
+function validBusinessDate(date) {
+  return typeof date === 'string' && /^\d{4}-\d\d-\d\d$/.test(date) && Number.isFinite(Date.parse(date))
+    && new Date(date).toISOString().slice(0, 10) === date;
+}
+
+function requireReceivableAccess(state, customer, actor) {
+  assert(actor.role === 'admin' || (actor.role === 'manager' && isAssignedCustomer(state, customer, actor.id)),
+    '売掛は店舗管理者または担当マネージャーが処理できます。');
+}
+
+function issueReceivable(state, ticket, action, amount, now, actor) {
+  const customer = findCustomer(state, ticket.customerId);
+  assert(customer, '売掛会計には登録済みの顧客が必要です。');
+  requireReceivableAccess(state, customer, actor);
+  assert(customer.creditEnabled === true, 'この顧客の売掛利用を許可してください。');
+  const dueDate = action.creditDueDate;
+  assert(validBusinessDate(dueDate) && dueDate >= state.day.date, '営業日以降の有効な支払期日を入力してください。');
+  const creditLimit = money(customer.creditLimit, '与信上限');
+  const balance = getCustomerReceivableBalance(state, customer.id);
+  let creditOverride;
+  if (balance + amount > creditLimit) {
+    assert(actor.role === 'admin', '与信上限の超過には店舗管理者の承認が必要です。');
+    const reason = operationalReason(action.creditOverrideReason, '与信上限を超える理由');
+    creditOverride = { actorId: actor.id, reason, creditLimit, balanceBefore: balance };
+  }
+  state.receivables ??= [];
+  state.receivables.unshift({ id: createId(state, 'receivable'), customerId: customer.id, ticketId: ticket.id,
+    ticketNumber: ticket.number, issuedAt: now, date: state.day.date, dueDate, amount, collections: [],
+    cancelledAt: null, ...(creditOverride ? { creditOverride } : {}) });
+}
+
+function recoverReceivable(state, action, now, actor) {
+  currentDay(state);
+  const entry = state.receivables?.find(({ id }) => id === action.receivableId);
+  assert(entry && entry.cancelledAt == null, '回収できる売掛伝票が見つかりません。');
+  const customer = findCustomer(state, entry.customerId);
+  assert(customer, '売掛先の顧客が見つかりません。');
+  requireReceivableAccess(state, customer, actor);
+  assert(action.date === state.day.date && action.date >= entry.date, '回収日は現在の営業日を指定してください。');
+  assert(Object.hasOwn(receivableCollectionMethods, action.method), '回収方法を選択してください。');
+  const amount = money(action.amount, '売掛回収額', false);
+  assert(amount <= getReceivableBalance(entry), '回収額は売掛残高以下を入力してください。');
+  entry.collections.push({ id: createId(state, 'collection'), amount, method: action.method, date: action.date, at: now });
 }
 
 function canCancel(ticket) {
@@ -369,8 +419,7 @@ function canCancel(ticket) {
 function doOpen(state, action, now) {
   assert(state.day.status === 'closed', 'すでに営業中です。');
   const date = action.date ?? businessDate(now);
-  assert(typeof date === 'string' && /^\d{4}-\d\d-\d\d$/.test(date) && Number.isFinite(Date.parse(date))
-    && new Date(date).toISOString().slice(0, 10) === date, '営業日を指定してください。');
+  assert(validBusinessDate(date), '営業日を指定してください。');
   assert(!state.closedDays.some((day) => day.date === date), 'この営業日は締め済みです。次の営業日を入力してください。');
   const previous = state.closedDays.find((day) => day.date === state.day.date);
   if (previous && !previous.ticketSnapshots && state.tickets.length) {
@@ -381,16 +430,17 @@ function doOpen(state, action, now) {
     closedAt: null, closingCash: null };
 }
 
-function doSeat(state, action, now) {
+function doSeat(state, action, now, actor) {
   currentDay(state);
   const guests = positiveInteger(action.guests, '来店人数');
   const tableIds = tableSet(state, action.tableIds, guests);
   const set = state.menu.find((entry) => entry.id === action.setId && entry.category === 'セット' && entry.enabled !== false);
   assert(set, '初回セットを選択してください。');
+  const customer = customerForSeat(state, action, actor, now, () => createId(state, 'customer'));
   const ticket = {
     id: createId(state, 'ticket'), number: state.nextTicket++, tableIds, guests,
     tableHistory: tableIds.map((tableId) => ({ tableId, attachedAt: now, releasedAt: null })),
-    customer: String(action.customer ?? '').trim().slice(0, 60), createdAt: now, status: 'open',
+    ...customer, ...(customer.customerId ? { seatedByUid: actor.id } : {}), createdAt: now, status: 'open',
     endsAt: now + set.duration * minute, lines: [], discount: 0, deposits: [], payments: [], settledAt: null,
     departedAt: null, serviceRate: 2_000, settlement: null,
   };
@@ -410,7 +460,7 @@ function doClose(state, action, now) {
   state.closedDays.unshift({ date: state.day.date, openedAt: state.day.openedAt, closedAt: now,
     openingCash: state.day.openingCash, actualCash, expectedCash: totals.expectedCash, discrepancy, reason,
     sales: totals.sales, guests: totals.guests, tickets: totals.tickets, commission: totals.commission, payments: totals.payments,
-    ticketSnapshots: snapshotClosedTickets(state) });
+    receivableSales: totals.receivableSales, recoveries: totals.recoveries, ticketSnapshots: snapshotClosedTickets(state) });
 }
 
 function castNamesById(state) {
@@ -455,6 +505,10 @@ function correctionStock(state, use, restoreArchived) {
 function reverseSettlement(state, ticket, action, now, actor) {
   const reason = correctionReason(action.reason, actor);
   assert(ticket.status === 'paid' || ticket.status === 'departed', '確定した会計を選択してください。');
+  const receivable = state.receivables?.find((entry) => entry.ticketId === ticket.id && entry.cancelledAt == null);
+  assert(!ticket.payments.some(({ method }) => method === 'receivable') || receivable,
+    '会計に対応する売掛記録が見つかりません。');
+  assert(!receivable?.collections.length, '回収済みの金額がある売掛会計は取り消せません。');
   const receipt = snapshotSettledTicket(state, ticket, castNamesById(state));
   for (const line of ticket.lines.filter(({ cancelledAt }) => cancelledAt === null)) {
     for (const use of line.stockUses ?? []) {
@@ -466,6 +520,7 @@ function reverseSettlement(state, ticket, action, now, actor) {
   state.cancelledSettlements ??= [];
   state.cancelledSettlements.unshift({ id: createId(state, 'settlement-cancel'), ticketId: ticket.id,
     ticketNumber: ticket.number, date: state.day.date, at: now, reason, receipt });
+  if (receivable) receivable.cancelledAt = now;
   recordTableAssignment(ticket, [], now);
   ticket.deposits = [];
   ticket.payments = [];
@@ -712,6 +767,10 @@ export function apply(state, action, now = Date.now(), actor = demoActor) {
 
 function reduce(state, action, now, actor) {
   const next = structuredClone(state);
+  if (['saveCustomer', 'mergeCustomers', 'linkCustomer', 'importCustomers'].includes(action.type)) {
+    applyCustomerCommand(next, action, actor, now, () => createId(next, 'customer'));
+    return next;
+  }
   if (action.type === 'saveControls') {
     assert(actor.role === 'admin', '値引き上限の変更には管理者権限が必要です。');
     const limit = action.managerDiscountRateBps;
@@ -748,11 +807,15 @@ function reduce(state, action, now, actor) {
     return next;
   }
   if (action.type === 'seat') {
-    doSeat(next, action, now);
+    doSeat(next, action, now, actor);
     return next;
   }
   if (action.type === 'stockAdjust') {
     doStockAdjust(next, action, now);
+    return next;
+  }
+  if (action.type === 'recoverReceivable') {
+    recoverReceivable(next, action, now, actor);
     return next;
   }
 
@@ -831,10 +894,12 @@ function reduce(state, action, now, actor) {
       const due = quote(next, ticket.id).remaining;
       assert(Array.isArray(action.payments) && action.payments.length <= 10, '支払内容を確認してください。');
       for (const payment of action.payments) {
-        validateMethod(payment.method);
+        validateMethod(payment.method, { allowReceivable: true });
         money(payment.amount, `${methodLabel[payment.method]}の支払額`, false);
       }
       assert(totalOf(action.payments) === due, '支払額の合計を未収額と一致させてください。');
+      const creditAmount = totalOf(action.payments.filter(({ method }) => method === 'receivable'));
+      if (creditAmount > 0) issueReceivable(next, ticket, action, creditAmount, now, actor);
       ticket.payments = action.payments.map((entry) => ({ id: createId(next, 'payment'), method: entry.method,
         amount: entry.amount, at: now }));
       ticket.settlement = quote(next, ticket.id);
@@ -892,9 +957,11 @@ function reduce(state, action, now, actor) {
 
 export function summary(state) {
   const payments = { cash: 0, card: 0, qr: 0 };
+  const recoveries = state.recoveryTotalsForDay ?? getReceivableRecoveryTotals(state, state.day.date);
   const earned = new Map();
   const pending = new Map();
   let sales = 0;
+  let receivableSales = 0;
   let guests = 0;
   let tickets = 0;
   let occupied = 0;
@@ -903,7 +970,9 @@ export function summary(state) {
   for (const ticket of state.tickets) {
     if (ticket.status === 'void' || ticket.status === 'cancelled') continue;
     if (occupiedStatuses.has(ticket.status)) occupied += ticket.tableIds.length;
-    for (const payment of [...ticket.deposits, ...ticket.payments]) payments[payment.method] += payment.amount;
+    for (const payment of [...ticket.deposits, ...ticket.payments]) {
+      if (Object.hasOwn(payments, payment.method)) payments[payment.method] += payment.amount;
+    }
     const totals = quote(state, ticket.id);
     if (ticket.status === 'open') {
       openTickets++;
@@ -917,11 +986,13 @@ export function summary(state) {
       tickets++;
       guests += ticket.guests;
       sales += totals.total;
+      receivableSales += totals.receivable ?? 0;
       totals.commission.forEach((entry) => addCommission(earned, entry.castId, entry.sales, entry.amount,
         Math.round(entry.points * pointsScale)));
     }
   }
-  return { sales, guests, tickets, occupied, totalTables: state.tables.length, expectedCash: state.day.openingCash + payments.cash,
+  return { sales, receivableSales, recoveries, guests, tickets, occupied, totalTables: state.tables.length,
+    expectedCash: state.day.openingCash + payments.cash + recoveries.cash,
     commission: outputCommission(earned), pendingCommission: outputCommission(pending), stockMovements: state.movements.length,
     payments, openTickets, paidTickets };
 }

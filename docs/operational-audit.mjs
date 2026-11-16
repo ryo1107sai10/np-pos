@@ -1,10 +1,12 @@
 import { getStoreSettings } from './store-settings.mjs';
+import { getReceivableBalance } from './receivables.mjs';
 
 const ticketActions = new Set([
   'discount', 'approveDiscount', 'rejectDiscount', 'settle', 'cancelSettlement', 'reopenTicket',
   'cancelLine', 'void', 'deposit', 'cancelDeposit',
 ]);
 const settingActions = new Set(['saveLayout', 'importLayout', 'saveStoreSettings', 'importStoreConfiguration']);
+const customerActions = new Set(['saveCustomer', 'linkCustomer', 'mergeCustomers', 'importCustomers']);
 
 const sameValue = (first, second) => JSON.stringify(first) === JSON.stringify(second);
 
@@ -103,6 +105,19 @@ function auditTicket(before, after, action) {
   const newValues = ticketValues(current);
   let auditAction = action.type;
   let reason = textReason(action.reason);
+  if (action.type === 'settle' || action.type === 'cancelSettlement') {
+    const oldReceivable = before.receivables?.find(({ ticketId, cancelledAt }) => ticketId === current.id && cancelledAt == null);
+    const receivable = action.type === 'settle'
+      ? after.receivables?.find(({ ticketId, cancelledAt }) => ticketId === current.id && cancelledAt == null)
+      : after.receivables?.find(({ id }) => id === oldReceivable?.id);
+    if (receivable) {
+      const { id, dueDate, amount, cancelledAt, creditOverride } = receivable;
+      if (oldReceivable) oldValues.receivable = { id, dueDate, amount, cancelledAt: oldReceivable.cancelledAt };
+      newValues.receivable = { id, dueDate, amount, cancelledAt };
+      if (creditOverride) newValues.receivable.creditOverride = creditOverride;
+      if (action.type === 'settle' && creditOverride) reason = creditOverride.reason;
+    }
+  }
   if (['discount', 'approveDiscount', 'rejectDiscount'].includes(action.type)) {
     oldValues.discountRequest = previous.discountRequest ?? null;
     newValues.discountRequest = current.discountRequest ?? null;
@@ -126,12 +141,46 @@ function auditTicket(before, after, action) {
   };
 }
 
+function auditCustomers(before, after, action) {
+  const previous = before.customers ?? [];
+  const latest = after.customers ?? [];
+  if (action.type === 'importCustomers') {
+    return { target: target('customers', null, '顧客台帳'), before: { count: previous.length },
+      after: { count: latest.length }, reason: '顧客CSVを取り込み' };
+  }
+  if (action.type === 'mergeCustomers') {
+    const source = previous.find(({ id }) => id === action.sourceId);
+    const destination = latest.find(({ id }) => id === action.targetId);
+    return { target: target('customer', destination.id, destination.name),
+      before: { sourceId: source.id, sourceName: source.name }, after: { destinationId: destination.id },
+      reason: textReason(action.reason) };
+  }
+  if (action.type === 'linkCustomer') {
+    const customer = latest.find(({ id }) => id === action.customerId);
+    return { target: target('customer', customer.id, customer.name), before: { ticketId: action.ticketId, customerId: null },
+      after: { ticketId: action.ticketId, customerId: customer.id }, reason: '過去の伝票を顧客に紐づけ' };
+  }
+  const oldCustomer = previous.find(({ id }) => id === action.customerId);
+  const newCustomer = oldCustomer ? latest.find(({ id }) => id === oldCustomer.id) : latest.at(-1);
+  const changedFields = ['name', 'kana', 'phone', 'birthday', 'castId', 'memo', 'flagged', 'creditEnabled',
+    'creditLimit', 'bottleKeeps'].filter((key) => !sameValue(oldCustomer?.[key], newCustomer[key]));
+  if (!changedFields.length) return null;
+  const auditFields = ['name', 'castId', 'flagged', 'creditEnabled', 'creditLimit'].filter((key) => changedFields.includes(key));
+  const auditProfile = (customer) => customer
+    ? Object.fromEntries(auditFields.map((key) => [key, customer[key] ?? null])) : { present: false };
+  return { action: 'saveCustomer', target: target('customer', newCustomer.id, newCustomer.name),
+    before: auditProfile(oldCustomer), after: { ...auditProfile(newCustomer), changedFields },
+    reason: oldCustomer ? '顧客情報を更新' : '顧客を登録' };
+}
+
 export function buildOperationAudit(before, after, action, at, actor) {
   let details;
   if (ticketActions.has(action.type)) {
     details = auditTicket(before, after, action);
   } else if (settingActions.has(action.type)) {
     details = auditSettings(before, after, action);
+  } else if (customerActions.has(action.type) || (action.type === 'seat' && action.newCustomer)) {
+    details = auditCustomers(before, after, action);
   } else if (action.type === 'stockAdjust') {
     const previous = before.stock.find(({ id }) => id === action.stockId);
     const current = after.stock.find(({ id }) => id === action.stockId);
@@ -151,6 +200,15 @@ export function buildOperationAudit(before, after, action, at, actor) {
         reason: 'マネージャーの値引き上限を更新',
       };
     }
+  } else if (action.type === 'recoverReceivable') {
+    const previous = before.receivables.find(({ id }) => id === action.receivableId);
+    const current = after.receivables.find(({ id }) => id === action.receivableId);
+    details = {
+      target: target('receivable', current.id, `売掛 No. ${current.ticketNumber}`),
+      before: { balance: getReceivableBalance(previous) },
+      after: { balance: getReceivableBalance(current), collection: current.collections.at(-1) },
+      reason: '売掛を回収',
+    };
   }
   if (!details) return null;
   return structuredClone({

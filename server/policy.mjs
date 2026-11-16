@@ -1,13 +1,16 @@
 import { exportStoreConfiguration, parseStoreConfiguration, quote, summary } from '../docs/engine.mjs';
+import { isAssignedCustomer } from '../docs/customers.mjs';
 
 export const roles = new Set(['admin', 'manager', 'staff', 'cast', 'trainee']);
 const staffCommands = ['seat', 'move', 'order', 'extend', 'deposit', 'settle', 'depart', 'serve'];
-const managerCommands = [...staffCommands, 'open', 'close', 'discount', 'stockAdjust', 'cancelDeposit', 'cancelLine', 'void'];
+const managerCommands = [...staffCommands, 'open', 'close', 'discount', 'stockAdjust', 'cancelDeposit', 'cancelLine', 'void',
+  'saveCustomer', 'recoverReceivable'];
 const roleCommands = {
   staff: new Set(staffCommands),
   manager: new Set(managerCommands),
   admin: new Set([...managerCommands, 'saveLayout', 'importLayout', 'saveStoreSettings', 'importStoreConfiguration',
-    'approveDiscount', 'rejectDiscount', 'saveControls', 'cancelSettlement', 'reopenTicket']),
+    'approveDiscount', 'rejectDiscount', 'saveControls', 'cancelSettlement', 'reopenTicket',
+    'mergeCustomers', 'linkCustomer', 'importCustomers']),
 };
 const reasonCommands = new Set(['discount', 'cancelSettlement', 'reopenTicket', 'cancelLine']);
 const paymentMethods = new Set(['cash', 'card', 'qr']);
@@ -48,6 +51,8 @@ export function verifyCommand(role, command) {
   if (command.type === 'settle') {
     requireCondition(Array.isArray(command.payments) && command.payments.length <= 10 && command.payments.every(isRecord),
       400, 'invalid-command', '支払内容を確認してください。');
+    requireCondition(role !== 'staff' || command.payments.every(({ method }) => method !== 'receivable'),
+      403, 'forbidden', '売掛での会計には管理者またはマネージャーの権限が必要です。');
   }
 }
 
@@ -67,9 +72,21 @@ export function projectState(state, role, actorUid) {
   if (role !== 'manager' && role !== 'staff') return null;
   const next = structuredClone(state);
   delete next.auditLog;
+  const assigned = new Set(role === 'manager' ? (state.customers ?? [])
+    .filter((customer) => isAssignedCustomer(state, customer, actorUid)).map(({id}) => id) : []);
+  next.customers = (next.customers ?? []).map((customer) => {
+    if (!assigned.has(customer.id)) return { id: customer.id, name: customer.name, kana: customer.kana ?? '', restricted: true };
+    delete customer.createdByUid;
+    return customer;
+  });
   if (role === 'manager') {
+    next.recoveryTotalsForDay = summary(state).recoveries;
+    next.receivables = (next.receivables ?? []).filter((entry) => assigned.has(entry.customerId));
     for (const ticket of allSnapshotTickets(next)) {
-      if (!actorUid || ticket.seatedByUid !== actorUid) ticket.customer = '';
+      if (!assigned.has(ticket.customerId) && (!actorUid || ticket.seatedByUid !== actorUid)) {
+        ticket.customer = '';
+        delete ticket.customerId;
+      }
       delete ticket.seatedByUid;
       for (const entry of [ticket.discountDetails, ticket.discountRequest]) {
         for (const field of ['actor', 'approvedBy']) {
@@ -82,8 +99,11 @@ export function projectState(state, role, actorUid) {
   next.closedDays = [];
   next.movements = [];
   delete next.cancelledSettlements;
+  delete next.receivables;
+  delete next.recoveryTotalsForDay;
   for (const ticket of next.tickets) {
     ticket.customer = '';
+    delete ticket.customerId;
     delete ticket.seatedByUid;
     delete ticket.discountDetails;
     if (ticket.discountRequest) ticket.discountRequest = { id: ticket.discountRequest.id };
@@ -120,8 +140,9 @@ function nonnegative(value) {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0;
 }
 
-function validPayments(records) {
-  return uniqueRecords(records) && records.every((row) => paymentMethods.has(row.method) && nonnegative(row.amount));
+function validPayments(records, allowReceivable = false) {
+  return uniqueRecords(records) && records.every((row) =>
+    (paymentMethods.has(row.method) || (allowReceivable && row.method === 'receivable')) && nonnegative(row.amount));
 }
 
 function validTicket(ticket) {
@@ -132,7 +153,7 @@ function validTicket(ticket) {
       && nonnegative(line.price) && nonnegative(line.total) && nonnegative(line.taxRate)
       && Array.isArray(line.castIds) && Array.isArray(line.stockUses)
       && (line.castIds.length === 0 || isRecord(line.commission)))
-    && validPayments(ticket.deposits) && validPayments(ticket.payments)
+    && validPayments(ticket.deposits) && validPayments(ticket.payments, true)
     && nonnegative(ticket.discount) && nonnegative(ticket.serviceRate)
     && (ticket.settlement == null || (isRecord(ticket.settlement) && nonnegative(ticket.settlement.total)
       && Array.isArray(ticket.settlement.commission) && Array.isArray(ticket.settlement.taxBreakdown)));
@@ -148,6 +169,66 @@ function validControls(controls) {
   if (controls === undefined) return true;
   const limit = controls?.managerDiscountRateBps;
   return isRecord(controls) && (limit === undefined || (Number.isInteger(limit) && limit >= 0 && limit <= 10_000));
+}
+
+function isBusinessDate(value) {
+  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && Number.isFinite(Date.parse(value))
+    && new Date(value).toISOString().slice(0, 10) === value;
+}
+
+function optionalText(value, max) {
+  return value === undefined || (typeof value === 'string' && value.length <= max);
+}
+
+function optionalDate(value) {
+  return value === undefined || value === '' || isBusinessDate(value);
+}
+
+function validCustomer(customer) {
+  return typeof customer.name === 'string' && customer.name.trim().length > 0 && customer.name.length <= 60
+    && optionalText(customer.kana, 60) && optionalText(customer.phone, 32) && optionalText(customer.memo, 400)
+    && optionalText(customer.castId, 100) && optionalDate(customer.birthday) && optionalDate(customer.firstVisitDate)
+    && (customer.flagged === undefined || typeof customer.flagged === 'boolean')
+    && (customer.creditEnabled === undefined || typeof customer.creditEnabled === 'boolean')
+    && ((customer.creditLimit === undefined && !customer.creditEnabled) || (Number.isSafeInteger(customer.creditLimit)
+      && customer.creditLimit >= 0 && customer.creditLimit <= 100_000_000))
+    && (customer.bottleKeeps === undefined || (Array.isArray(customer.bottleKeeps) && customer.bottleKeeps.length <= 30
+      && customer.bottleKeeps.every((bottle) => isRecord(bottle) && typeof bottle.name === 'string'
+        && bottle.name.trim().length > 0 && bottle.name.length <= 60 && nonnegative(bottle.quantity) && bottle.quantity <= 1_000_000
+        && optionalText(bottle.unit, 12) && optionalDate(bottle.expiresAt))));
+}
+
+function validReceivable(entry, customerIds) {
+  const cancelled = entry.cancelledAt != null;
+  return customerIds.has(entry.customerId) && typeof entry.ticketId === 'string'
+    && Number.isSafeInteger(entry.ticketNumber) && entry.ticketNumber > 0 && nonnegative(entry.issuedAt)
+    && Number.isSafeInteger(entry.amount) && entry.amount > 0
+    && isBusinessDate(entry.date) && isBusinessDate(entry.dueDate) && entry.dueDate >= entry.date
+    && (!cancelled || (nonnegative(entry.cancelledAt) && entry.cancelledAt >= entry.issuedAt))
+    && uniqueRecords(entry.collections) && (!cancelled || entry.collections.length === 0)
+    && entry.collections.every((payment) => Number.isSafeInteger(payment.amount) && payment.amount > 0
+      && ['cash', 'card', 'bank'].includes(payment.method) && isBusinessDate(payment.date) && payment.date >= entry.date
+      && nonnegative(payment.at) && payment.at >= entry.issuedAt)
+    && entry.collections.reduce((total, payment) => total + payment.amount, 0) <= entry.amount;
+}
+
+function validReceivableLinks(state, receivables) {
+  const active = receivables.filter((entry) => entry.cancelledAt == null);
+  const byTicket = new Map(active.map((entry) => [entry.ticketId, entry]));
+  if (byTicket.size !== active.length) return false;
+  const visitById = new Map();
+  for (const day of state.closedDays) {
+    for (const ticket of day.ticketSnapshots ?? []) visitById.set(ticket.id, {ticket,date:day.date});
+  }
+  for (const ticket of state.tickets) visitById.set(ticket.id, {ticket,date:state.day.date});
+  const matching = [...visitById.values()].every(({ticket,date}) => {
+    const billed = ticket.payments.filter(({method}) => method === 'receivable').reduce((sum,entry) => sum + entry.amount,0);
+    const row = byTicket.get(ticket.id);
+    if (!billed) return !row;
+    return row?.amount === billed && row.customerId === ticket.customerId && row.ticketNumber === ticket.number
+      && row.date === date && ['paid','departed'].includes(ticket.status);
+  });
+  return matching && active.every(({ticketId}) => visitById.has(ticketId));
 }
 
 export function validateSnapshot(state) {
@@ -166,6 +247,15 @@ export function validateSnapshot(state) {
     && state.tickets.every(validTicket)
     && state.stock.every((item) => [item.quantity, item.unitCost, item.value].every(nonnegative)),
   400, 'invalid-snapshot', message);
+  const customers = state.customers ?? [];
+  const receivables = state.receivables ?? [];
+  requireCondition(uniqueRecords(customers) && customers.every(validCustomer) && uniqueRecords(receivables),
+    400, 'invalid-snapshot', message);
+  const customerIds = new Set(customers.map(({ id }) => id));
+  requireCondition(receivables.every((entry) => validReceivable(entry, customerIds))
+    && validReceivableLinks(state, receivables)
+    && allSnapshotTickets(state).every((ticket) => ticket.customerId == null || customerIds.has(ticket.customerId)),
+  400, 'invalid-snapshot', message);
 
   try {
     parseStoreConfiguration(JSON.stringify(exportStoreConfiguration(state)));
@@ -176,6 +266,8 @@ export function validateSnapshot(state) {
   }
   const migrated = structuredClone(state);
   delete migrated.auditLog;
+  delete migrated.recoveryTotalsForDay;
+  for (const customer of migrated.customers ?? []) delete customer.createdByUid;
   for (const ticket of allSnapshotTickets(migrated)) {
     delete ticket.seatedByUid;
   }

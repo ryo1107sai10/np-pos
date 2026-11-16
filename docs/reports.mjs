@@ -1,3 +1,4 @@
+import { receivableCollectionMethods } from './receivables.mjs';
 import { getTicketCommissionDetails, getTicketTableLabels } from './engine.mjs';
 
 const formatDay = new Intl.DateTimeFormat('ja-JP', {
@@ -242,6 +243,9 @@ function renderDaily(state, api, period, current) {
     ${stat(api, 'ticket', '会計済み伝票', `${asNumber(current.tickets)}<small> 件</small>`)}</div>
     <div class="lr-split">${panel('支払方法別の入金', moneyRows(cashMethods.map(([key, label]) => [label, payment[key]]), api), '<span class="lr-muted">前受金を含む</span>')}
     ${panel('レジ残高', moneyRows(cashRows, api), currentClose ? '<span class="lr-badge lr-badge-active">締め済み</span>' : '')}</div>
+    ${panel('売掛と回収', moneyRows([['当日の売掛売上', current.receivableSales],
+      ...Object.entries(receivableCollectionMethods).map(([method,label]) => [`回収（${label}）`, current.recoveries?.[method]])], api),
+      '<span class="lr-muted">現金回収はレジ残高に反映</span>')}
     ${panel('会計履歴', receiptRows.length ? table(api, ['伝票', '卓', '会計時刻', '税込金額'], receiptRows, 'lr-payment-table')
       : empty(api, 'ticket', period.legacy ? '集計の保存がある営業日です' : '会計履歴はまだありません',
         period.legacy ? 'この営業日の会計件数と売上を上の集計で確認できます。' : '会計を確定した伝票がここに表示されます。'), panelCount(receiptRows.length, '件'))}

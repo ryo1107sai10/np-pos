@@ -8,6 +8,10 @@ import { commitStoreSettingsEditor, handleStoreSettingsEditorAction, renderStore
 import { cloudConfig } from './cloud-config.mjs';
 import { createCloudClient } from './cloud-client.mjs';
 import { renderCloudBanner, renderCloudEntry, renderCloudMigration, renderCloudPanel, renderCloudRestricted } from './cloud-ui.mjs';
+import { findCustomer, getCustomerDetail, isAssignedCustomer, parseCustomersCsv } from './customers.mjs';
+import { getCustomerReceivableBalance } from './receivables.mjs';
+import { createPhaseTwoDemo } from './phase-two-demo.mjs';
+import * as customerUI from './customer-ui.mjs';
 import { operationReason, renderAuditLog, renderDiscountForm } from './operations-ui.mjs';
 
 const app = document.querySelector('#app');
@@ -22,18 +26,22 @@ const pages = {
   commission: { title: '歩合・成績', icon: 'users', help: 'キャストごとの歩合を、確定額と見込額で確認できます。' },
   stock: { title: '在庫', icon: 'box', help: 'メニューの注文に連動した在庫と、品目の増減履歴。' },
   reports: { title: '営業レポート', icon: 'chart', help: '営業日ごとの売上、支払い、レジ締めを確認できます。' },
+  customers: { title: '顧客管理', icon: 'users', help: '登録情報、来店・指名履歴、顧客ごとの売掛を確認できます。' },
+  receivables: { title: '売掛管理', icon: 'wallet', help: '支払期日と残高を確認し、回収を記録できます。' },
 };
 const statuses = {
   available: '空席', active: '利用中', soon: '終了間近', overtime: '時間超過', paid: '会計済',
 };
-const methods = { cash: '現金', card: 'カード', qr: 'QR決済' };
+const tenderMethods = { cash: '現金', card: 'カード', qr: 'QR決済' };
+const methods = { ...tenderMethods, receivable: '売掛' };
 const categories = ['よく使う', 'ドリンク', 'ボトル', 'フード', '指名'];
 const dateTime = new Intl.DateTimeFormat('ja-JP', { timeZone: 'Asia/Tokyo', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
 const prettyDate = new Intl.DateTimeFormat('ja-JP', { timeZone: 'Asia/Tokyo', month: 'long', day: 'numeric', weekday: 'short' });
 const number = new Intl.NumberFormat('ja-JP', { maximumFractionDigits: 6 });
 const ownerActions = new Set(['store-settings', 'stock-settings', 'edit-layout', 'layout-transfer', 'layout-export',
-  'discount-review', 'discount-reject', 'cancel-settlement', 'reopen-ticket', 'audit-log', 'audit-more', 'ops-settings']);
-const managerActions = new Set(['open', 'close', 'stock-adjust', 'discount', 'cancel-line', 'cancel-deposit']);
+  'discount-review', 'discount-reject', 'cancel-settlement', 'reopen-ticket', 'audit-log', 'audit-more', 'ops-settings', 'customer-merge', 'customer-link', 'customer-import']);
+const managerActions = new Set(['open', 'close', 'stock-adjust', 'discount', 'cancel-line', 'cancel-deposit', 'customer-detail', 'customer-new', 'customer-edit', 'customer-visit',
+  'receivable-detail', 'receivable-recover']);
 const cloudLabels = { admin: '店舗管理者', manager: 'マネージャー', staff: 'スタッフ', cast: 'キャスト', trainee: '体入' };
 
 let cloudState;
@@ -47,6 +55,9 @@ let filter = 'all';
 let showHiddenStock = false;
 let reportDate = '';
 let commissionCast = '';
+let customersQuery = '';
+let receivableQuery = '';
+let receivableFilter = 'all';
 let mobileDetails = false;
 let modal = null;
 let priorFocus = null;
@@ -71,7 +82,7 @@ function readSavedState() {
 }
 
 function loadState() {
-  return loadLocalData() ?? createDemo();
+  return loadLocalData() ?? createPhaseTwoDemo();
 }
 
 function loadLocalData() {
@@ -209,7 +220,7 @@ function renderSide() {
     <div class="brand" aria-label="NP POS"><img src="np-pos.svg" alt="" width="38" height="38"><span class="brand-word">NP <small>POS</small></span></div>
     <div class="store"><span class="store-icon">${icon('store', 16)}</span><span class="store-name">${escape(workspaceName)}<small>${store ? 'クラウド店舗' : 'デモ店舗'}</small></span></div>
     <nav class="side-nav" aria-label="メインメニュー">
-      ${(!store || (store.hasState && cloudState.state)) ? Object.entries(pages).filter(([key]) => canOpenPage(key)).map(([key, value]) => `<button type="button" class="nav-link" data-action="navigate" data-id="${key}" ${page === key ? 'aria-current="page"' : ''}>${icon(value.icon, 18)}<span>${value.title}</span></button>`).join('') : ''}
+      ${(!store || (store.hasState && cloudState.state)) ? Object.entries(pages).filter(([key]) => canOpenPage(key) && !['customers','receivables'].includes(key)).map(([key, value]) => `<button type="button" class="nav-link" data-action="navigate" data-id="${key}" ${page === key ? 'aria-current="page"' : ''}>${icon(value.icon, 18)}<span>${value.title}</span></button>`).join('') : ''}
     </nav>
     <div class="side-bottom">
       ${store ? '' : `<button type="button" class="demo-button" data-action="demo" aria-label="サンプル操作" title="サンプル操作">${icon('refresh', 16)}<span>サンプル操作</span>${icon('chevron-right', 14)}</button>`}
@@ -300,6 +311,7 @@ function totalRows(q, { settlement = false, large = false } = {}) {
     ${large && q.taxBreakdown.length > 1 ? q.taxBreakdown.map((tax) => `<div><dt>税率 ${tax.rate / 100}%</dt><dd>${yen(tax.tax)}</dd></div>`).join('') : ''}
     <div class="total"><dt>${settlement ? '合計' : '合計（税込）'}</dt><dd class="money">${yen(q.total)}</dd></div>
     ${q.deposit ? `<div><dt>前受金</dt><dd class="money">−${yen(q.deposit)}</dd></div>` : ''}
+    ${settlement && q.receivable ? `<div><dt>売掛の計上額</dt><dd class="money">${yen(q.receivable)}</dd></div>` : ''}
     ${settlement && q.paid ? `<div><dt>会計時のお支払い</dt><dd class="money">${yen(q.paid)}</dd></div>` : ''}
     ${(!settlement && (large || q.deposit)) ? `<div class="balance"><dt>未収額</dt><dd class="money">${yen(q.remaining)}</dd></div>` : ''}
   </dl>`;
@@ -308,7 +320,10 @@ function totalRows(q, { settlement = false, large = false } = {}) {
 function receiptBody(ticket, totals) {
   const lines = ticket.lines.filter((line) => line.cancelledAt == null);
   const payments = [...ticket.deposits, ...ticket.payments];
-  return `<section aria-labelledby="receipt-lines-title">
+  const customer = canOpenPage('customers') && findCustomer(customerWorkspaceState(),ticket.customerId);
+  const customerLink = customer && !customer.restricted
+    ? `<div class="ops-actions">${button('顧客詳細','customer-detail',{id:customer.id,glyph:'users'})}</div>` : '';
+  return `${customerLink}<section aria-labelledby="receipt-lines-title">
     <h3 id="receipt-lines-title">注文明細</h3>
     <ul class="ticket-lines">${lines.map((line) => {
       const cast = lineStaffNames(line);
@@ -324,6 +339,9 @@ function canCorrectToday(date) {
 
 function receiptActions(ticket, date) {
   if (!canCorrectToday(date) || !['paid', 'departed'].includes(ticket.status)) return '';
+  if (state.receivables?.some((entry) => entry.ticketId === ticket.id && entry.cancelledAt == null && entry.collections.length)) {
+    return '<p class="field-help">回収を記録済みの売掛会計は取り消せません。</p>';
+  }
   return `<div class="ops-actions">${button('会計を取り消す','cancel-settlement',{id:ticket.id,glyph:'x',tone:'danger'})}</div>`;
 }
 
@@ -353,10 +371,35 @@ function renderDetail() {
     <div class="detail-actions">${!settled ? `${button('注文','order',{glyph:'plus',tone:'secondary',id:ticket.id})}${button('延長','extend',{glyph:'clock',id:ticket.id,disabled:!extensionPlans().length})}${button('会計へ進む','settle',{glyph:'arrow-right',tone:'primary',id:ticket.id,cls:'btn-block',disabled:Boolean(requested)})}` : `${button('会計内訳','receipt',{glyph:'ticket',id:ticket.id,cls:'btn-block'})}${button('退店・卓を解放','depart',{glyph:'checkout',tone:'primary',id:ticket.id,cls:'btn-block'})}`}</div></div></aside>`;
 }
 
+function customerUIApi() {
+  const today = businessDate();
+  return {escape, icon, yen, role:currentRole(),
+    businessDate:state.day.status === 'closed' && today > state.day.date ? today : state.day.date};
+
+}
+
+function customerWorkspaceState() {
+  if (cloudState.store || currentRole() === 'admin') return state;
+  const actor = demoActor();
+  const customers = (state.customers ?? []).map((customer) =>
+    actor.role === 'manager' && isAssignedCustomer(state, customer, actor.id) ? customer
+      : {id:customer.id,name:customer.name,kana:customer.kana,restricted:true});
+  return {...state,customers};
+}
+
+function renderCustomerNav() {
+  if (!canOpenPage('customers') || !['floor','reports','customers','receivables'].includes(page)) return '';
+  return `<nav class="ops-tools customer-workspace-nav" aria-label="顧客と売掛">${['customers','receivables'].map((key) =>
+    button(pages[key].title, 'navigate', {id:key, glyph:pages[key].icon, tone:page === key ? 'secondary' : '',
+      data:page === key ? 'aria-current="page"' : ''})).join('')}</nav>`;
+}
+
 function render({ preserveFocus = false } = {}) {
   const focused = preserveFocus ? document.activeElement : null;
   const focusAction = focused?.dataset.action;
   const focusId = focused?.dataset.id;
+  const searchFocus = ['customerSearch','receivableSearch'].includes(focused?.name)
+    ? { name:focused.name, start:focused.selectionStart, end:focused.selectionEnd } : null;
   lastStatuses = state.tables.map((table)=>tableStatus(state,table.id)).join('|');
   lastMinute = dateTime.format(Date.now());
   const model = cloudModel();
@@ -368,12 +411,21 @@ function render({ preserveFocus = false } = {}) {
   } else {
     const tools = page === 'reports' && currentRole() === 'admin' ? `<div class="ops-tools">
       ${button('監査ログ','audit-log',{glyph:'history'})}${button('運用設定','ops-settings',{glyph:'settings'})}</div>` : '';
-    const view = page === 'floor' ? renderFloor() : renderReport(page,state,{yen,summary,quote,escape,icon,showHiddenStock,reportDate,commissionCast});
-    content = renderTop() + banner + tools + view;
+    let view;
+    if (page === 'floor') view = renderFloor();
+    else if (page === 'customers') view = customerUI.renderCustomers(customerWorkspaceState(),{...customerUIApi(),query:customersQuery});
+    else if (page === 'receivables') view = customerUI.renderReceivables(customerWorkspaceState(),{...customerUIApi(),query:receivableQuery,filter:receivableFilter});
+    else view = renderReport(page,state,{yen,summary,quote,escape,icon,showHiddenStock,reportDate,commissionCast});
+    content = renderTop() + banner + tools + renderCustomerNav() + view;
   }
   app.innerHTML = `<div class="shell">${renderSide()}<main class="workspace" id="workspace" tabindex="-1">${content}</main></div>`;
   document.title = `NP POS | ${pages[page].title}`;
   if (focusAction) [...app.querySelectorAll('[data-action]')].find((el) => el.dataset.action === focusAction && el.dataset.id === focusId)?.focus({ preventScroll: true });
+  if (searchFocus) {
+    const control = app.querySelector(`[name=${searchFocus.name}]`);
+    control?.focus({preventScroll:true});
+    if (searchFocus.start !== null) control?.setSelectionRange(searchFocus.start, searchFocus.end);
+  }
 }
 
 function cloudModel() {
@@ -406,6 +458,7 @@ function cloudUpdated(next) {
   else if (before.store && !next.store) state = loadState();
   if (contextChanged) {
     cloudMembers = {members: [], invites: []};
+    customersQuery = ''; receivableQuery = ''; receivableFilter = 'all';
     if (next.store && !canOpenPage(page)) page = 'floor';
     if (dialog.open && modal?.type !== 'cloud') dialog.close();
     pendingStorage = false;
@@ -736,8 +789,8 @@ function label(title, control, help = '') {
   return `<label class="field"><span>${title}</span>${control}${help ? `<small>${help}</small>` : ''}</label>`;
 }
 
-function methodSelect(name, method = 'cash') {
-  return `<select name="${name}" aria-label="支払方法">${Object.entries(methods).map(([key,text])=>`<option value="${key}" ${key===method?'selected':''}>${text}</option>`).join('')}</select>`;
+function methodSelect(name, method = 'cash', allowCredit = false) {
+  return `<select name="${name}" aria-label="支払方法">${Object.entries(allowCredit ? methods : tenderMethods).map(([key,text])=>`<option value="${key}" ${key===method?'selected':''}>${text}</option>`).join('')}</select>`;
 }
 
 function seatPicker(selectedIds,{ticketId,primary=null}={}) {
@@ -799,6 +852,29 @@ function paintDialog(layoutFileInput) {
     case 'edit-layout':
       present('ホールのレイアウト編集', renderLayoutEditor(modal.layout, escape), 'レイアウトを保存', { style: 'modal-layout' });
       return;
+    case 'customer-detail':
+      present('顧客詳細', customerUI.renderCustomerDetail(customerWorkspaceState(),modal.customerId,customerUIApi()), null, {style:'modal-wide customer-dialog'});
+      return;
+    case 'customer-new':
+    case 'customer-edit':
+      present(modal.type === 'customer-new' ? '顧客を登録' : '顧客情報を編集',
+        customerUI.renderCustomerForm(customerWorkspaceState(),modal.customerId,customerUIApi()), '顧客情報を保存', {style:'modal-wide customer-dialog'});
+      return;
+    case 'customer-merge':
+      present('顧客の重複を統合', customerUI.renderCustomerMerge(customerWorkspaceState(),modal.customerId,customerUIApi()), '統合を確定', {style:'customer-dialog'});
+      return;
+    case 'customer-link':
+      present('過去の来店をひもづける', customerUI.renderCustomerLink(customerWorkspaceState(),modal.customerId,customerUIApi()), '来店をひもづける', {style:'customer-dialog'});
+      return;
+    case 'customer-import':
+      present('顧客のCSV読み込み', customerUI.renderCustomerImport(customerUIApi()), '顧客をまとめて登録', {style:'modal-wide customer-dialog'});
+      return;
+    case 'receivable-detail':
+      present('売掛詳細', customerUI.renderReceivableDetail(customerWorkspaceState(),modal.receivableId,customerUIApi()), null, {style:'modal-wide customer-dialog'});
+      return;
+    case 'receivable-recover':
+      present('売掛の回収を記録', customerUI.renderRecoveryForm(customerWorkspaceState(),modal.receivableId,customerUIApi()), '回収を確定', {style:'customer-dialog'});
+      return;
     case 'audit-log':
       present('監査ログ', renderAuditLog(modal,{escape,icon}), null, {style:'ops-modal'});
       return;
@@ -822,7 +898,7 @@ function paintDialog(layoutFileInput) {
       const first = modal.tableId ? [modal.tableId] : [];
       const isVip = state.tables.some((table) => table.id === modal.tableId && table.area === 'VIP');
       const options = state.menu.filter((item)=>item.category==='セット' && item.enabled !== false).map((item)=>`<option value="${escape(item.id)}" ${isVip && item.id==='vip60' ? 'selected' : ''}>${escape(item.name)}${item.name.includes(`${item.duration}分`) ? '' : ` · ${item.duration}分`} · ${yen(item.price)}/人</option>`).join('');
-      present('来店登録',`<div class="form-grid">${label('来店人数','<input name="guests" type="number" min="1" max="100" step="1" value="2" required inputmode="numeric">')}${label('お客様名（任意）','<input name="customer" maxlength="60" placeholder="例　佐藤様">')}</div>${label('初回セット',`<select name="setId">${options}</select>`)}${seatPicker(first,{primary:modal.tableId})}<p class="field-help">同じグループで複数卓を使う場合は、追加の卓も選択します。伝票・残り時間・会計は全卓で共有します。</p>`,'来店を確定',{style:'modal-wide'});
+      present('来店登録',`<div class="form-grid">${label('来店人数','<input name="guests" type="number" min="1" max="100" step="1" value="2" required inputmode="numeric">')}${label('初回セット',`<select name="setId">${options}</select>`)}</div>${customerUI.renderSeatCustomer(customerWorkspaceState(),customerUIApi())}${seatPicker(first,{primary:modal.tableId})}<p class="field-help">同じグループで複数卓を使う場合は、追加の卓も選択します。伝票・残り時間・会計は全卓で共有します。</p>`,'来店を確定',{style:'modal-wide'});
       return;
     }
     case 'move':
@@ -870,7 +946,7 @@ function paintDialog(layoutFileInput) {
       return;
     }
     case 'settle':
-      present('お会計',`${headline}${totalRows(q,{large:true})}${q.remaining > 0 ? `<p class="form-copy payment-copy">カード・QRは、外部端末で受け取った金額を記録します。</p><div id="payment-rows">${modal.payments.map(renderPayment).join('')}</div>${button('支払方法を追加','add-payment',{glyph:'plus',tone:'quiet'})}<div id="payment-note" class="result-bar" aria-live="polite"></div>` : `<p class="form-copy payment-copy">前受金で全額を充当しました。会計を確定できます。</p>`}`,'会計を確定');
+      present('お会計',`${headline}${totalRows(q,{large:true})}${q.remaining > 0 ? `<p class="form-copy payment-copy">カード・QRは、外部端末で受け取った金額を記録します。</p><div id="payment-rows">${modal.payments.map(renderPayment).join('')}</div>${button('支払方法を追加','add-payment',{glyph:'plus',tone:'quiet'})}<div id="payment-note" class="result-bar" aria-live="polite"></div>${renderCreditOptions(creditCustomer(ticket))}` : `<p class="form-copy payment-copy">前受金で全額を充当しました。会計を確定できます。</p>`}`,'会計を確定');
       if (q.remaining > 0) updatePaymentNote();
       return;
     case 'depart':
@@ -955,6 +1031,17 @@ function renderProductDetails() {
     return `${escape(stock.name)} ${number.format(need.quantity)}${escape(stock.unit)}`;
   }).join('・');
   const availableCast = state.cast.filter((person) => person.enabled !== false);
+  if (item.category === '指名' && canOpenPage('customers')) {
+    const customerState = customerWorkspaceState();
+    const customerId = state.tickets.find(({id}) => id === modal.ticketId)?.customerId;
+    const customer = findCustomer(customerState,customerId);
+    if (customer && !customer.restricted) {
+      const detail = getCustomerDetail(customerState,customerId);
+      const suggestions = [detail?.preferredCast?.id,detail?.lastNomination?.castId].filter(Boolean);
+      const rank = (id) => suggestions.includes(id) ? suggestions.indexOf(id) : suggestions.length;
+      availableCast.sort((first, second) => rank(first.id) - rank(second.id));
+    }
+  }
   const baseCommission = commissionLabel(getItemCommission(item));
   const usesOverrides = availableCast.some((person) => person.commissionOverride);
   const showChoices = item.requiresCast || item.acceptsCast || availableCast.some((person) => commissionLabel(getItemCommission(item, person)));
@@ -975,8 +1062,25 @@ function renderProductDetails() {
     ${castChoices}</section>`;
 }
 
+function creditCustomer(ticket) {
+  if (!canOpenPage('receivables')) return null;
+  const customer = findCustomer(customerWorkspaceState(),ticket?.customerId);
+  return customer?.creditEnabled ? customer : null;
+}
+
+function renderCreditOptions(customer) {
+  if (!customer) return '';
+  const balance = getCustomerReceivableBalance(state,customer.id);
+  const dueDate = new Date(Date.parse(state.day.date) + 7 * 86_400_000).toISOString().slice(0,10);
+  return `<section id="credit-options" class="ops-highlight" hidden><p>現在の売掛残高 <strong>${yen(balance)}</strong> · 与信上限 <strong>${yen(customer.creditLimit)}</strong></p>
+    ${label('売掛の支払期日',`<input type="date" name="creditDueDate" min="${escape(state.day.date)}" value="${dueDate}" disabled>`)}
+    <div id="credit-limit-notice" hidden><p>売掛残高が与信上限を超えます。${currentRole() === 'manager' ? '店舗管理者への確認が必要です。' : ''}</p>
+    ${currentRole() === 'admin' ? label('与信上限を超える理由','<textarea name="creditOverrideReason" maxlength="120" rows="2" disabled></textarea>') : ''}</div></section>`;
+}
+
 function renderPayment(entry,index) {
-  return `<div class="payment-row">${label('支払方法',methodSelect('paymentMethod',entry.method))}${label('金額（円）',`<input type="number" name="paymentAmount" min="0" step="1" value="${entry.amount}" inputmode="numeric" required>`)}${modal.payments.length>1 ? `<button type="button" class="icon-btn" aria-label="支払い行を削除" data-action="remove-payment" data-id="${index}">${icon('x',16)}</button>` : ''}</div>`;
+  const customer = creditCustomer(state.tickets.find(({id}) => id === modal.ticketId));
+  return `<div class="payment-row">${label('支払方法',methodSelect('paymentMethod',entry.method,Boolean(customer)))}${label('金額（円）',`<input type="number" name="paymentAmount" min="0" step="1" value="${entry.amount}" inputmode="numeric" required>`)}${modal.payments.length>1 ? `<button type="button" class="icon-btn" aria-label="支払い行を削除" data-action="remove-payment" data-id="${index}">${icon('x',16)}</button>` : ''}</div>`;
 }
 
 function currentPayments() {
@@ -986,9 +1090,26 @@ function currentPayments() {
 function updatePaymentNote() {
   const note = dialog.querySelector('#payment-note');
   if (!note) return;
-  const left = quote(state,modal.ticketId).remaining - currentPayments().reduce((sum,entry)=>sum+entry.amount,0);
+  const payments = currentPayments();
+  const left = quote(state,modal.ticketId).remaining - payments.reduce((sum,entry)=>sum+entry.amount,0);
   note.innerHTML = left === 0 ? `<span>${icon('check',16)}支払額が一致しています</span><strong>差額 ${yen(0)}</strong>` : `<span>${left>0?'未充当の金額':'超過した金額'}</span><strong>${yen(Math.abs(left))}</strong>`;
   note.classList.toggle('result-warn',left!==0);
+  const options = dialog.querySelector('#credit-options');
+  if (!options) return;
+  const amount = payments.filter(({method}) => method === 'receivable').reduce((sum,entry) => sum + entry.amount,0);
+  const active = payments.some(({method}) => method === 'receivable');
+  options.hidden = !active;
+  const date = options.querySelector('[name=creditDueDate]');
+  date.disabled = !active;
+  date.required = active;
+  const customer = creditCustomer(state.tickets.find(({id}) => id === modal.ticketId));
+  const overLimit = active && customer && getCustomerReceivableBalance(state,customer.id) + amount > customer.creditLimit;
+  options.querySelector('#credit-limit-notice').hidden = !overLimit;
+  const reason = options.querySelector('[name=creditOverrideReason]');
+  if (reason) {
+    reason.disabled = !overLimit;
+    reason.required = Boolean(overLimit);
+  }
 }
 
 function reviseProduct() {
@@ -1007,6 +1128,9 @@ function openTicket(id) {
 
 function modalFromAction(target) {
   const {action,id} = target.dataset;
+  if (['customer-new','customer-import'].includes(action)) openDialog(action);
+  if (['customer-detail','customer-edit','customer-merge','customer-link'].includes(action)) openDialog(action,{customerId:id});
+  if (['receivable-detail','receivable-recover'].includes(action)) openDialog(action,{receivableId:id});
   if (['move','extend','deposit','discount','depart','receipt','seat-history','cancel-settlement','reopen-ticket'].includes(action)) openDialog(action,{ticketId:id});
   if (action === 'discount-review' || action === 'discount-reject') {
     const request = state.tickets.find((ticket) => ticket.id === id)?.discountRequest;
@@ -1035,7 +1159,19 @@ function clickAction(target) {
     if (!canOpenPage(page)) go('floor'); else render();
     return;
   }
-  if (action === 'navigate') { mobileDetails = false; go(id); return; }
+  if (action === 'navigate') { if (dialog.open) dialog.close(); mobileDetails = false; go(id); return; }
+  if (action === 'customer-visit') {
+    const date = target.dataset.date;
+    const ticket = date === state.day.date ? state.tickets.find((entry) => entry.id === id)
+      : state.closedDays.find((day) => day.date === date)?.ticketSnapshots?.find((entry) => entry.id === id);
+    if (ticket && ['paid','departed'].includes(ticket.status)) openDialog('history-receipt',{receipt:ticket,date});
+    else if (ticket?.status === 'open' && date === state.day.date) openTicket(id);
+    else {
+      const record = state.cancelledSettlements?.find((entry) => entry.ticketId === id && entry.date === date);
+      if (record) openDialog('cancelled-receipt',{record});
+    }
+    return;
+  }
   if (action === 'filter') { filter=id; render({preserveFocus:true}); return; }
   if (action === 'toggle-hidden-stock') {
     showHiddenStock = !showHiddenStock;
@@ -1114,7 +1250,7 @@ function clickAction(target) {
   if (['demo','open','seat','close'].includes(action)) {openDialog(action); return;}
   if (action === 'demo-start' || action === 'demo-live') {
     const fromOpening = action === 'demo-start';
-    let sample = createDemo(fromOpening ? 'closed' : 'live');
+    let sample = createPhaseTwoDemo(fromOpening ? 'closed' : 'live');
     if (fromOpening) {
       sample.tables = structuredClone(state.tables);
       sample.layoutAreas = getLayoutAreas(state);
@@ -1127,7 +1263,7 @@ function clickAction(target) {
     saveState(sample);
     selected = fromOpening ? null : 'a1';
     area=null; filter='all'; showHiddenStock=false; mobileDetails=false;
-    reportDate = ''; commissionCast = '';
+    reportDate = ''; commissionCast = ''; customersQuery = ''; receivableQuery = ''; receivableFilter = 'all';
     if (!fromOpening) setFloorView('list', getLayoutAreas(state)[0]);
     go('floor');
     if (action==='demo-start') openDialog('open');
@@ -1155,7 +1291,7 @@ function clickAction(target) {
       if (modal.payments.length>=3) {showError('一度に登録できる支払行は3件までです。');return;}
       const due=quote(state,modal.ticketId).remaining;
       const rest=due-modal.payments.reduce((sum,entry)=>sum+entry.amount,0);
-      const method=Object.keys(methods).find(key=>!modal.payments.some(entry=>entry.method===key)) ?? 'cash';
+      const method=Object.keys(tenderMethods).find(key=>!modal.payments.some(entry=>entry.method===key)) ?? 'cash';
       modal.payments.push({method,amount:Math.max(0,rest)});
     } else modal.payments.splice(Number(id),1);
     dialog.querySelector('#payment-rows').innerHTML=modal.payments.map(renderPayment).join('');
@@ -1214,10 +1350,45 @@ function submitDialog(form) {
     case 'open':
       commit({type:'open',date:value('date'),openingCash:numeric('openingCash')},'開店しました。空席から来店を登録できます。');
       break;
+    case 'customer-new':
+    case 'customer-edit': {
+      const customer = Object.fromEntries(['name','kana','phone','birthday','castId','memo'].map((key) => [key,value(key) ?? '']));
+      customer.flagged = data.has('flagged');
+      if (currentRole() === 'admin') {
+        customer.creditEnabled = data.has('creditEnabled');
+        customer.creditLimit = numeric('creditLimit');
+      }
+      const bottleNames = data.getAll('bottleName');
+      if (bottleNames.length) {
+        const quantities = data.getAll('bottleQuantity');
+        const units = data.getAll('bottleUnit');
+        const dates = data.getAll('bottleExpiresAt');
+        customer.bottleKeeps = bottleNames.map((name,index) => ({name, quantity:Number(quantities[index]),
+          unit:units[index] ?? '', expiresAt:dates[index] ?? ''})).filter(({name}) => name.trim());
+      }
+      commit({type:'saveCustomer',customerId:modal.customerId,customer},'顧客情報を保存しました。');
+      break;
+    }
+    case 'customer-merge':
+      commit({type:'mergeCustomers',sourceId:value('sourceId'),targetId:modal.customerId,reason:value('reason')},'顧客と履歴を統合しました。');
+      break;
+    case 'customer-link':
+      commit({type:'linkCustomer',ticketId:value('ticketId'),customerId:modal.customerId},'来店をひもづけました。');
+      break;
+    case 'customer-import':
+      commit({type:'importCustomers',customers:parseCustomersCsv(value('csv'),state.cast)},'顧客を読み込みました。');
+      break;
+    case 'receivable-recover':
+      commit({type:'recoverReceivable',receivableId:modal.receivableId,amount:numeric('amount'),
+        method:value('method'),date:value('date')},'回収を記録し、売掛残高を更新しました。');
+      break;
     case 'seat': {
       const selectedIds=data.getAll('tableIds');
       const tableIds=modal.tableId ? [modal.tableId,...selectedIds] : selectedIds;
-      commit({type:'seat',tableIds,guests:numeric('guests'),customer:value('customer'),setId:value('setId')},'来店を登録しました。',()=>{revealTable(tableIds[0]); area=null;filter='all';mobileDetails=true;});
+      const mode = value('customerMode');
+      const guest = mode === 'new' ? {newCustomer:{name:value('newCustomerName'),kana:value('newCustomerKana')}}
+        : mode === 'guest' ? {customer:value('customer')} : {customerId:value('customerId') || modal.seatCustomerId};
+      commit({type:'seat',tableIds,guests:numeric('guests'),...guest,setId:value('setId')},'来店を登録しました。',()=>{revealTable(tableIds[0]); area=null;filter='all';mobileDetails=true;});
       break;
     }
     case 'move': {
@@ -1254,7 +1425,8 @@ function submitDialog(form) {
         requestId:modal.requestId,reason:value('reason')},modal.type==='discount-review'?'値引きを承認しました。':'値引き申請を却下しました。');
       break;
     case 'settle':
-      commit({type:'settle',ticketId:id,payments:currentPayments().filter((entry)=>entry.amount>0)},'会計を確定し、歩合を実績に計上しました。');
+      commit({type:'settle',ticketId:id,payments:currentPayments().filter((entry)=>entry.amount>0),
+        creditDueDate:value('creditDueDate'),creditOverrideReason:value('creditOverrideReason')},'会計を確定し、歩合を実績に計上しました。');
       break;
     case 'depart':
       commit({type:'depart',ticketId:id},'退店を記録し、使用卓を解放しました。',()=>{selected=null;mobileDetails=false;});
@@ -1297,7 +1469,23 @@ document.addEventListener('click',(event)=> {
   try { clickAction(target); }
   catch (error) { if (!dialog.open) openDialog('demo'); showError(error.message); }
 });
+function updateCustomerPageSearch(event) {
+  if (event.isComposing) return;
+  const {name,value} = event.target;
+  if (name === 'customerSearch' && customersQuery !== value) customersQuery = value;
+  else if (name === 'receivableSearch' && receivableQuery !== value) receivableQuery = value;
+  else return;
+  render({preserveFocus:true});
+}
+
+app.addEventListener('input',updateCustomerPageSearch);
+app.addEventListener('compositionend',updateCustomerPageSearch);
 app.addEventListener('change',(event)=> {
+  if (event.target.name === 'receivableFilter') {
+    receivableFilter = event.target.value;
+    render();
+    app.querySelector('[name=receivableFilter]')?.focus({preventScroll:true});
+  }
   if (event.target.id==='area-filter') { area=event.target.value || null;render();app.querySelector('#area-filter')?.focus(); }
   if (event.target.matches('[data-report-date]')) {
     reportDate = event.target.value;
@@ -1307,6 +1495,12 @@ app.addEventListener('change',(event)=> {
   }
 });
 dialog.addEventListener('change', (event) => {
+  if (event.target.name === 'paymentMethod') updatePaymentNote();
+  if (event.target.name === 'customerId' && modal?.type === 'seat') {
+    modal.seatCustomerId = event.target.value;
+    const suggestion = dialog.querySelector('#seat-customer-suggestion');
+    if (suggestion) suggestion.innerHTML = customerUI.renderSeatCustomerSuggestion(customerWorkspaceState(),modal.seatCustomerId,customerUIApi());
+  }
   if (event.target.name === 'layout-file') readStoreFile(event.target);
   if (event.target.name === 'discountMode') {
     const rate = event.target.value === 'percent';
@@ -1317,7 +1511,16 @@ dialog.addEventListener('change', (event) => {
     input.closest('label').querySelector('span').textContent = rate ? '値引き率（%）' : '値引き額（円）';
   }
 });
+function updateSeatCustomerSearch(event) {
+  if (event.target.name !== 'customerQuery' || event.isComposing || modal.seatCustomerQuery === event.target.value) return;
+  modal.seatCustomerQuery = event.target.value;
+  const results = dialog.querySelector('#seat-customer-results');
+  results.innerHTML = customerUI.renderSeatCustomerResults(customerWorkspaceState(),event.target.value,modal.seatCustomerId,customerUIApi());
+}
+
+dialog.addEventListener('compositionend',updateSeatCustomerSearch);
 dialog.addEventListener('input',(event)=> {
+  updateSeatCustomerSearch(event);
   if (event.target.id==='menu-search') {modal.search=event.target.value;reviseProduct();}
   if (event.target.name==='paymentAmount') updatePaymentNote();
   for (const error of dialog.querySelectorAll('.form-error')) error.hidden = true;
