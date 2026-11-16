@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { apply, createDemo, quote, summary } from '../docs/engine.mjs';
-import { getDailyPayLimit, getDailyPayTotals, getPayrollDailyPays, getPayrollDraft, getPayrollSettings, previewPayroll } from '../docs/payroll.mjs';
+import { getDailyPayLimit, getDailyPayTotals, getPayrollDailyPays, getPayrollDraft, getPayrollSettings, getPayrollTemplates, previewPayroll } from '../docs/payroll.mjs';
+import { renderPayroll } from '../docs/payroll-ui.mjs';
 import { buildDailyReportCsv } from '../docs/report-export.mjs';
 import { getReportDay, getReportPeriod } from '../docs/report-period.mjs';
 import { projectState, validateSnapshot, verifyCommand } from '../server/policy.mjs';
@@ -30,6 +31,57 @@ function visit(state, table = 'a1') {
     {menuId:'castDrink',quantity:1,castIds:[castId]},
   ]})};
 }
+
+test('payroll still displays the rate editor and affected business dates after attendance approval', () => {
+  let state = shop();
+  state.attendances = [
+    {castId,date:'2026-11-16',minutes:120,status:'approved'},
+    {castId,date:'2026-11-11',minutes:60,status:'approved'},
+    {castId,date:'2026-11-08',minutes:25,status:'pending'},
+  ];
+  const render = () => renderPayroll(state,{month,castId,escape:String,icon:()=>'',yen:(amount)=>`¥${amount}`});
+  assert.throws(() => previewPayroll(state,{month,castId}),/2026-11-11に適用する時給/);
+  const missingRate = render();
+  assert.match(missingRate,/時給を登録/);
+  assert.match(missingRate,/2026-11-11・2026-11-16/);
+  assert.doesNotMatch(missingRate,/data-action="payroll-finalize"|支給合計|2026-11-08/);
+  state = run(state,rate(2_000));
+  assert.match(render(),/対象の営業日　2026-11-11</);
+  state = run(state,rate(1_500,'2026-11-11'));
+  assert.match(render(),/¥5500/);
+  assert.doesNotMatch(render(),/適用できる時給が未登録/);
+});
+
+test('named payroll templates apply to assigned casts and leave finalized amounts and template names intact', () => {
+  let state = shop();
+  const fixed = (value) => [{label:'役職手当',kind:'allowance',basis:'fixed',value}];
+  const command = {type:'savePayrollTemplate',name:'役職者',rules:fixed(1_500)};
+  verifyCommand('admin',command);
+  assert.throws(() => verifyCommand('manager',command),{code:'forbidden'});
+  state = run(state,{type:'savePayrollSettings',settings:{statementRules:fixed(500)}});
+  state = run(state,command);
+  const [{id:templateId}] = getPayrollTemplates(state);
+  const assign = {type:'assignPayrollTemplate',castId,templateId};
+  verifyCommand('admin',assign);
+  state = run(state,assign);
+  assert.equal(previewPayroll(state,{month,castId}).net,1_500);
+  assert.equal(previewPayroll(state,{month,castId:'cast2'}).net,500);
+  assert.throws(() => run(state,{type:'removePayrollTemplate',templateId}),/使用中/);
+  assert.throws(() => run(state,command),/同じ名前/);
+  state = run(state,payDraft({work:[]}));
+  state = run(state,finalize);
+  state = run(state,{...command,templateId,name:'役職者（改定）',rules:fixed(2_000)});
+  assert.equal(getPayrollDraft(state,month,castId).snapshot.templateName,'役職者');
+  assert.equal(getPayrollDraft(state,month,castId).snapshot.net,1_500);
+  assert.equal(previewPayroll(state,{month:'2026-12',castId}).net,2_000);
+  assert.equal(state.auditLog.find(({action}) => action === 'assignPayrollTemplate').after.template,'役職者');
+  assert.deepEqual(validateSnapshot(state).payroll,{...state.payroll,dailyPays:[]});
+  assert.equal(projectState(state,'manager','member')?.payroll,undefined);
+  state = run(state,{...assign,templateId:null});
+  state = run(state,{type:'removePayrollTemplate',templateId});
+  assert.equal(previewPayroll(state,{month:'2026-12',castId}).net,500);
+  assert.equal(getPayrollDraft(state,month,castId).snapshot.net,1_500);
+});
 
 test('a monthly wage of ¥17,100 only includes settled commissions and locks the original amount', () => {
   let state = shop();

@@ -1,5 +1,6 @@
 const dailyPayActions = new Set(['requestDailyPay', 'reviewDailyPay', 'payDailyPay']);
-const payrollActions = new Set(['savePayrollDraft', 'finalizePayroll', 'savePayrollRate', 'savePayrollSettings', ...dailyPayActions]);
+const payrollActions = new Set(['savePayrollDraft', 'finalizePayroll', 'savePayrollRate', 'savePayrollSettings',
+  'savePayrollTemplate', 'assignPayrollTemplate', 'removePayrollTemplate', ...dailyPayActions]);
 const paidStatuses = new Set(['paid', 'departed']);
 const defaults = Object.freeze({ pointRate: 0, commissionRounding: 'nearest', commissionUnit: 1, dailyPayLimitBps: 8000 });
 const statementBases = new Set(['fixed','hourlyPay','commission','pointPay','baseGross']);
@@ -63,6 +64,43 @@ function normalizeStatementRules(rules) {
     return {label:text(row.label,60,'支給明細の項目名'),kind:row.kind,basis:row.basis,
       value:row.basis === 'fixed' ? money(row.value,'支給明細の固定額') : integer(row.value,0,10_000,'支給明細の率の設定値')};
   });
+}
+
+export function getPayrollTemplates(state) {
+  return state.payroll?.templates ?? [];
+}
+
+export function getPayrollTemplateAssignment(state, castId) {
+  return (state.payroll?.templateAssignments ?? []).find((row) => row.castId === castId)?.templateId ?? null;
+}
+
+function normalizeTemplate(row) {
+  check(isRecord(row), '計算テンプレートを確認してください。');
+  return {id:text(row.id,128,'テンプレートID'), name:text(row.name,60,'テンプレート名'), rules:normalizeStatementRules(row.rules)};
+}
+
+function applyTemplateCommand(state, action, allocateId) {
+  const templates = (state.payroll.templates ??= []);
+  const assignments = (state.payroll.templateAssignments ??= []);
+  const {templateId,castId} = action;
+  const index = templates.findIndex(({id}) => id === templateId);
+  if (action.type === 'assignPayrollTemplate') {
+    check(castById(state,castId) && (templateId === null || index >= 0), 'キャストと計算テンプレートを選択してください。');
+    state.payroll.templateAssignments = assignments.filter((row) => row.castId !== castId);
+    if (templateId !== null) state.payroll.templateAssignments.push({castId,templateId});
+    return;
+  }
+  check(templateId == null ? action.type === 'savePayrollTemplate' : index >= 0, '計算テンプレートが見つかりません。');
+  if (action.type === 'removePayrollTemplate') {
+    check(!assignments.some((row) => row.templateId === templateId), '使用中のテンプレートは、キャストの割り当てを変更してから削除してください。');
+    templates.splice(index,1);
+    return;
+  }
+  check(index >= 0 || templates.length < 20, '計算テンプレートは20件以内で登録してください。');
+  const entry = normalizeTemplate({id:templateId ?? allocateId('pay-template'),name:action.name,rules:action.rules});
+  check(!templates.some((row) => row.id !== entry.id && row.name === entry.name), '同じ名前の計算テンプレートが登録されています。');
+  if (index >= 0) templates[index] = entry;
+  else templates.push(entry);
 }
 
 function normalizeSettings(settings) {
@@ -219,16 +257,28 @@ function netPay(hourlyPay, commission, pointPay, allowanceTotal, deductionTotal,
   return net;
 }
 
+export class MissingPayrollRateError extends Error {
+  constructor(dates) {
+    super(`${dates[0]}に適用する時給を登録してください。`);
+    this.dates = dates;
+  }
+}
+
 export function previewPayroll(state, input) {
   const record = normalizeInputs(state, input);
   const { month, castId, allowances, deductions, manualAdvance } = record;
   const rates = getPayrollRates(state, castId);
+  const missingDates = [];
   const work = attendanceWork(state, month, castId, record.work).map(({ date, minutes, source }) => {
     const rate = rates.findLast((entry) => entry.effectiveDate <= date);
-    check(minutes === 0 || rate, `${date}に適用する時給を登録してください。`);
+    if (minutes > 0 && !rate) missingDates.push(date);
     return { date, minutes, source, hourlyRate:rate?.hourlyRate ?? 0 };
   });
+  if (missingDates.length) throw new MissingPayrollRateError(missingDates);
+  const templateId = getPayrollTemplateAssignment(state,castId);
+  const template = getPayrollTemplates(state).find(({id}) => id === templateId);
   const settings = getPayrollSettings(state);
+  if (template) settings.statementRules = template.rules.map((row) => ({...row}));
   const minutes = work.reduce((sum, row) => sum + row.minutes, 0);
   const hourlyPay = Math.round(work.reduce((sum, row) => sum + row.minutes * row.hourlyRate, 0) / 60);
   const {rawCommission, pointUnits, commissionDetails} = confirmedCommission(state, month, castId);
@@ -244,7 +294,8 @@ export function previewPayroll(state, input) {
   const advance = manualAdvance + paidDailyPay;
   const net = netPay(hourlyPay,commission,pointPay,allowanceTotal,deductionTotal,advance);
   return { month, castId, castName:castById(state, castId).name, work, minutes, hourlyPay, rawCommission, commission,
-    commissionDetails, points, pointPay, allowances, deductions, statementItems, allowanceTotal, deductionTotal, manualAdvance, paidDailyPay, advance, net, settings };
+    commissionDetails, points, pointPay, allowances, deductions, statementItems, allowanceTotal, deductionTotal, manualAdvance,
+    paidDailyPay, advance, net, settings, ...(template && {templateName:template.name}) };
 }
 
 export function getDailyPayLimit(state, month, castId) {
@@ -315,6 +366,10 @@ export function applyPayrollCommand(state, action, now, actor, services) {
     state.payroll.settings = normalizeSettings({ ...getPayrollSettings(state), ...action.settings });
     return;
   }
+  if (['savePayrollTemplate','assignPayrollTemplate','removePayrollTemplate'].includes(action.type)) {
+    applyTemplateCommand(state,action,services.allocateId);
+    return;
+  }
   if (action.type === 'savePayrollRate') {
     const rate = normalizeRate(state, action);
     const index = state.payroll.rates.findIndex((row) => row.castId === rate.castId && row.effectiveDate === rate.effectiveDate);
@@ -348,6 +403,7 @@ function normalizeFinalSnapshot(state, record, snapshot) {
     '給与の確定明細を確認してください。');
   const { work, hourlyPay, rawCommission, commission, commissionDetails, points, pointPay, advance, net } = snapshot;
   const settings = normalizeSettings(snapshot.settings);
+  const templateName = snapshot.templateName === undefined ? undefined : text(snapshot.templateName,60,'テンプレート名');
   const castName = text(snapshot.castName, 60, 'キャスト名');
   const normalizedWork = normalizeWork(work,record.month).map((entry,index) => {
     // Stored rows are always sorted. Preserve the source and rate instead of using today's settings.
@@ -376,7 +432,8 @@ function normalizeFinalSnapshot(state, record, snapshot) {
   });
   return { month:record.month, castId:record.castId, castName, work:normalizedWork, minutes, hourlyPay, rawCommission, commission,
     commissionDetails:detail, points, pointPay, allowances:record.allowances, deductions:record.deductions, statementItems,
-    allowanceTotal, deductionTotal, manualAdvance:record.manualAdvance, paidDailyPay, advance, net, settings };
+    allowanceTotal, deductionTotal, manualAdvance:record.manualAdvance, paidDailyPay, advance, net, settings,
+    ...(templateName !== undefined && {templateName}) };
 }
 
 function normalizeDailyPay(state, row, cashById) {
@@ -437,7 +494,21 @@ export function normalizePayrollSnapshot(state) {
   check(new Set(rates.map(({castId,effectiveDate}) => JSON.stringify([castId,effectiveDate]))).size === rates.length
     && new Set(records.map(({castId,month}) => JSON.stringify([castId,month]))).size === records.length,
   '給与の期間または時給の適用日が重複しています。');
-  return { settings:normalizeSettings(payroll.settings), rates, records, dailyPays };
+  const templates = payroll.templates === undefined ? [] : payroll.templates;
+  const assignments = payroll.templateAssignments === undefined ? [] : payroll.templateAssignments;
+  check(Array.isArray(templates) && templates.length <= 20 && Array.isArray(assignments), '給与テンプレートを確認してください。');
+  const normalizedTemplates = templates.map(normalizeTemplate);
+  const templateIds = new Set(normalizedTemplates.map(({id}) => id));
+  check(templateIds.size === templates.length && new Set(normalizedTemplates.map(({name}) => name)).size === templates.length,
+    '給与テンプレートの名前またはIDが重複しています。');
+  const templateAssignments = assignments.map((row) => {
+    check(isRecord(row) && castById(state,row.castId) && templateIds.has(row.templateId), '給与テンプレートの割り当てを確認してください。');
+    return {castId:row.castId,templateId:row.templateId};
+  });
+  check(new Set(templateAssignments.map(({castId}) => castId)).size === assignments.length, '同じキャストに複数の給与テンプレートが割り当てられています。');
+  return { settings:normalizeSettings(payroll.settings), rates, records, dailyPays,
+    ...(payroll.templates !== undefined && {templates:normalizedTemplates}),
+    ...(payroll.templateAssignments !== undefined && {templateAssignments}) };
 }
 
 export function normalizeAttendanceSnapshot(state) {

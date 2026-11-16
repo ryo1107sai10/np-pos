@@ -1,4 +1,4 @@
-import { apply, businessDate, createDemo, discountReasonCodes, exportStoreConfiguration, getItemCommission, getLayoutAreas, getLayoutTables, getManagerDiscountLimit, getTableLabel, getTicketForTable, getTicketTableLabels, parseStoreConfiguration, quote, summary, tableStatus, yen } from './engine.mjs';
+import { apply, businessDate, createDemo, discountReasonCodes, exportStoreConfiguration, getItemCommission, getLayoutAreas, getLayoutTables, getManagerDiscountLimit, getOverdueExtensionCount, getTableLabel, getTicketForTable, getTicketTableLabels, maxOverdueExtensionCount, parseStoreConfiguration, quote, summary, tableStatus, yen } from './engine.mjs';
 import { icon } from './icons.mjs';
 import { renderReport } from './reports.mjs';
 import { getAutoExtensionNotices, getAutoExtensionPlans, getAutoExtensionSettings, getAutomaticExtensionPlan,
@@ -20,14 +20,15 @@ import { findCustomer, findSettledCustomerTicket, getCustomerDetail, isAssignedC
 import { ticketHasReceivable } from './receivables.mjs';
 import { cashMovementCategories, cashMovementKinds } from './cash-ledger.mjs';
 import { findPrintableTicket, getPrintDocuments, getPrintSettings, getPrintTenderReceived } from './print-domain.mjs';
-import { printDocumentTitles, renderPrintOptions, renderPrintPreview, renderPrintSettings } from './print-ui.mjs';
+import { printDocumentTitles, renderExtensionQuote, renderPrintOptions, renderPrintPreview, renderPrintSettings } from './print-ui.mjs';
 import { createBillingDemo, createCashDemo, createPayrollDemo, createPhaseTwoDemo, createPeriodReportDemo } from './phase-two-demo.mjs';
 import * as customerUI from './customer-ui.mjs';
 import { operationReason, renderAuditLog, renderDiscountForm } from './operations-ui.mjs';
 import { paymentCorrectionModel, readPaymentCorrection, renderPaymentCorrection, updatePaymentCorrection } from './payment-correction-ui.mjs';
+import { calculateCashTender, cashDenominations, cashEntryMaximum, getCashCountTotal, getCashPaymentAmount } from './register-cash.mjs';
 import { renderWorkspaceMenu } from './workspace-menu.mjs';
 import { renderAnalytics, buildAnalyticsCsv } from './analytics.mjs';
-import { getDailyPayLimit, getPayrollDailyPays, getPayrollDraft, previewPayroll } from './payroll.mjs';
+import { getDailyPayLimit, getPayrollDailyPays, getPayrollDraft, getPayrollTemplates, MissingPayrollRateError, previewPayroll } from './payroll.mjs';
 import * as payrollUI from './payroll-ui.mjs';
 import { renderTicketHistory, bindTicketHistory } from './ticket-history.mjs';
 import { readShiftForm, renderShiftEditor, renderShifts } from './shifts-ui.mjs';
@@ -75,8 +76,8 @@ const prettyDate = new Intl.DateTimeFormat('ja-JP', { timeZone: 'Asia/Tokyo', mo
 const number = new Intl.NumberFormat('ja-JP', { maximumFractionDigits: 6 });
 const ownerActions = new Set(['store-settings', 'stock-settings', 'edit-layout', 'layout-transfer', 'layout-export',
   'discount-review', 'discount-reject', 'cancel-settlement', 'reopen-ticket', 'audit-log', 'audit-more', 'ops-settings', 'print-settings', 'billing-settings', 'billing-settings-tab', 'calculation-settings', 'customer-merge', 'customer-link', 'customer-import', 'settled-ticket-customer', 'settled-ticket-payment', 'set-schedule']);
-const managerActions = new Set(['open', 'close', 'stock-adjust', 'discount', 'cancel-line', 'cancel-deposit', 'customer-detail', 'customer-new', 'customer-edit', 'customer-visit',
-  'record-cash', 'report-mode', 'report-day', 'report-export', 'ticket-end', 'ops-notices']);
+const managerActions = new Set(['open', 'close', 'stock-adjust', 'stocktake', 'discount', 'cancel-line', 'cancel-deposit', 'customer-detail', 'customer-new', 'customer-edit', 'customer-visit',
+  'record-cash', 'report-mode', 'report-day', 'report-export', 'ticket-end', 'ticket-guests', 'ops-notices']);
 const cloudLabels = { admin: '店舗管理者', manager: 'マネージャー', staff: 'スタッフ', cast: 'キャスト', trainee: '体入' };
 
 let cloudState;
@@ -235,7 +236,7 @@ function permittedAction(action) {
   if (action.startsWith('shift-')) return canOpenPage('shifts');
   if (ownerActions.has(action) || action.startsWith('store-editor-') || action.startsWith('layout-editor-')) return role === 'admin';
   if (managerActions.has(action)) return role === 'admin' || role === 'manager';
-  if (['table-auto-extension','auto-extension-pause','auto-extension-checkout','auto-extension-resume','ticket-customer','ticket-note'].includes(action)) {
+  if (['table-auto-extension','auto-extension-pause','auto-extension-checkout','auto-extension-resume','ticket-customer','ticket-note','extend-overdue'].includes(action)) {
     return ['admin','manager','staff'].includes(role);
   }
   return true;
@@ -263,8 +264,8 @@ function lineStaffNames(line) {
   return (line.castIds ?? []).map((id, index) => line.castNames?.[index] ?? staffName(id)).map(escape).join('・');
 }
 
-function extensionPlans() {
-  return state.menu.filter((item) => item.enabled !== false && item.category === '延長' && item.duration);
+function extensionPlans(source = state) {
+  return source.menu.filter((item) => item.enabled !== false && item.category === '延長' && item.duration);
 }
 
 function titles(ticket) {
@@ -452,7 +453,9 @@ function receiptBody(ticket, totals) {
       return `<li class="ticket-line"><span class="line-desc">${escape(line.name)} <em>${yen(line.price)} × ${line.quantity}</em>${cast ? `<small>${cast}</small>` : ''}</span><span class="money">${yen(line.total)}</span></li>`;
     }).join('')}</ul></section>
     ${totalRows(totals, { settlement: true, large: true })}
-    ${payments.length ? `<ul class="deposit-list">${payments.map((entry) => `<li><span>${tenderMethods[entry.method]}</span><strong>${yen(entry.amount)}</strong></li>`).join('')}</ul>` : ''}`;
+    ${payments.length ? `<ul class="deposit-list">${payments.map((entry) => `<li><span>${tenderMethods[entry.method]}</span><strong>${yen(entry.amount)}</strong></li>`).join('')}</ul>` : ''}
+    ${ticket.cashTender ? `<dl class="cash-close-breakdown"><div><dt>現金お預かり</dt><dd>${yen(ticket.cashTender.received)}</dd></div>
+      <div><dt>お釣り</dt><dd>${yen(ticket.cashTender.change)}</dd></div></dl>` : ''}`;
 }
 
 function canCorrectToday(date) {
@@ -526,6 +529,7 @@ function renderDetail(notices, now) {
   const customerName = ticket.customer || (canSetCustomer ? ticket.activeCustomerLink?.name : '');
   const customerAction = settled ? settledCorrectionActions(ticket)
     : canSetCustomer ? button('顧客を設定','ticket-customer',{id:ticket.id,glyph:'users',tone:'quiet'})
+      + button('人数を変更','ticket-guests',{id:ticket.id,glyph:'users',tone:'quiet'})
       + button('伝票メモ','ticket-note',{id:ticket.id,glyph:'ticket',tone:'quiet'})
       + button('終了時刻を調整','ticket-end',{id:ticket.id,glyph:'clock',tone:'quiet'}) : '';
   const lines = ticket.lines.filter((line)=>!line.cancelledAt);
@@ -545,6 +549,8 @@ function renderDetail(notices, now) {
     ${warning ? `<div class="auto-extension-detail-warning" role="group" aria-label="自動延長まで1分以内">${renderAutoExtensionBadge('soon',{icon})}
       <strong data-auto-extension-deadline="${warning.deadline}">${formatAutoExtensionCountdown(warning.deadline,now)}</strong></div>` : ''}
     ${!warning && nextAutoExtension > ticket.endsAt ? `<p class="next-auto-extension">次の自動延長予定 <strong>${dateTime.format(nextAutoExtension)}</strong></p>` : ''}
+    ${status === 'overtime' && extensionPlans().length && permittedAction('extend-overdue')
+      ? `<div class="ops-actions">${button('超過分を一括延長','extend-overdue',{id:ticket.id,glyph:'clock',tone:'secondary'})}</div>` : ''}
     ${!settled && isVisitAutoExtensionPaused(ticket) ? `<div class="visit-auto-extension-controls">
       ${renderVisitAutoExtensionPaused({icon})}
       ${button('自動延長を再開','auto-extension-resume',{id:ticket.id,glyph:'refresh',tone:'secondary',
@@ -628,7 +634,8 @@ function render({ preserveFocus = false } = {}) {
     else if (page === 'shifts') view = renderShifts(state,{escape,icon,date:shiftDate || state.day.date,mode:shiftMode});
     else if (page === 'attendance') view = renderCastAttendance(state,listCastAttendance(state),{escape,icon,yen});
     else if (page === 'team-performance') view = renderTeamPerformance(state,{escape,icon,yen,range:teamRange,role:teamRole});
-    else view = renderReport(page,state,{yen,summary,quote,escape,icon,showHiddenStock,reportDate,commissionCast,reportInterval:currentReportInterval(),reportExportError});
+    else view = renderReport(page,state,{yen,summary,quote,escape,icon,showHiddenStock,canAdjustStock:permittedAction('stock-adjust'),
+      reportDate,commissionCast,reportInterval:currentReportInterval(),reportExportError});
     content = renderTop() + banner + tools + renderOperationsNav() + view;
   }
   app.innerHTML = `<div class="shell">${renderSide()}<main class="workspace" id="workspace" tabindex="-1">${content}</main></div>`;
@@ -1229,6 +1236,20 @@ function paintDialog(layoutFileInput) {
           '延ばす場合は正の数、短くする場合は負の数を入力します。') + operationReason({title:'調整理由'}),
         '終了時刻を保存',{style:'ops-modal'});
       return;
+    case 'ticket-guests': {
+      const capacity = state.tables.filter(({id:tableId}) => ticket.tableIds.includes(tableId))
+        .reduce((sum, table) => sum + table.capacity, 0);
+      present('利用人数を変更',`${headline}<p class="form-copy">使用卓の定員は合計 ${capacity} 名です。次回の延長から新しい人数で計算します。登録済みのセットや注文の料金はそのままです。</p>`
+        + label('変更方法', `<select name="guestChangeMode">
+          <option value="correct">人数の訂正</option>
+          <option value="join"${ticket.guests >= Math.min(capacity, 100) ? ' disabled' : ''}>途中合流</option>
+          <option value="leave"${ticket.guests <= 1 ? ' disabled' : ''}>一部退店</option>
+        </select>`)
+        + label('人数（名）', '<input name="guestChangeCount" type="number" min="1" max="100" step="1" inputmode="numeric" required>',
+          '訂正は変更後の人数、合流・一部退店は増減した人数を入力します。')
+        + operationReason({title:'変更理由'}), '人数を保存',{style:'ops-modal'});
+      return;
+    }
     case 'settled-ticket-customer': {
       const entry = findSettledCustomerTicket(state,id);
       if (!entry) {
@@ -1288,6 +1309,14 @@ function paintDialog(layoutFileInput) {
           + `<p class="field-help">印刷画面でも、プリンターの用紙幅を合わせてください。</p><div id="print-preview" class="np-print-preview-frame" aria-label="印刷プレビュー">${renderPendingPrint(modal)}</div>`,
         '印刷する',{style:'ops-modal np-print-dialog'});
       return;
+    case 'extension-quote': {
+      const estimate = (modal.estimate ??= buildExtensionQuote(modal));
+      present('延長見積書を印刷',renderPrintOptions({kind:'extension-quote',width:modal.printWidth},{escape})
+        + `<div id="print-preview" class="np-print-preview-frame" aria-label="印刷プレビュー">${renderExtensionQuote(estimate,{escape,yen})}</div>
+          <div class="ops-actions">${button('延長に戻る','extension-quote-back',{glyph:'clock',tone:'quiet'})}</div>`,
+        '印刷する',{style:'ops-modal np-print-dialog'});
+      return;
+    }
     case 'audit-log':
       present('監査ログ', renderAuditLog(modal,{escape,icon}), null, {style:'ops-modal'});
       return;
@@ -1338,6 +1367,21 @@ function paintDialog(layoutFileInput) {
     case 'payroll-settings':
       present('給与設定',payrollUI.renderPayrollSettings(state,{escape,icon}),'給与設定を保存',{style:'ops-modal modal-wide'});
       return;
+    case 'payroll-templates':
+      present('給与の計算テンプレート',payrollUI.renderPayrollTemplates(state,modal.selection,{escape,icon}),
+        modal.selection.castId ? '割り当てを保存' : '',{style:'ops-modal modal-wide'});
+      return;
+    case 'payroll-template-editor': {
+      const template = getPayrollTemplates(state).find(({id}) => id === modal.templateId);
+      present(template ? 'テンプレートを編集' : 'テンプレートを追加',payrollUI.renderPayrollTemplateEditor(template,{escape,icon}),
+        'テンプレートを保存',{style:'ops-modal modal-wide'});
+      return;
+    }
+    case 'payroll-template-remove': {
+      const template = getPayrollTemplates(state).find(({id}) => id === modal.templateId);
+      present('テンプレートを削除',`<p class="form-copy">「${escape(template.name)}」を削除します。</p>`,'削除する',{style:'ops-modal'});
+      return;
+    }
     case 'shift-editor':
       present(modal.shiftId ? 'シフトを編集' : 'シフトを登録',renderShiftEditor(state,{shiftId:modal.shiftId,date:modal.shiftDate,escape}),
         'シフトを保存',{style:'ops-modal'});
@@ -1357,7 +1401,15 @@ function paintDialog(layoutFileInput) {
     case 'payroll-finalize': {
       const {month,castId} = modal.selection;
       const draft = getPayrollDraft(state,month,castId);
-      const pay = previewPayroll(state,draft);
+      let pay;
+      try {
+        pay = previewPayroll(state,draft);
+      } catch (error) {
+        if (!(error instanceof MissingPayrollRateError)) throw error;
+        present('給与を確定',`<p class="form-copy">${escape(error.message)}</p>
+          ${button('時給を登録','payroll-rate',{glyph:'wallet'})}`,null,{style:'ops-modal'});
+        return;
+      }
       present('給与を確定',`<div class="result-bar"><span>${escape(month)} ／ ${escape(pay.castName)}</span><strong>${yen(pay.net)}</strong></div>
         <p class="form-copy">確定時点の金額を支給明細として保存します。訂正が必要な場合は、翌月の手当または控除で調整してください。</p>`,
         '確定して明細を保存',{style:'ops-modal'});
@@ -1415,14 +1467,39 @@ function paintDialog(layoutFileInput) {
         const next = apply(state,{type:'extend',ticketId:id,menuId:plan.id});
         const final = quote(next,id);
         const newTicket = next.tickets.find((current)=>current.id===id);
-        return `<label class="extend-option"><input type="radio" name="extensionId" value="${escape(plan.id)}" ${index === 0 ? 'checked' : ''}><span><strong>${escape(plan.name)}</strong><small>${plan.duration}分 · 終了予定 ${dateTime.format(newTicket.endsAt)}</small></span><span><strong class="money">+${yen(final.total-q.total)}</strong><small>延長後 ${yen(final.total)}</small></span></label>`;
+        return `<label class="extend-option"><input type="radio" name="extensionId" value="${escape(plan.id)}" ${(modal.extensionId ? modal.extensionId === plan.id : index === 0) ? 'checked' : ''}><span><strong>${escape(plan.name)}</strong><small>${plan.duration}分 · 終了予定 ${dateTime.format(newTicket.endsAt)}</small></span><span><strong class="money">+${yen(final.total-q.total)}</strong><small>延長後 ${yen(final.total)}</small></span></label>`;
       }).join('');
-      present('セットを延長',`${headline}<p class="form-copy">人数、指名料、サービス料・税を含めた追加額です。</p><fieldset class="choices extend-choices"><legend class="sr-only">延長時間</legend>${options}</fieldset>`,'延長を確定');
+      present('セットを延長',`${headline}<p class="form-copy">人数、指名料、サービス料・税を含めた追加額です。</p><fieldset class="choices extend-choices"><legend class="sr-only">延長時間</legend>${options}</fieldset>
+        <div class="ops-actions">${button('延長見積書','extension-quote',{glyph:'printer'})}</div>`,'延長を確定');
       return;
     }
     case 'seat-history': {
       const history = ticket.tableHistory ?? [];
       present('使用卓の履歴', `${headline}${history.length ? `<ol class="seat-history">${history.map((entry) => `<li><span class="metric-icon">${icon('table',17)}</span><div><strong>${escape(tableName(entry.tableId))}</strong><p>${dateTime.format(entry.attachedAt)} 〜 ${entry.releasedAt ? dateTime.format(entry.releasedAt) : '使用中'} · JST</p></div></li>`).join('')}</ol>` : '<p class="form-copy">この伝票の使用卓履歴はありません。</p>'}`, null);
+      return;
+    }
+    case 'extend-overdue': {
+      const now = Date.now();
+      const options = extensionPlans().flatMap((plan) => {
+        const count = getOverdueExtensionCount(ticket,plan,now);
+        if (count < 1 || count > maxOverdueExtensionCount) return [];
+        try {
+          const preview = apply(state,{type:'extendOverdue',ticketId:id,menuId:plan.id,expectedCount:count},now);
+          const newTicket = preview.tickets.find((entry) => entry.id === id);
+          return [{plan,count,endsAt:newTicket.endsAt,total:quote(preview,id).total}];
+        } catch {
+          return [];
+        }
+      });
+      modal.overdueExtensionCounts = new Map(options.map(({plan,count}) => [plan.id,count]));
+      const choices = options.map(({plan,count,endsAt,total},index) =>
+        `<label class="extend-option"><input type="radio" name="extensionId" value="${escape(plan.id)}"${index === 0 ? ' checked' : ''}>
+          <span><strong>${escape(plan.name)}</strong><small>${plan.duration}分 × ${count}回 · 終了予定 ${dateTime.format(endsAt)}</small></span>
+          <span><strong class="money">+${yen(total-q.total)}</strong><small>延長後 ${yen(total)}</small></span></label>`).join('');
+      const body = choices
+        ? `<p class="form-copy">終了予定 ${dateTime.format(ticket.endsAt)} から現在までの超過分を、選んだプランの時間単位で切り上げて登録します。</p><fieldset class="choices extend-choices"><legend class="sr-only">一括延長プラン</legend>${choices}</fieldset>`
+        : '<p class="form-copy">一括延長できるプランがありません。超過時間と延長プランを確認してください。</p>';
+      present('超過分を一括延長',headline + body,choices ? '一括延長を確定' : null);
       return;
     }
     case 'deposit':
@@ -1451,7 +1528,11 @@ function paintDialog(layoutFileInput) {
     case 'settle':
       present('お会計',`${headline}${isVisitAutoExtensionPaused(ticket) ? renderVisitAutoExtensionPaused({icon}) : ''}${totalRows(q,{large:true})}${q.remaining > 0 ? `<p class="form-copy payment-copy">${getCardFeeSettings(state).enabled
         ? '加算前の支払額を入力します。カード端末には表示された決済額を入力してください。'
-        : 'カード・QRは、外部端末で受け取った金額を記録します。'}</p><div id="payment-rows">${modal.payments.map(renderPayment).join('')}</div>${button('支払方法を追加','add-payment',{glyph:'plus',tone:'quiet'})}<div id="payment-note" class="result-bar" aria-live="polite"></div><div id="card-fee-preview" class="card-fee-preview" aria-live="polite" hidden></div>` : `<p class="form-copy payment-copy">前受金で全額を充当しました。会計を確定できます。</p>`}`,'会計を確定');
+        : 'カード・QRは、外部端末で受け取った金額を記録します。'}</p><div id="payment-rows">${modal.payments.map(renderPayment).join('')}</div>${button('支払方法を追加','add-payment',{glyph:'plus',tone:'quiet'})}
+        <div id="payment-note" class="result-bar" aria-live="polite"></div><div id="cash-tender" hidden>
+          ${label('現金のお預かり額（任意）',`<input name="cashReceived" type="number" min="1" max="${cashEntryMaximum}" step="1" inputmode="numeric" placeholder="お客様から受け取った現金" aria-describedby="cash-tender-change" disabled>`)}
+          <div id="cash-tender-change" class="result-bar" aria-live="polite"><span>お釣り</span><strong>—</strong></div>
+        </div><div id="card-fee-preview" class="card-fee-preview" aria-live="polite" hidden></div>` : `<p class="form-copy payment-copy">前受金で全額を充当しました。会計を確定できます。</p>`}`,'会計を確定');
       if (q.remaining > 0) updatePaymentNote();
       return;
     case 'depart':
@@ -1463,7 +1544,7 @@ function paintDialog(layoutFileInput) {
     case 'history-receipt': {
       const archived = modal.receipt;
       const labels = getTicketTableLabels(state, archived).join('・');
-      const info = [labels, `${archived.guests}名`, archived.customer].filter(Boolean).map(escape).join(' · ');
+      const info = [labels, `${archived.admittedGuests ?? archived.guests}名`, archived.customer].filter(Boolean).map(escape).join(' · ');
       const header = `<div class="modal-context">${icon('calendar',16)}<strong>${escape(modal.date)}</strong><span>${info}</span></div>`;
       const totals = archived.settlement ?? quote({ ...state, tickets: [archived] }, archived.id);
       present(`会計内訳 No. ${archived.number}`, header + receiptBody(archived, totals) + receiptActions(archived,modal.date), null);
@@ -1511,9 +1592,27 @@ function paintDialog(layoutFileInput) {
       present('入出金を記録',renderCashMovementForm(),'入出金を保存',{style:'ops-modal cash-dialog'});
       return;
     case 'stock-adjust': {
-      const stock = state.stock.find((item)=>item.id===modal.stockId);
-      const cost = number.format(stock.defaultUnitCost ?? stock.unitCost);
-      present('在庫を調整',`<p class="form-copy">${escape(stock.name)} · 現在庫 <strong>${number.format(stock.quantity)}${escape(stock.unit)}</strong></p><div class="form-grid">${label(`数量の増減（${escape(stock.unit)}）`,'<input name="quantity" type="number" step="0.000001" required placeholder="例 2 または -0.5">')}${label('調整理由','<input name="reason" required maxlength="120" placeholder="例　仕入れ、棚卸差異">')}</div><p class="field-help">在庫を増やすと、仕入原価 ¥${cost} / ${escape(stock.unit)}で記録します。</p>`,'調整を確定');
+      const stock = state.stock.find(({id}) => id === modal.stockId);
+      const unit = escape(stock.unit);
+      const cost = stock.defaultUnitCost ?? stock.unitCost;
+      present('在庫の入出庫',`<p class="form-copy">${escape(stock.name)} · 現在庫 <strong>${number.format(stock.quantity)} ${unit}</strong></p>
+        <div class="form-grid">${label('入出庫の種類', `<select name="stockAdjustmentMode">
+          <option value="purchase">仕入れ・入庫</option><option value="loss">廃棄・破損（ロス）</option>
+          <option value="usage">店舗消費</option><option value="adjust">その他の数量調整</option></select>`)}
+        ${label(`入庫数量（${unit}）`, `<input name="quantity" type="number" min="0.000001" max="1000000" step="0.000001" inputmode="decimal" data-stock-unit="${unit}" required>`)}
+        </div><div data-stock-purchase>${label(`今回の仕入単価（円 / ${unit}）`,
+          `<input name="purchaseUnitCost" type="number" min="0" max="100000000" step="0.000001" inputmode="decimal" value="${cost}" required>`,
+          'この単価で入庫し、在庫の平均原価を更新します。')}</div>
+        ${operationReason()}`,'入出庫を記録',{style:'ops-modal'});
+      return;
+    }
+    case 'stocktake': {
+      const stock = state.stock.find(({id}) => id === modal.stockId);
+      const unit = escape(stock.unit);
+      present('棚卸を記録',`<p class="form-copy">${escape(stock.name)} · 帳簿在庫 <strong>${number.format(modal.bookQuantity)} ${unit}</strong></p>
+        ${label(`実際に数えた在庫（${unit}）`, '<input name="actualQuantity" type="number" min="0" max="1000000" step="0.000001" inputmode="decimal" required>',
+          '数えた数量で在庫を更新し、差がない場合も棚卸履歴に記録します。')}
+        ${operationReason({title:'棚卸メモ'})}`,'棚卸を確定',{style:'ops-modal'});
       return;
     }
   }
@@ -1538,6 +1637,18 @@ function renderPendingPrint(options) {
   return ticket ? renderPrintPreview(printData(state,ticket,options),{escape,yen}) : '';
 }
 
+function buildExtensionQuote({ticketId, extensionId, printWidth}) {
+  const source = !cloudState.store && pendingStorage ? loadLocalData() ?? state : state;
+  const ticket = source.tickets.find(({id,status}) => id === ticketId && status === 'open');
+  const plan = extensionPlans(source).find(({id}) => id === extensionId);
+  if (!ticket || !plan) throw new Error('利用中の伝票と延長プランを選択してください。');
+  const at = Date.now();
+  const next = apply(source,{type:'extend',ticketId,menuId:plan.id},at);
+  return {ticket,plan,at,endsAt:next.tickets.find(({id}) => id === ticketId).endsAt,
+    tables:getTicketTableLabels(source,ticket),date:source.day.date,before:quote(source,ticketId),after:quote(next,ticketId),
+    settings:{...getPrintSettings(source),width:printWidth},storeName:cloudState.store?.name ?? '銀座店'};
+}
+
 function openPrintDocument(id, date, kind) {
   if (!Object.hasOwn(printDocumentTitles,kind)) return;
   if (currentRole() === 'staff' && date !== state.day.date) return;
@@ -1550,6 +1661,12 @@ function openPrintDocument(id, date, kind) {
 }
 
 function updatePrintPreview(control) {
+  if (modal?.type === 'extension-quote' && control.name === 'printWidth') {
+    modal.printWidth = Number(control.value);
+    modal.estimate.settings.width = modal.printWidth;
+    dialog.querySelector('#print-preview .np-print-paper').dataset.paperWidth = String(modal.printWidth);
+    return;
+  }
   if (modal?.type !== 'print-document') return;
   if (control.name === 'printWidth') modal.printWidth = Number(control.value);
   else if (control.name === 'printRecipient') modal.printRecipient = control.value;
@@ -1564,7 +1681,11 @@ function clearPrintOutput() {
 }
 
 function printWorkspace(html) {
-  printOutput.innerHTML = `<article class="np-print-a4">${html}</article>`;
+  printMarkup(`<article class="np-print-a4">${html}</article>`);
+}
+
+function printMarkup(html) {
+  printOutput.innerHTML = html;
   document.body.classList.add('np-print-active');
   try { window.print(); }
   catch {
@@ -1582,13 +1703,7 @@ async function issuePrintDocument(options) {
   const entry = ticket && getPrintDocuments(next,ticket,date,kind).at(-1);
   if (!entry) return;
   const issuedOptions = {...options,printRecipient:entry.recipient ?? recipient,printPurpose:entry.purpose ?? purpose};
-  printOutput.innerHTML = renderPrintPreview(printData(next,ticket,issuedOptions,entry),{escape,yen});
-  document.body.classList.add('np-print-active');
-  try { window.print(); }
-  catch {
-    clearPrintOutput();
-    toast('印刷画面を開けませんでした。ブラウザーの印刷機能を確認してください。');
-  }
+  printMarkup(renderPrintPreview(printData(next,ticket,issuedOptions,entry),{escape,yen}));
 }
 
 async function settleAndPrint(command) {
@@ -1627,10 +1742,32 @@ function renderRegisterClose(totals) {
   ];
   return `<dl class="cash-close-breakdown">${rows.map(([name,amount]) => `<div><dt>${name}</dt><dd>${yen(amount)}</dd></div>`).join('')}</dl>
     <div class="result-bar"><span>レジの理論残高</span><strong>${yen(totals.expectedCash)}</strong></div>
-    ${label('実際のレジ残高（円）','<input name="actualCash" type="number" min="0" max="100000000" step="1" required inputmode="numeric" placeholder="数えた現金を入力">')}
+    <label class="inline-check"><input name="countByDenomination" type="checkbox" aria-controls="cash-denominations">金種別に数える</label>
+    <div id="cash-denominations" class="cash-denominations" hidden>${cashDenominations.map((denomination) =>
+      label(`${yen(denomination)}の枚数`,`<input data-cash-denomination="${denomination}" type="number" min="0" max="${Math.floor(cashEntryMaximum / denomination)}" step="1" inputmode="numeric" placeholder="0" disabled>`)).join('')}</div>
+    ${label('実際のレジ残高（円）',`<input name="actualCash" type="number" min="0" max="${cashEntryMaximum}" step="1" required inputmode="numeric" placeholder="数えた現金を入力">`)}
     <div id="cash-close-difference" class="result-bar" role="status"><span>差額（実残高 − 理論残高）</span><strong>—</strong></div>
     ${operationReason({title:'差額の理由（差額がある場合は必須）',required:false})}
     <p class="field-help">閉店を確定すると、内訳と差額が営業日の日報に保存されます。</p>`;
+}
+
+function readCashDenominations() {
+  const inputs = [...dialog.querySelectorAll('[data-cash-denomination]')];
+  return Object.fromEntries(inputs.filter((input) => !input.validity.valid || input.value !== '')
+    .map((input) => [input.dataset.cashDenomination,input.validity.valid ? input.valueAsNumber : NaN]));
+}
+
+function updateCashDenominations() {
+  const enabled = dialog.querySelector('[name=countByDenomination]').checked;
+  const counts = dialog.querySelector('#cash-denominations');
+  const actual = dialog.querySelector('[name=actualCash]');
+  counts.hidden = !enabled;
+  for (const input of counts.querySelectorAll('input')) input.disabled = !enabled;
+  if (enabled && !actual.readOnly) modal.manualActualCash = actual.value;
+  if (!enabled && actual.readOnly) actual.value = modal.manualActualCash ?? '';
+  actual.readOnly = enabled;
+  if (enabled) actual.value = getCashCountTotal(readCashDenominations()) ?? '';
+  updateCashCloseDifference(actual);
 }
 
 function updateCashCloseDifference(input) {
@@ -1752,6 +1889,19 @@ function updatePaymentNote() {
   const left = quote(state,modal.ticketId).remaining - payments.reduce((sum,entry)=>sum+entry.amount,0);
   note.innerHTML = left === 0 ? `<span>${icon('check',16)}支払額が一致しています</span><strong>差額 ${yen(0)}</strong>` : `<span>${left>0?'未充当の金額':'超過した金額'}</span><strong>${yen(Math.abs(left))}</strong>`;
   note.classList.toggle('result-warn',left!==0);
+  const cashPanel = dialog.querySelector('#cash-tender');
+  const cashReceived = cashPanel.querySelector('[name=cashReceived]');
+  const cashChange = cashPanel.querySelector('#cash-tender-change');
+  const cashApplied = getCashPaymentAmount(payments);
+  cashPanel.hidden = cashApplied <= 0;
+  cashReceived.disabled = cashPanel.hidden;
+  if (cashPanel.hidden) cashReceived.value = '';
+  const received = cashReceived.valueAsNumber;
+  const difference = received - cashApplied;
+  const validTender = cashReceived.validity.valid && Number.isFinite(difference);
+  cashChange.querySelector('span').textContent = validTender && difference < 0 ? '現金の不足額' : 'お釣り';
+  cashChange.querySelector('strong').textContent = validTender ? yen(Math.abs(difference)) : '—';
+  cashChange.classList.toggle('result-warn', validTender && difference < 0);
   const cardPreview = dialog.querySelector('#card-fee-preview');
   const fee = getCardFee(state,payments);
   if (cardPreview) {
@@ -1827,13 +1977,19 @@ function modalFromAction(target) {
   if (['customer-new','customer-import'].includes(action)) openDialog(action);
   if (['customer-detail','customer-edit','customer-merge','customer-link'].includes(action)) openDialog(action,{customerId:id});
   if (['move','extend','deposit','discount','depart','receipt','seat-history','cancel-settlement','reopen-ticket'].includes(action)) openDialog(action,{ticketId:id});
+  if (action === 'extend-overdue' && state.tickets.some((ticket) => ticket.id === id && ticket.status === 'open')) {
+    openDialog(action,{ticketId:id});
+  }
   if (action === 'discount-review' || action === 'discount-reject') {
     const request = state.tickets.find((ticket) => ticket.id === id)?.discountRequest;
     if (request) openDialog(action,{ticketId:id,requestId:request.id});
   }
   if (action === 'order') openDialog(action,{ticketId:id,product:target.dataset.product ?? '',category:'よく使う',search:''});
   if (action === 'settle') openSettlement(id);
-  if (action === 'stock-adjust') openDialog(action,{stockId:id});
+  if (action === 'stock-adjust' || action === 'stocktake') {
+    const stock = state.stock.find((item) => item.id === id);
+    if (stock) openDialog(action,{stockId:id,bookQuantity:stock.quantity});
+  }
   if (action === 'cancel-line') openDialog(action,{ticketId:target.dataset.ticket,lineId:id});
 }
 
@@ -1853,7 +2009,7 @@ function clickAction(target) {
     if (ticket && state.day.status === 'open') openDialog(action,{ticketId:id,ticketCustomerAlias:ticketCustomerAlias(ticket)});
     return;
   }
-  if (action === 'ticket-note' || action === 'ticket-end') {
+  if (['ticket-note','ticket-end','ticket-guests'].includes(action)) {
     if (state.day.status === 'open' && state.tickets.some((entry) => entry.id === id && entry.status === 'open')) {
       openDialog(action,{ticketId:id});
     }
@@ -1902,6 +2058,17 @@ function clickAction(target) {
     return;
   }
   if (action === 'print-document') { openPrintDocument(id,target.dataset.date,target.dataset.printKind); return; }
+  if (action === 'extension-quote' && modal?.type === 'extend') {
+    const extensionId = dialog.querySelector('[name=extensionId]:checked')?.value;
+    if (extensionId) openDialog('extension-quote',{ticketId:modal.ticketId,extensionId,printWidth:getPrintSettings(state).width});
+    return;
+  }
+  if (action === 'extension-quote-back' && modal?.type === 'extension-quote') {
+    if (state.tickets.some(({id,status}) => id === modal.ticketId && status === 'open')) {
+      openDialog('extend',{ticketId:modal.ticketId,extensionId:modal.extensionId});
+    } else dialog.close();
+    return;
+  }
   if (action === 'demo-role' && !cloudState.store && ['admin','manager','staff','cast'].includes(id)) {
     if (id === 'cast' && !getCastWorkspace(state,'demo-cast')) {
       const occupiedCastIds = new Set((state.castAccounts ?? []).map(({castId})=>castId));
@@ -1982,7 +2149,7 @@ function clickAction(target) {
     return;
   }
   if (action === 'payroll-add-rule' || action === 'payroll-remove-rule') {
-    if (modal?.type !== 'payroll-settings') return;
+    if (!['payroll-settings','payroll-template-editor'].includes(modal?.type)) return;
     const form = dialog.querySelector('#dialog-form');
     const rules = payrollUI.readPayrollTemplateRows(form);
     if (action === 'payroll-remove-rule') rules.splice(Number(id),1);
@@ -1998,9 +2165,12 @@ function clickAction(target) {
     const record = getPayrollDraft(state,month,castId);
     if (action === 'payroll-print' && record?.status === 'final') {
       printWorkspace(payrollUI.renderPayrollPrint(record,{escape,yen,storeName:cloudState.store?.name ?? '銀座店'}));
-    } else if (action === 'payroll-settings' || (castId && ['payroll-rate','payroll-draft','payroll-request-pay'].includes(action))
+    } else if (['payroll-settings','payroll-templates'].includes(action) || (castId && ['payroll-rate','payroll-draft','payroll-request-pay'].includes(action))
       || (action === 'payroll-finalize' && record?.status === 'draft')) {
       openDialog(action,{selection});
+    } else if (action === 'payroll-template-editor' && (!id || getPayrollTemplates(state).some((row) => row.id === id))
+      || action === 'payroll-template-remove' && getPayrollTemplates(state).some((row) => row.id === id)) {
+      openDialog(action,{selection,templateId:id || null});
     } else if (['payroll-review-pay','payroll-pay'].includes(action) && getPayrollDailyPays(state,selection).some((entry) => entry.id === id)) {
       openDialog(action,{dailyPayId:id});
     }
@@ -2215,6 +2385,16 @@ function submitDialog(form) {
         commissionUnit:numeric('payrollUnit'),dailyPayLimitBps:Math.round(numeric('dailyPayLimit') * 100),
         statementRules:payrollUI.readPayrollTemplateRows(form)}},'給与設定を保存しました。');
       break;
+    case 'payroll-templates':
+      commit({type:'assignPayrollTemplate',castId:modal.selection.castId,templateId:value('payrollTemplateId') || null},'給与の計算テンプレートを割り当てました。');
+      break;
+    case 'payroll-template-editor':
+      commit({type:'savePayrollTemplate',templateId:modal.templateId,name:value('payrollTemplateName'),
+        rules:payrollUI.readPayrollTemplateRows(form)},'給与の計算テンプレートを保存しました。');
+      break;
+    case 'payroll-template-remove':
+      commit({type:'removePayrollTemplate',templateId:modal.templateId},'給与の計算テンプレートを削除しました。');
+      break;
     case 'payroll-rate':
       commit({type:'savePayrollRate',castId:modal.selection.castId,effectiveDate:value('payrollRateDate'),hourlyRate:numeric('payrollHourlyRate')},'時給を保存しました。');
       break;
@@ -2294,6 +2474,10 @@ function submitDialog(form) {
     case 'ticket-end':
       commit({type:'adjustTicketEnd',ticketId:id,minutes:numeric('timeAdjustment'),reason:value('reason')},'終了時刻を更新しました。');
       break;
+    case 'ticket-guests':
+      commit({type:'adjustTicketGuests',ticketId:id,mode:value('guestChangeMode'),count:numeric('guestChangeCount'),reason:value('reason')},
+        '利用人数を更新しました。');
+      break;
     case 'settled-ticket-customer': {
       const reason = value('customerCorrectionReason')?.trim();
       if (!hasTicketCustomerChange() || !reason) break;
@@ -2343,6 +2527,13 @@ function submitDialog(form) {
       commit({type:'extend',ticketId:id,menuId:plan.id},`${plan.duration}分延長しました。`);
       break;
     }
+    case 'extend-overdue': {
+      const menuId = value('extensionId');
+      const expectedCount = modal.overdueExtensionCounts.get(menuId);
+      if (expectedCount === undefined) break;
+      commit({type:'extendOverdue',ticketId:id,menuId,expectedCount},`${expectedCount}回分の延長を登録しました。`);
+      break;
+    }
     case 'deposit':
       commit({type:'deposit',ticketId:id,method:value('method'),amount:numeric('amount')},'前受金を記録しました。');
       break;
@@ -2387,9 +2578,24 @@ function submitDialog(form) {
       void issuePrintDocument({...modal,printWidth:numeric('printWidth'),
         printRecipient:value('printRecipient') ?? '',printPurpose:value('printPurpose') ?? ''});
       break;
+    case 'extension-quote': {
+      const estimate = buildExtensionQuote(modal);
+      const preview = renderExtensionQuote(modal.estimate,{escape,yen});
+      if (renderExtensionQuote({...estimate,at:modal.estimate.at},{escape,yen}) !== preview) {
+        modal.estimate = estimate;
+        paintDialog();
+        showError('伝票の内容が更新されました。最新の見積もりを確認してから印刷してください。');
+        break;
+      }
+      printMarkup(preview);
+      break;
+    }
     case 'settle': {
       const payments = currentPayments().filter(({amount}) => amount > 0);
-      void settleAndPrint({type:'settle',ticketId:id,payments,expectedCardFee:getCardFee(state,payments)});
+      const cashReceived = value('cashReceived') ? numeric('cashReceived') : undefined;
+      calculateCashTender(payments,cashReceived);
+      void settleAndPrint({type:'settle',ticketId:id,payments,expectedCardFee:getCardFee(state,payments),
+        ...(cashReceived === undefined ? {} : {cashReceived})});
       break;
     }
     case 'depart':
@@ -2418,16 +2624,30 @@ function submitDialog(form) {
         amount:numeric('cashAmount'),destination:value('cashDestination'),reason:value('reason')},
         '入出金を記録し、レジの理論残高を更新しました。');
       break;
-    case 'close':
-      commit({type:'close',actualCash:numeric('actualCash'),reason:value('reason')},'閉店しました。締め結果を日報に保存しました。',()=>{
+    case 'close': {
+      const cashDenominations = data.has('countByDenomination') ? readCashDenominations() : undefined;
+      const actualCash = cashDenominations ? getCashCountTotal(cashDenominations) : numeric('actualCash');
+      if (actualCash === null) throw new Error('金種別の枚数と合計金額を確認してください。');
+      commit({type:'close',actualCash,reason:value('reason'),...(cashDenominations ? {cashDenominations} : {})},
+        '閉店しました。締め結果を日報に保存しました。',()=>{
         selected = null; mobileDetails = false; reportDate = ''; commissionCast = '';
         reportInterval.mode = 'day'; reportExportError = '';
         page = 'reports'; history.replaceState(null, '', '#reports');
       });
       window.scrollTo(0,0);
       break;
-    case 'stock-adjust':
-      commit({type:'stockAdjust',stockId:modal.stockId,quantity:numeric('quantity'),reason:value('reason')},'在庫の増減を記録しました。');
+    }
+    case 'stock-adjust': {
+      const kind = value('stockAdjustmentMode');
+      const operation = {stockId:modal.stockId,quantity:numeric('quantity'),reason:value('reason')};
+      const command = kind === 'adjust' ? {type:'stockAdjust',...operation} : {type:'recordStockOperation',kind,...operation,
+        ...(kind === 'purchase' && {unitCost:numeric('purchaseUnitCost')})};
+      commit(command,'在庫の入出庫を記録しました。');
+      break;
+    }
+    case 'stocktake':
+      commit({type:'recordStockOperation',stockId:modal.stockId,kind:'stocktake',bookQuantity:modal.bookQuantity,
+        actualQuantity:numeric('actualQuantity'),reason:value('reason')},'棚卸を記録しました。');
       break;
   }
 }
@@ -2523,7 +2743,17 @@ app.addEventListener('change',(event)=> {
   }
 });
 dialog.addEventListener('change', (event) => {
-  if (modal?.type === 'payroll-settings' && event.target.name === 'payrollRuleBasis') {
+  if (modal?.type === 'stock-adjust' && event.target.name === 'stockAdjustmentMode') {
+    const kind = event.target.value;
+    const purchase = kind === 'purchase';
+    const adjust = kind === 'adjust';
+    const quantity = dialog.querySelector('[name=quantity]');
+    quantity.min = adjust ? '-1000000' : '0.000001';
+    quantity.closest('label').querySelector('span').textContent = `${adjust ? '数量の増減' : purchase ? '入庫数量' : '出庫数量'}（${quantity.dataset.stockUnit}）`;
+    dialog.querySelector('[data-stock-purchase]').hidden = !purchase;
+    dialog.querySelector('[name=purchaseUnitCost]').disabled = !purchase;
+  }
+  if (['payroll-settings','payroll-template-editor'].includes(modal?.type) && event.target.name === 'payrollRuleBasis') {
     const row = event.target.closest('[data-payroll-rule]');
     const fixed = event.target.value === 'fixed';
     const value = row.querySelector('[name=payrollRuleValue]');
@@ -2543,6 +2773,7 @@ dialog.addEventListener('change', (event) => {
   updatePrintPreview(event.target);
   if (event.target.name === 'cashKind') dialog.querySelector('[name=cashCategory]').innerHTML = cashCategoryOptions(event.target.value);
   if (event.target.name === 'paymentMethod') updatePaymentNote();
+  if (event.target.name === 'countByDenomination') updateCashDenominations();
   if (event.target.name === 'customerId' && hasCustomerPicker()) {
     modal.seatCustomerId = event.target.value;
     renderSeatCustomerSelection();
@@ -2627,7 +2858,8 @@ dialog.addEventListener('input',(event)=> {
     syncTicketCustomerSubmit();
   }
   if (event.target.id==='menu-search') {modal.search=event.target.value;reviseProduct();}
-  if (event.target.name==='paymentAmount') updatePaymentNote();
+  if (event.target.name==='paymentAmount' || event.target.name==='cashReceived') updatePaymentNote();
+  if (event.target.matches('[data-cash-denomination]')) updateCashDenominations();
   if (event.target.name==='actualCash') updateCashCloseDifference(event.target);
   for (const error of dialog.querySelectorAll('.form-error')) error.hidden = true;
 });

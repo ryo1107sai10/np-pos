@@ -89,11 +89,32 @@ function receiptPayments(ticket, api) {
   const deposits = paymentGroups(ticket.deposits ?? [],'前受金・');
   const payments = paymentGroups(ticket.payments ?? []);
   if (!deposits.length && !payments.length) return '';
-  return `<section class="np-print-section"><h4>受取内訳</h4>${moneyRows([...deposits,...payments],api)}</section>`;
+  const tender = ticket.cashTender;
+  const rows = [...deposits,...payments];
+  if (tender) rows.push(['現金お預かり',tender.received],['お釣り',tender.change]);
+  return `<section class="np-print-section"><h4>受取内訳</h4>${moneyRows(rows,api)}</section>`;
 }
 
 function amountLine(label, amount, {escape, yen}) {
   return `<div class="np-print-amount"><span>${escape(label)}</span><strong>${yen(amount)}</strong></div>`;
+}
+
+export function renderExtensionQuote({ticket, tables, date, plan, endsAt, before, after, settings, storeName, at}, api) {
+  const {escape} = api;
+  const tableLabel = tables.join('・');
+  const rows = [['現在のお支払い予定額',before.remaining],['延長追加額（税込）',after.total - before.total],
+    ['延長後の会計合計（税込）',after.total]];
+  if (after.deposit) rows.push(['受領済みの前受金',-after.deposit]);
+  return `<article class="np-print-paper" data-paper-width="${Number(settings.width) === 80 ? 80 : 58}" data-print-kind="extension-quote">
+    <header class="np-print-paper-header"><h3>延長見積書</h3>
+      <p class="np-print-store-name">${escape(settings.storeName || storeName || 'NP POS')}</p></header>
+    <div class="np-print-meta"><span><strong>伝票 No. ${escape(ticket.number)}</strong>${tableLabel ? ` ／ ${escape(tableLabel)}` : ''}</span>
+      <span>営業日 ${escape(date)}</span><span>見積日時 ${dateLabel(at,timestamp)}</span></div>
+    <section class="np-print-section"><h4>${escape(plan.name)}</h4>
+      <p>${ticket.guests}名 ／ ${plan.duration}分延長</p><p>終了予定 ${dateLabel(endsAt,timestamp)}</p></section>
+    <section class="np-print-section">${moneyRows(rows,api)}${amountLine('延長後のお支払い予定額',after.remaining,api)}</section>
+    <p class="np-print-note">追加のご注文やお支払い方法により、会計時の金額が変わる場合があります。</p>
+  </article>`;
 }
 
 function confirmationAmount(totals, api) {

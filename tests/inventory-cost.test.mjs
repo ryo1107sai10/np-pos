@@ -65,3 +65,46 @@ test('orders and returns retain historical costs while the inventory report pres
   assert.match(html, /ソーダ新名称<\/strong>/);
   assert.match(html, /クラブソーダ<\/strong><\/td>\s*<td>注文出庫[\s\S]*?−0\.25<span class="lr-unit"> 本/);
 });
+
+const inventoryManager = { id: 'manager', label: '在庫担当', role: 'manager' };
+function inventoryOperation(state, fields, actor = inventoryManager) {
+  return apply(state, { type: 'recordStockOperation', stockId: 'soda', reason: '棚の現物を確認', ...fields }, now, actor);
+}
+
+test('receipts use actual purchase cost and loss and consumption preserve distinct movement types', () => {
+  const initial = createDemo('closed', now);
+  const purchased = inventoryOperation(initial, { kind: 'purchase', quantity: 6, unitCost: 245 });
+  assert.deepEqual([soda(purchased).quantity, soda(purchased).unitCost, soda(purchased).value], [30, 149, 4470]);
+  assert.equal(soda(purchased).defaultUnitCost, 125);
+  assert.equal(purchased.auditLog[0].after.unitCost, 245);
+  const discarded = inventoryOperation(purchased, { kind: 'loss', quantity: 1.5 });
+  const consumed = inventoryOperation(discarded, { kind: 'usage', quantity: 0.5 });
+  assert.equal(soda(consumed).quantity, 28);
+  assert.equal(soda(consumed).value, 4172);
+  assert.deepEqual(consumed.movements.map(({ kind, quantity }) => [kind, quantity]), [['usage', -0.5], ['loss', -1.5], ['purchase', 6]]);
+  assert.throws(() => inventoryOperation(initial, { kind: 'loss', quantity: 25 }), /不足/);
+  assert.throws(() => inventoryOperation(initial, { kind: 'usage', quantity: -1 }), /正の数/);
+  assert.throws(() => inventoryOperation(initial, { kind: 'purchase', quantity: 1, unitCost: -1 }), /仕入単価/);
+  assert.equal(soda(initial).quantity, 24);
+});
+
+test('stocktake records the book quantity and actual count even with no difference, and rejects stale or unauthorized counts', () => {
+  const initial = createDemo('closed', now);
+  const corrected = inventoryOperation(initial, { kind: 'stocktake', bookQuantity: 24, actualQuantity: 23.75 });
+  const { bookQuantity, actualQuantity, quantity, kind } = corrected.movements[0];
+  assert.deepEqual({ bookQuantity, actualQuantity, quantity, kind }, { bookQuantity: 24, actualQuantity: 23.75, quantity: -0.25, kind: 'stocktake' });
+  assert.throws(() => inventoryOperation(corrected, { kind: 'stocktake', bookQuantity: 24, actualQuantity: 23.75 }), /帳簿在庫が更新/);
+  assert.throws(() => inventoryOperation(corrected, { kind: 'stocktake', bookQuantity: 23.75, actualQuantity: -1 }), /0以上/);
+  assert.throws(() => inventoryOperation(corrected, { kind: 'stocktake', bookQuantity: 23.75, actualQuantity: 23.75 },
+    { ...inventoryManager, role: 'staff' }), /権限/);
+  const verified = inventoryOperation(corrected, { kind: 'stocktake', bookQuantity: 23.75, actualQuantity: 23.75 });
+  assert.deepEqual(soda(verified), soda(corrected));
+  assert.deepEqual(verified.movements.map((row) => row.quantity), [0, -0.25]);
+  assert.equal(verified.auditLog[0].after.kind, 'stocktake');
+  assert.deepEqual(verified.auditLog[0].actor, inventoryManager);
+  const api = { summary, yen, escape: String, icon: () => '' };
+  const html = renderReport('stock', verified, api);
+  assert.match(html, /data-action="stocktake"/);
+  assert.match(html, /帳簿 24 本 → 実数 23\.75 本/);
+  assert.doesNotMatch(renderReport('stock', verified, { ...api, canAdjustStock: false }), /data-action="stock(?:take|-adjust)"/);
+});

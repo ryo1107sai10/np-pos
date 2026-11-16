@@ -29,7 +29,8 @@ function makeRow(state, date, ticket, canViewCustomer, cancelled) {
   return {
     id:cancelled?.id ?? ticket.id, number:ticket.number, date, at,
     time:Number.isFinite(at) ? time.format(at) : '', status,
-    room, customer:canViewCustomer(ticket) && typeof ticket.customer === 'string' ? ticket.customer : '', guests:ticket.guests,
+    room, customer:canViewCustomer(ticket) && typeof ticket.customer === 'string' ? ticket.customer : '',
+    guests:ticket.admittedGuests ?? ticket.guests,
     methods:paymentKinds(ticket),
     total:status === 'void' ? null : ticket.settlement?.total ?? quote({...state,tickets:[ticket]},ticket.id).total,
   };

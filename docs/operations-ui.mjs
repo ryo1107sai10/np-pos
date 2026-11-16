@@ -3,7 +3,8 @@ const timestamp = new Intl.DateTimeFormat('ja-JP', {
   hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
 });
 const japaneseNumber = new Intl.NumberFormat('ja-JP', { maximumFractionDigits: 6 });
-const moneyFields = new Set(['amount', 'total', 'subtotal', 'discount', 'price', 'value', 'cost', 'expectedCash', 'actualCash', 'discrepancy', 'cardFee', 'net', 'manualAdvance', 'hourlyRate', 'pointRate']);
+const moneyFields = new Set(['amount', 'total', 'subtotal', 'discount', 'price', 'value', 'cost', 'unitCost', 'expectedCash', 'actualCash', 'discrepancy',
+  'received', 'change', 'cardFee', 'net', 'manualAdvance', 'hourlyRate', 'pointRate']);
 const omittedAuditFields = new Set(['receivable', 'receivableSales', 'recoveries', 'recoveryRows', 'creditLimit', 'creditEnabled', 'creditOverride']);
 const roles = { admin: '店舗管理者', manager: 'マネージャー', staff: 'スタッフ', cast:'キャスト' };
 
@@ -11,7 +12,7 @@ const auditLabels = {
   discount: '値引き', discountRequest: '値引き申請', approveDiscount: '値引き承認', rejectDiscount: '値引き却下',
   cancelLine: '注文取消', void: '伝票取消', settle: '会計確定', cancelSettlement: '会計取消', reopenTicket: '伝票の再オープン',
   correctSettledTicketPayments: '会計済み伝票の支払方法訂正',
-  deposit: '前受金の登録', cancelDeposit: '前受金の取消', stockAdjust: '在庫調整',
+  deposit: '前受金の登録', cancelDeposit: '前受金の取消', stockAdjust: '在庫調整', recordStockOperation: '在庫の入出庫・棚卸',
   saveStoreSettings: '店舗設定の変更', saveLayout: '卓レイアウトの変更', importStoreConfiguration: '店舗設定の読み込み',
   saveCustomer: '顧客情報の登録・変更', setTicketCustomer: '伝票の顧客設定', correctSettledTicketCustomer: '会計済み伝票の顧客訂正',
   mergeCustomers: '顧客の統合', linkCustomer: '来店と顧客の関連づけ',
@@ -22,8 +23,10 @@ const auditLabels = {
   pauseVisitAutoExtension: '来店単位の自動延長停止', resumeVisitAutoExtension: '来店単位の自動延長再開', saveCardFeeSettings: 'カード会計加算設定の変更',
   importLayout: '卓レイアウトの読み込み', saveControls: '運用設定の変更', migrate: '営業データの移行',
   savePayrollDraft: '給与の下書き保存', finalizePayroll: '給与の確定', savePayrollRate: '時給の変更', savePayrollSettings: '給与設定の変更',
+  savePayrollTemplate: '給与テンプレートの保存', assignPayrollTemplate: '給与テンプレートの割り当て', removePayrollTemplate: '給与テンプレートの削除',
   requestDailyPay: '日払いの申請', reviewDailyPay: '日払いの審査', payDailyPay: '日払いの支給',
-  saveTicketNote: '伝票メモの変更', adjustTicketEnd: '終了時刻の調整',
+  saveTicketNote: '伝票メモの変更', adjustTicketEnd: '終了時刻の調整', adjustTicketGuests: '利用人数の変更',
+  extendOverdue:'一括延長',
   bindCastAccount:'キャストアカウントの設定', castClockIn:'出勤打刻', castClockOut:'退勤打刻', reviewCastAttendance:'勤怠の確認',
   castRequestShift:'勤務希望の申請', castRequestDailyPay:'本人の日払い申請',
   saveCalculationSettings:'税とサービス料の計算設定',
@@ -42,7 +45,9 @@ const valueLabels = {
   menu: 'メニュー・プラン', cast: 'キャスト', stock: '在庫品目', tables: '卓', areas: 'エリア', tableIds: '使用卓',
   changedFields: '変更項目', customerId: '顧客ID', customerName: '顧客名',
   kind: '種類', category: '理由区分', destination: '相手先・移動先',
+  stocktake: '棚卸', purchase: '仕入れ・入庫', loss: '廃棄・破損（ロス）', usage: '店舗消費', adjust: '数量調整', unitCost: '仕入単価',
   expectedCash: 'レジ理論残高', actualCash: 'レジ実残高', discrepancy: 'レジ差額',
+  cashTender: '現金のお預かりとお釣り', received: '現金お預かり', change: 'お釣り', cashDenominations: '金種別の枚数',
   issueNumber: '発行回数', width: '用紙幅（mm）', storeName: '印字する店名', address: '住所', phone: '電話番号',
   registrationNumber: '登録番号', showItems: '明細を印字', autoReceipt: '会計時のレシート自動印刷',
   enabled: '有効', menuId: '延長プラン', rateBps: '加算率', cardFee: 'カード会計加算',
@@ -54,7 +59,8 @@ const valueLabels = {
   pointRate: 'ポイント換金単価', commissionRounding: '歩合の端数処理', commissionUnit: '歩合の丸め単位', dailyPayLimitBps: '日払い上限率',
   draft: '下書き', final: '確定', requested: '申請中', castName: 'キャスト名', month: '給与対象月',
   reviewReason: '審査理由', paidDate: '支給営業日', cashMovementId: '入出金記録ID', floor: '切り捨て', nearest: '四捨五入',
-  note: '伝票メモ', endsAt: '終了時刻',
+  note: '伝票メモ', endsAt: '終了時刻', extensionCount:'延長回数', extensionPlan:'延長プラン',
+  guests:'滞在人数', admittedGuests:'来店人数の合計', guestChangeMode:'変更方法', correct:'人数の訂正', join:'途中合流', leave:'一部退店',
 };
 
 function inputLabel(label, control) {

@@ -8,6 +8,7 @@ import { applyCustomerCommand, customerForSeat, findCustomer, findSettledCustome
 import { correctSettledTicketReceivable, getCustomerReceivableBalance, getReceivableBalance, getReceivableRecoveryTotals,
   receivableCollectionMethods } from './receivables.mjs';
 import { createCashMovement, getCashMovements, getDailyRecoveryRows, totalCashMovements } from './cash-ledger.mjs';
+import { calculateCashTender, getCashCountTotal } from './register-cash.mjs';
 import { applyPrintCommand } from './print-domain.mjs';
 import { applyShiftCommand } from './shifts.mjs';
 import { applySetSchedule, isValidInitialSetSchedule } from './set-schedule.mjs';
@@ -374,12 +375,16 @@ function newStockMovement(state, stock, amount, kind, reason, now, ticketId = nu
   const quantity = decimalUnits(stock.quantity) + decimalUnits(amount);
   assert(quantity >= 0, `${stock.name}の在庫が不足しています。`);
   const oldValue = stock.value;
-  const newValue = quantity === 0 ? 0 : Math.max(0, oldValue + amount * unitCost);
-  stock.quantity = quantity / movementScale;
-  stock.value = Math.round(newValue * movementScale) / movementScale;
-  stock.unitCost = quantity > 0 ? Math.round(stock.value / stock.quantity * movementScale) / movementScale : stock.unitCost;
-  state.movements.unshift({ id: createId(state, 'stock'), stockId: stock.id, stockName: stock.name, quantity: amount,
-    unit: stock.unit, unitCost, cost: Math.abs(oldValue - stock.value), reason, kind, at: now, ticketId, sourceLineId });
+  if (amount !== 0) {
+    const newValue = quantity === 0 ? 0 : Math.max(0, oldValue + amount * unitCost);
+    stock.quantity = quantity / movementScale;
+    stock.value = Math.round(newValue * movementScale) / movementScale;
+    stock.unitCost = quantity > 0 ? Math.round(stock.value / stock.quantity * movementScale) / movementScale : stock.unitCost;
+  }
+  const movement = { id: createId(state, 'stock'), stockId: stock.id, stockName: stock.name, quantity: amount,
+    unit: stock.unit, unitCost, cost: Math.abs(oldValue - stock.value), reason, kind, at: now, ticketId, sourceLineId };
+  state.movements.unshift(movement);
+  return movement;
 }
 
 function addLine(state, ticket, menu, quantity, castIds, now, { includeHistoricalCast = false } = {}) {
@@ -422,6 +427,14 @@ function extendTicket(state, ticket, menu, now, automatic = false) {
     for (const line of added) line.autoExtension = true;
   }
   ticket.endsAt += menu.duration * minute;
+}
+
+export const maxOverdueExtensionCount = 100;
+
+export function getOverdueExtensionCount(ticket, plan, now = Date.now()) {
+  if (ticket?.status !== 'open' || !Number.isSafeInteger(ticket.endsAt)
+    || !Number.isInteger(plan?.duration) || plan.duration <= 0) return 0;
+  return Math.ceil(Math.max(0, now - ticket.endsAt) / (plan.duration * minute));
 }
 
 function currentDay(state) {
@@ -518,6 +531,9 @@ function doClose(state, action, now) {
   currentDay(state);
   assert(!state.tickets.some((ticket) => occupiedStatuses.has(ticket.status)), '使用中または退店待ちの卓があります。');
   const actualCash = money(action.actualCash, '実残高');
+  const cashDenominations = action.cashDenominations;
+  assert(cashDenominations === undefined || getCashCountTotal(cashDenominations) === actualCash,
+    '金種別に数えた合計をレジの実残高と一致させてください。');
   const totals = summary(state);
   const discrepancy = actualCash - totals.expectedCash;
   const reason = discrepancy ? operationalReason(action.reason, 'レジ差額の理由')
@@ -529,6 +545,7 @@ function doClose(state, action, now) {
     receivableSales: totals.receivableSales, recoveries: totals.recoveries, recoveryRows: structuredClone(totals.recoveryRows),
     tenderPayments: totals.tenderPayments, depositsReceived: totals.depositsReceived, depositsApplied: totals.depositsApplied,
     cashIn: totals.cashIn, cashOut: totals.cashOut, expenses: totals.expenses, cashMovements: structuredClone(totals.cashMovements),
+    ...(cashDenominations === undefined ? {} : {cashDenominations:structuredClone(cashDenominations)}),
     ticketSnapshots: snapshotClosedTickets(state) });
 }
 
@@ -625,6 +642,7 @@ function correctSettledTicketPayments(state, action, now, actor) {
   // Keep the original bill and its surcharge, taxes and commission while replacing the tender breakdown.
   const applyToTicket = (record) => {
     record.payments = structuredClone(payments);
+    if (difference.cash !== 0) delete record.cashTender;
     record.paymentsCorrectedAt = now;
     record.settlement ??= structuredClone(settlement);
     record.settlement.paid = originalTotal - updated.receivable;
@@ -670,6 +688,7 @@ function reverseSettlement(state, ticket, action, now, actor) {
   recordTableAssignment(ticket, [], now);
   ticket.deposits = [];
   ticket.payments = [];
+  delete ticket.cashTender;
   delete ticket.paymentsCorrectedAt;
   delete ticket.settledBy;
   ticket.settlement = null;
@@ -697,15 +716,39 @@ function reopenTicket(state, ticket, action, now, actor) {
   ticket.autoExtensionResumedAt = now;
 }
 
-function doStockAdjust(state, action, now) {
+function doStockAdjust(state, action, now, actor) {
+  assert(['admin', 'manager'].includes(actor.role), '在庫の変更には管理者またはマネージャー権限が必要です。');
   const stock = state.stock.find((entry) => entry.id === action.stockId);
   assert(stock, '在庫品目が見つかりません。');
-  const units = decimalUnits(action.quantity);
-  assert(units !== 0, '数量の増減を入力してください。');
-  const reason = String(action.reason ?? '').trim().slice(0, 120);
-  assert(reason.length > 0, '調整理由を入力してください。');
+  const adjust = action.type === 'stockAdjust';
+  const kind = adjust ? 'adjust' : action.kind;
+  assert(adjust || ['purchase', 'loss', 'usage', 'stocktake'].includes(kind), '在庫の操作区分を確認してください。');
+  const reason = operationalReason(action.reason, '調整理由');
+
+  if (kind === 'stocktake') {
+    const bookQuantity = stock.quantity;
+    const bookUnits = decimalUnits(bookQuantity);
+    assert(decimalUnits(action.bookQuantity) === bookUnits, '帳簿在庫が更新されました。棚卸を開き直してください。');
+    const actualUnits = decimalUnits(action.actualQuantity);
+    assert(actualUnits >= 0, '実際に数えた在庫を0以上で入力してください。');
+    const movement = newStockMovement(state, stock, (actualUnits - bookUnits) / movementScale, kind, reason, now);
+    Object.assign(movement, { bookQuantity, actualQuantity: actualUnits / movementScale });
+    return;
+  }
+
+  const inputUnits = decimalUnits(action.quantity);
+  assert(adjust ? inputUnits !== 0 : inputUnits > 0, adjust ? '数量の増減を入力してください。' : '数量を正の数で入力してください。');
+  const units = kind === 'loss' || kind === 'usage' ? -inputUnits : inputUnits;
+  if (kind === 'purchase') {
+    const price = action.unitCost;
+    assert(Number.isFinite(price) && price >= 0 && price <= 100_000_000
+      && Math.abs(Math.round(price * movementScale) / movementScale - price) < 0.00000001,
+    '仕入単価を小数点以下6桁までの0以上の金額で入力してください。');
+    newStockMovement(state, stock, units / movementScale, kind, reason, now, null, null, price);
+    return;
+  }
   const unitCost = units > 0 ? stock.defaultUnitCost ?? stock.unitCost : stock.unitCost;
-  newStockMovement(state, stock, units / movementScale, 'adjust', reason, now, null, null, unitCost);
+  newStockMovement(state, stock, units / movementScale, kind, reason, now, null, null, unitCost);
 }
 
 function layoutName(value, label) {
@@ -876,6 +919,23 @@ function adjustTicketEnd(ticket, action, now, actor) {
   if (endsAt <= now) ticket.autoExtensionResumedAt = Math.max(ticket.autoExtensionResumedAt ?? 0, now);
 }
 
+function adjustTicketGuests(state, ticket, { mode, count, reason }, actor) {
+  assert(['admin','manager'].includes(actor.role), '人数の変更にはマネージャー以上の権限が必要です。');
+  operationalReason(reason, '人数を変更する理由');
+  assert(['correct','join','leave'].includes(mode), '人数の変更方法を選択してください。');
+  positiveInteger(count, '人数');
+  const current = ticket.guests;
+  const guests = mode === 'join' ? current + count : mode === 'leave' ? current - count : count;
+  assert(guests > 0, '全員が退店する場合は会計へ進んでください。');
+  assert(guests !== current, '現在の人数と異なる人数を入力してください。');
+  positiveInteger(guests, '変更後の人数');
+  tableSet(state, ticket.tableIds, guests, ticket.id);
+  const admitted = (ticket.admittedGuests ?? current) + (mode === 'leave' ? 0 : guests - current);
+  assert(Number.isSafeInteger(admitted), '来店人数の合計を確認してください。');
+  ticket.admittedGuests = admitted;
+  ticket.guests = guests;
+}
+
 function validateDiscountAmount(ticket, amount, subtotal) {
   assert(amount <= subtotal, '値引きは小計以下を入力してください。');
   const changed = calculateQuote({ ...ticket, discount: amount });
@@ -960,7 +1020,7 @@ function reduce(state, action, now, actor) {
   }
   if (isPayrollCommand(action.type)) {
     applyPayrollCommand(next, action, now, actor, {
-      allocateId: () => createId(next, 'daily-pay'),
+      allocateId: (prefix = 'daily-pay') => createId(next, prefix),
       recordCashPayout: (amount) => {
         assert(summary(next).expectedCash >= amount, '日払い額がレジの理論残高を超えています。');
         const movement = createCashMovement(next,{kind:'withdrawal',category:'other',amount,
@@ -1044,8 +1104,8 @@ function reduce(state, action, now, actor) {
     doSeat(next, action, now, actor);
     return next;
   }
-  if (action.type === 'stockAdjust') {
-    doStockAdjust(next, action, now);
+  if (action.type === 'stockAdjust' || action.type === 'recordStockOperation') {
+    doStockAdjust(next, action, now, actor);
     return next;
   }
   if (action.type === 'recordCashMovement') {
@@ -1087,6 +1147,9 @@ function reduce(state, action, now, actor) {
     case 'adjustTicketEnd':
       adjustTicketEnd(ticket, action, now, actor);
       break;
+    case 'adjustTicketGuests':
+      adjustTicketGuests(next, ticket, action, actor);
+      break;
     case 'setTicketCustomer':
       setTicketCustomer(next, ticket, action, actor);
       break;
@@ -1113,11 +1176,19 @@ function reduce(state, action, now, actor) {
         addLine(next, ticket, menu, item.quantity, item.castIds ?? [], now);
       }
       break;
-    case 'extend': {
+    case 'extend':
+    case 'extendOverdue': {
       const menu = next.menu.find((entry) => entry.category === '延長' && entry.enabled !== false && Number.isInteger(entry.duration)
         && (action.menuId === undefined ? entry.duration === Number(action.minutes) : entry.id === action.menuId));
       assert(menu, '延長時間を選択してください。');
-      extendTicket(next, ticket, menu, now);
+      const count = action.type === 'extendOverdue' ? getOverdueExtensionCount(ticket, menu, now) : 1;
+      if (action.type === 'extendOverdue') {
+        assert(['admin','manager','staff'].includes(actor.role), '一括延長を行う権限がありません。');
+        assert(count > 0, 'セット終了時刻を過ぎた伝票が対象です。');
+        assert(count <= maxOverdueExtensionCount, '一度に登録できる延長は100回までです。延長内容を確認してください。');
+        assert(action.expectedCount === count, '超過時間が変わりました。一括延長を開き直して金額を確認してください。');
+      }
+      for (let interval = 0; interval < count; interval++) extendTicket(next, ticket, menu, now);
       break;
     }
     case 'deposit': {
@@ -1151,6 +1222,7 @@ function reduce(state, action, now, actor) {
         money(payment.amount, `${methodLabel[payment.method]}の支払額`, false);
       }
       assert(totalOf(action.payments) === due, '支払額の合計を未収額と一致させてください。');
+      const cashTender = calculateCashTender(action.payments,action.cashReceived);
       const cardFee = getCardFee(next,action.payments);
       if (cardFee > 0 || action.expectedCardFee !== undefined) {
         assert(action.expectedCardFee === cardFee, 'カード加算額が更新されています。会計画面を開き直して金額を確認してください。');
@@ -1164,6 +1236,8 @@ function reduce(state, action, now, actor) {
         return {id:createId(next,'payment'),method,amount:amount + fee,at:now,
           ...(fee ? {baseAmount:amount,cardFee:fee,cardFeeRateBps} : {})};
       });
+      if (cashTender) ticket.cashTender = cashTender;
+      else delete ticket.cashTender;
       delete ticket.paymentsCorrectedAt;
       ticket.settlement = quote(next, ticket.id);
       ticket.status = 'paid';
@@ -1257,7 +1331,7 @@ export function summary(state) {
     const isSettled = ticket.status === 'paid' || ticket.status === 'departed';
     if (isSettled) {
       tickets++;
-      guests += ticket.guests;
+      guests += ticket.admittedGuests ?? ticket.guests;
       sales += totals.total;
       depositsApplied += totalOf(ticket.deposits);
       receivableSales += totals.receivable ?? 0;

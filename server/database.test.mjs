@@ -378,6 +378,32 @@ test('cloud audits are separate from browser data, tenant-scoped, paged, and tie
   await assert.rejects(listAudit(db, helper, tenant), { code: 'forbidden' });
 });
 
+test('cloud stocktaking is manager-only, preserves the physical count, and records one audited movement per request', async () => {
+  const db = database();
+  const tenant = await store(db);
+  const initial = createDemo('closed');
+  await migrateState(db, owner, tenant, { operationId: 'stocktake-migrate-01', snapshot: initial });
+  await inviteMember(db, owner, tenant, helper.email, 'manager');
+  await inviteMember(db, owner, tenant, outsider.email, 'staff');
+  await listStores(db, helper);
+  await listStores(db, outsider);
+  const action = { type: 'recordStockOperation', kind: 'stocktake', stockId: 'soda', bookQuantity: 24,
+    actualQuantity: 23.75, reason: '閉店後に現物を確認' };
+  await assert.rejects(command(db, outsider, tenant, 1, 'stocktake-staff-01', action), { code: 'forbidden' });
+  await assert.rejects(command(db, helper, tenant, 1, 'stocktake-stale-01', { ...action, bookQuantity: 22 }),
+    { code: 'rejected-command' });
+  const saved = await command(db, helper, tenant, 1, 'stocktake-count-01', action);
+  assert.deepEqual(await command(db, helper, tenant, 1, 'stocktake-count-01', action), saved);
+  const { state } = await readState(db, owner, tenant, null);
+  assert.equal(state.stock.find(({ id }) => id === 'soda').quantity, 23.75);
+  assert.equal(state.movements.length, 1);
+  assert.equal(state.movements[0].bookQuantity, 24);
+  const { events } = await listAudit(db, owner, tenant);
+  assert.equal(events[0].actor.id, helper.uid);
+  assert.equal(events[0].after.kind, 'stocktake');
+  assert.equal(events[0].reason, action.reason);
+});
+
 test('server controls limit manager discounts and require administrator decisions and corrections', async () => {
   const db = database();
   const tenant = await store(db);

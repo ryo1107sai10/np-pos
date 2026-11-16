@@ -5,13 +5,13 @@ import { getStoreSettings } from './store-settings.mjs';
 import { getReceivableBalance, getReceivableStatus } from './receivables.mjs';
 import { cashMovementCategories, cashMovementKinds } from './cash-ledger.mjs';
 import { getPrintSettings, printDocumentKinds } from './print-domain.mjs';
-import { getPayrollDraft, getPayrollRates, getPayrollSettings, isDailyPayCommand, isPayrollCommand } from './payroll.mjs';
+import { getPayrollDraft, getPayrollRates, getPayrollSettings, getPayrollTemplateAssignment, getPayrollTemplates, isDailyPayCommand, isPayrollCommand } from './payroll.mjs';
 import { isCastAttendanceReview, linkedCastForActor } from './cast-self.mjs';
 import { getCalculationSettings } from './calculation-settings.mjs';
 
 const ticketActions = new Set([
   'discount', 'approveDiscount', 'rejectDiscount', 'settle', 'cancelSettlement', 'reopenTicket',
-  'cancelLine', 'void', 'deposit', 'cancelDeposit',
+  'cancelLine', 'void', 'deposit', 'cancelDeposit', 'extendOverdue',
 ]);
 const settingActions = new Set(['saveLayout', 'importLayout', 'saveStoreSettings', 'importStoreConfiguration']);
 const customerActions = new Set(['saveCustomer', 'linkCustomer', 'mergeCustomers', 'importCustomers']);
@@ -97,6 +97,7 @@ function ticketValues(ticket) {
     status: ticket.status, tableIds: ticket.tableIds, discount: ticket.discount,
     deposits: auditPayments(ticket.deposits), payments: auditPayments(ticket.payments),
   };
+  if (ticket.cashTender) result.cashTender = ticket.cashTender;
   if (ticket.settlement) {
     result.total = ticket.settlement.total;
     if (ticket.settlement.cardFee) {
@@ -149,6 +150,13 @@ function auditTicket(before, after, action) {
     oldValues.line = { id: line.id, name: line.name, quantity: line.quantity, amount: line.total };
     newValues.line = { ...oldValues.line, cancelled: true };
   }
+  if (action.type === 'extendOverdue') {
+    oldValues.endsAt = previous.endsAt;
+    newValues.endsAt = current.endsAt;
+    newValues.extensionCount = action.expectedCount;
+    newValues.extensionPlan = current.lines[previous.lines.length].name;
+    reason = '超過時間の延長を一括登録';
+  }
   const stock = auditMovements(before, after);
   if (stock.length) newValues.stockMovements = stock;
   return {
@@ -163,6 +171,11 @@ function auditTicketDetails(before, after, action) {
   const previous = before.tickets.find(({ id }) => id === action.ticketId);
   const current = after.tickets.find(({ id }) => id === action.ticketId);
   if (!previous || !current) return null;
+  if (action.type === 'adjustTicketGuests') {
+    return { target:target('ticket',current.id,`伝票 No. ${current.number}`),
+      before:{guests:previous.guests,admittedGuests:previous.admittedGuests ?? previous.guests},
+      after:{guests:current.guests,admittedGuests:current.admittedGuests,guestChangeMode:action.mode}, reason:textReason(action.reason) };
+  }
   const memo = action.type === 'saveTicketNote';
   const key = memo ? 'note' : 'endsAt';
   const oldValue = previous[key] ?? null;
@@ -247,6 +260,7 @@ function auditPaymentCorrection(before, after, action) {
   const values = (state, visit, loan) => {
     const { total, cardFee } = visit.settlement ?? ticket.settlement;
     const result = { total, payments: auditPayments(visit.payments) };
+    if (visit.cashTender) result.cashTender = visit.cashTender;
     if (cardFee) result.cardFee = cardFee;
     if (oldReceivable || newReceivable) {
       result.receivable = loan ? {
@@ -287,7 +301,24 @@ function auditPayroll(before, after, action) {
     if (!sameValue(previous,next)) return { target:target('settings',null,'給与設定'), before:previous, after:next, reason:'給与設定を更新' };
     return null;
   }
+  if (action.type === 'savePayrollTemplate' || action.type === 'removePayrollTemplate') {
+    const templateId = action.templateId ?? getPayrollTemplates(after).at(-1)?.id;
+    const previous = getPayrollTemplates(before).find(({id}) => id === templateId) ?? null;
+    const next = getPayrollTemplates(after).find(({id}) => id === templateId) ?? null;
+    return sameValue(previous,next) ? null : { target:target('settings',templateId,(next ?? previous).name),before:previous,after:next,
+      reason:next ? '給与テンプレートを保存' : '給与テンプレートを削除' };
+  }
   const person = [...after.cast, ...(after.archivedCast ?? [])].find(({id}) => id === action.castId);
+  if (action.type === 'assignPayrollTemplate') {
+    const view = (state) => {
+      const templateId = getPayrollTemplateAssignment(state,action.castId);
+      return { template:getPayrollTemplates(state).find(({id}) => id === templateId)?.name ?? '店舗共通' };
+    };
+    const previous = view(before);
+    const next = view(after);
+    return sameValue(previous,next) ? null : { target:target('payroll',action.castId,person.name),before:previous,after:next,
+      reason:'給与テンプレートの割り当てを変更' };
+  }
   if (action.type === 'savePayrollRate') {
     const rate = (state) => getPayrollRates(state,action.castId).find(({effectiveDate}) => effectiveDate === action.effectiveDate) ?? null;
     const previous = rate(before);
@@ -311,7 +342,7 @@ export function buildOperationAudit(before, after, action, at, actor) {
   let details;
   if (ticketActions.has(action.type)) {
     details = auditTicket(before, after, action);
-  } else if (action.type === 'saveTicketNote' || action.type === 'adjustTicketEnd') {
+  } else if (['saveTicketNote','adjustTicketEnd','adjustTicketGuests'].includes(action.type)) {
     details = auditTicketDetails(before, after, action);
   } else if (settingActions.has(action.type)) {
     details = auditSettings(before, after, action);
@@ -358,13 +389,15 @@ export function buildOperationAudit(before, after, action, at, actor) {
     const current = getCalculationSettings(after);
     if (!sameValue(previous,current)) details = {target:target('settings',null,'税とサービス料'),
       before:previous,after:current,reason:'新規来店の会計計算設定を更新'};
-  } else if (action.type === 'stockAdjust') {
+  } else if (action.type === 'stockAdjust' || action.type === 'recordStockOperation') {
     const previous = before.stock.find(({ id }) => id === action.stockId);
     const current = after.stock.find(({ id }) => id === action.stockId);
     details = {
       target: target('stock', current.id, current.name),
       before: { quantity: previous.quantity, value: previous.value },
-      after: { quantity: current.quantity, value: current.value, stockMovements: auditMovements(before, after) },
+      after: { quantity: current.quantity, value: current.value, stockMovements: auditMovements(before, after),
+        ...(action.type === 'recordStockOperation' && { kind: action.kind }),
+        ...(action.type === 'recordStockOperation' && action.kind === 'purchase' && { unitCost: action.unitCost }) },
       reason: textReason(action.reason),
     };
   } else if (action.type === 'saveControls') {
@@ -453,11 +486,11 @@ export function buildOperationAudit(before, after, action, at, actor) {
       reason,
     };
   } else if (action.type === 'close') {
-    const { date, expectedCash, actualCash, discrepancy, reason } = after.closedDays[0];
+    const { date, expectedCash, actualCash, discrepancy, reason, cashDenominations } = after.closedDays[0];
     details = {
       target: target('day', date, date),
       before: null,
-      after: { expectedCash, actualCash, discrepancy },
+      after: { expectedCash, actualCash, discrepancy, ...(cashDenominations ? {cashDenominations} : {}) },
       reason,
     };
   } else if (action.type === 'recoverReceivable') {

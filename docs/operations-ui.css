@@ -48,6 +48,10 @@
 .cash-close-breakdown dd { margin: 0; white-space: nowrap; font-weight: 650; font-variant-numeric: tabular-nums; }
 .cash-dialog .field-help { margin: 0; }
 .cash-dialog .result-bar { padding-inline: 11px; }
+.cash-denominations:not([hidden]) { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; }
+#cash-tender:not([hidden]) { display: grid; gap: 8px; }
+.lr-cash-count { padding: 10px 14px; }
+.lr-cash-count summary { cursor: pointer; font-weight: 650; }
 
 .billing-tabs { display: flex; flex-wrap: wrap; width: fit-content; max-width: 100%; }
 .billing-tabs button { min-height: 42px; }

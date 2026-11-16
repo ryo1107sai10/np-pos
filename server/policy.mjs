@@ -1,9 +1,10 @@
-import { exportStoreConfiguration, parseStoreConfiguration, quote, summary } from '../docs/engine.mjs';
+import { exportStoreConfiguration, maxOverdueExtensionCount, parseStoreConfiguration, quote, summary } from '../docs/engine.mjs';
 import { isAutoExtensionPauseSource, isValidAutoExtensionSettings, isValidVisitAutoExtensionPause } from '../docs/auto-extension.mjs';
 import { normalizeCardFeeSettings } from '../docs/card-fee.mjs';
 import { getMonthlyReportSales } from '../docs/report-period.mjs';
 import { isAssignedCustomer } from '../docs/customers.mjs';
 import { getRecoveryRows, isValidCashMovement } from '../docs/cash-ledger.mjs';
+import { getCashCountTotal, getCashPaymentAmount, isRegisterCashAmount } from '../docs/register-cash.mjs';
 import { isValidPrintDocument, normalizePrintSettings } from '../docs/print-domain.mjs';
 import { validateShiftsSnapshot } from '../docs/shifts.mjs';
 import { isValidInitialSetSchedule } from '../docs/set-schedule.mjs';
@@ -12,10 +13,10 @@ import { getCastWorkspace, isCastSelfCommand, listCastAttendance, validateCastAt
 import { isValidCalculationSettings, normalizeCalculationSettings } from '../docs/calculation-settings.mjs';
 
 export const roles = new Set(['admin', 'manager', 'staff', 'cast', 'trainee']);
-const staffCommands = ['seat', 'move', 'order', 'extend', 'deposit', 'settle', 'depart', 'serve', 'issuePrintDocument', 'saveTicketNote',
+const staffCommands = ['seat', 'move', 'order', 'extend', 'extendOverdue', 'deposit', 'settle', 'depart', 'serve', 'issuePrintDocument', 'saveTicketNote',
   'syncAutoExtensions', 'setTableAutoExtension', 'pauseVisitAutoExtension', 'resumeVisitAutoExtension', 'setTicketCustomer'];
-const managerCommands = [...staffCommands, 'open', 'close', 'discount', 'stockAdjust', 'cancelDeposit', 'cancelLine', 'void', 'adjustTicketEnd',
-  'saveCustomer', 'recoverReceivable', 'recordCashMovement', 'saveShift', 'removeShift', 'reviewCastAttendance'];
+const managerCommands = [...staffCommands, 'open', 'close', 'discount', 'stockAdjust', 'recordStockOperation', 'cancelDeposit', 'cancelLine', 'void', 'adjustTicketEnd',
+  'saveCustomer', 'recoverReceivable', 'recordCashMovement', 'saveShift', 'removeShift', 'reviewCastAttendance', 'adjustTicketGuests'];
 const roleCommands = {
   cast: new Set(['castClockIn','castClockOut','castRequestShift','castRequestDailyPay']),
   staff: new Set(staffCommands),
@@ -24,10 +25,11 @@ const roleCommands = {
     'approveDiscount', 'rejectDiscount', 'saveControls', 'cancelSettlement', 'reopenTicket', 'correctSettledTicketPayments',
     'mergeCustomers', 'linkCustomer', 'correctSettledTicketCustomer', 'importCustomers', 'savePrintSettings',
     'saveAutoExtensionSettings', 'saveCardFeeSettings', 'savePayrollDraft', 'finalizePayroll', 'savePayrollRate', 'savePayrollSettings',
+    'savePayrollTemplate', 'assignPayrollTemplate', 'removePayrollTemplate',
     'requestDailyPay', 'reviewDailyPay', 'payDailyPay', 'saveInitialSetSchedule', 'bindCastAccount', 'saveCalculationSettings']),
 };
-const reasonCommands = new Set(['discount', 'cancelSettlement', 'reopenTicket', 'cancelLine', 'recordCashMovement',
-  'correctSettledTicketCustomer', 'correctSettledTicketPayments', 'adjustTicketEnd']);
+const reasonCommands = new Set(['discount', 'cancelSettlement', 'reopenTicket', 'cancelLine', 'recordCashMovement', 'recordStockOperation',
+  'correctSettledTicketCustomer', 'correctSettledTicketPayments', 'adjustTicketEnd', 'adjustTicketGuests']);
 const paymentMethods = new Set(['cash', 'card', 'qr']);
 const ticketStatuses = new Set(['open', 'paid', 'departed', 'void', 'cancelled']);
 const emptyCommission = { fixed: 0, rate: 0, points: 0 };
@@ -77,7 +79,12 @@ export function verifyCommand(role, command) {
   }
   if (isPayrollCommand(command.type)) {
     let valid;
+    const hasTemplateId = typeof command.templateId === 'string' && command.templateId.length > 0 && command.templateId.length <= 128;
     if (command.type === 'savePayrollSettings') valid = isRecord(command.settings);
+    else if (command.type === 'savePayrollTemplate') valid = (command.templateId == null || hasTemplateId)
+      && typeof command.name === 'string' && Array.isArray(command.rules);
+    else if (command.type === 'assignPayrollTemplate') valid = typeof command.castId === 'string' && (command.templateId === null || hasTemplateId);
+    else if (command.type === 'removePayrollTemplate') valid = hasTemplateId;
     else if (command.type === 'savePayrollRate') valid = typeof command.castId === 'string'
       && isBusinessDate(command.effectiveDate) && validYen(command.hourlyRate);
     else if (command.type === 'requestDailyPay') valid = typeof command.castId === 'string' && isPayrollMonth(command.month)
@@ -96,6 +103,18 @@ export function verifyCommand(role, command) {
     const validChange = command.type === 'saveTicketNote' ? typeof command.note === 'string' && command.note.trim().length <= 400
       : Number.isInteger(command.minutes) && command.minutes !== 0 && Math.abs(command.minutes) <= 180;
     requireCondition(validTicketId && validChange, 400, 'invalid-command', '伝票と入力内容を確認してください。');
+  }
+  if (command.type === 'adjustTicketGuests') {
+    const {ticketId, mode, count} = command;
+    requireCondition(typeof ticketId === 'string' && ticketId.length > 0 && ticketId.length <= 128
+      && ['correct','join','leave'].includes(mode) && Number.isInteger(count) && count > 0 && count <= 100,
+    400, 'invalid-command', '伝票と人数変更の内容を確認してください。');
+  }
+  if (command.type === 'extendOverdue') {
+    const {ticketId, menuId, expectedCount} = command;
+    requireCondition([ticketId,menuId].every((id) => typeof id === 'string' && id.length > 0 && id.length <= 128)
+      && Number.isInteger(expectedCount) && expectedCount > 0 && expectedCount <= maxOverdueExtensionCount,
+    400, 'invalid-command', '伝票と一括延長の内容を確認してください。');
   }
   if (command.type === 'setTicketCustomer' || command.type === 'correctSettledTicketCustomer') {
     const { ticketId, customerId } = command;
@@ -123,8 +142,15 @@ export function verifyCommand(role, command) {
       400, 'invalid-command', '支払内容を確認してください。');
     requireCondition(command.expectedCardFee === undefined || (Number.isSafeInteger(command.expectedCardFee) && command.expectedCardFee >= 0),
       400, 'invalid-command', 'カード会計加算額を確認してください。');
+    requireCondition(command.cashReceived === undefined || (isRegisterCashAmount(command.cashReceived) && command.cashReceived > 0),
+      400, 'invalid-command', '現金のお預かり額を確認してください。');
     requireCondition(role !== 'staff' || command.payments.every(({ method }) => method !== 'receivable'),
       403, 'forbidden', '売掛での会計には管理者またはマネージャーの権限が必要です。');
+  }
+  if (command.type === 'close' && command.cashDenominations !== undefined) {
+    requireCondition(isRecord(command.cashDenominations) && isRegisterCashAmount(command.actualCash)
+      && getCashCountTotal(command.cashDenominations) === command.actualCash,
+    400, 'invalid-command', '金種別に数えた合計をレジの実残高と一致させてください。');
   }
   if (command.type === 'correctSettledTicketPayments') {
     const { ticketId, payments, creditDueDate, reason } = command;
@@ -305,6 +331,14 @@ function validCardSettlement(ticket) {
     && ticket.payments.every((payment) => payment.cardFee === undefined || payment.cardFeeRateBps === cardFeeRateBps);
 }
 
+function validCashTender(ticket) {
+  if (ticket.cashTender === undefined) return true;
+  if (!isRecord(ticket.cashTender) || !['paid', 'departed'].includes(ticket.status)) return false;
+  const {received, change} = ticket.cashTender;
+  const cash = getCashPaymentAmount(ticket.payments);
+  return cash > 0 && isRegisterCashAmount(received) && isRegisterCashAmount(change) && received - cash === change;
+}
+
 function validPaymentCorrection(ticket) {
   if (ticket.paymentsCorrectedAt === undefined) return true;
   if (!validYen(ticket.paymentsCorrectedAt) || !['paid', 'departed'].includes(ticket.status)
@@ -320,6 +354,8 @@ function validPaymentCorrection(ticket) {
 
 function validTicket(ticket) {
   return ticketStatuses.has(ticket.status) && Array.isArray(ticket.tableIds)
+    && (ticket.admittedGuests === undefined || (Number.isInteger(ticket.guests) && ticket.guests > 0 && ticket.guests <= 100
+      && Number.isSafeInteger(ticket.admittedGuests) && ticket.admittedGuests >= ticket.guests))
     && (ticket.calculationSettings === undefined || isValidCalculationSettings(ticket.calculationSettings))
     && (ticket.note === undefined || (typeof ticket.note === 'string' && ticket.note.length <= 400))
     && (ticket.settlementRevision === undefined || validYen(ticket.settlementRevision))
@@ -332,7 +368,7 @@ function validTicket(ticket) {
       && (line.autoExtension === undefined || typeof line.autoExtension === 'boolean')
       && Array.isArray(line.castIds) && Array.isArray(line.stockUses)
       && (line.castIds.length === 0 || isRecord(line.commission)))
-    && validPayments(ticket.deposits) && validPayments(ticket.payments, true) && validPaymentCorrection(ticket)
+    && validPayments(ticket.deposits) && validPayments(ticket.payments, true) && validPaymentCorrection(ticket) && validCashTender(ticket)
     && nonnegative(ticket.discount) && nonnegative(ticket.serviceRate) && validCardSettlement(ticket)
     && (ticket.settlement == null || (isRecord(ticket.settlement) && nonnegative(ticket.settlement.total)
       && Array.isArray(ticket.settlement.commission) && Array.isArray(ticket.settlement.taxBreakdown)));
@@ -456,6 +492,8 @@ export function validateSnapshot(state) {
     && ['tables', 'tickets', 'stock', 'menu', 'cast', 'movements'].every((key) => uniqueRecords(state[key]))
     && Array.isArray(state.closedDays) && state.closedDays.every((day) => isRecord(day) && typeof day.date === 'string'
       && validArchivedCash(day)
+      && (day.cashDenominations === undefined || (isRecord(day.cashDenominations) && isRegisterCashAmount(day.actualCash)
+        && getCashCountTotal(day.cashDenominations) === day.actualCash))
       && (day.ticketSnapshots === undefined || (uniqueRecords(day.ticketSnapshots) && day.ticketSnapshots.every(validTicket))))
     && (state.cancelledSettlements === undefined || (uniqueRecords(state.cancelledSettlements)
       && state.cancelledSettlements.every(validCancelledSettlement)))

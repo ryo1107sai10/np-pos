@@ -1,4 +1,5 @@
 import { cashMovementCategories, cashMovementKinds } from './cash-ledger.mjs';
+import { cashDenominations } from './register-cash.mjs';
 import { getTicketCommissionDetails, getTicketTableLabels } from './engine.mjs';
 import { getReportPeriod } from './report-period.mjs';
 import { getDailyPayTotals } from './payroll.mjs';
@@ -168,7 +169,7 @@ function renderCommission(state, api, period, result) {
 }
 
 function renderStock(state, api) {
-  const {yen, escape, icon, showHiddenStock = false} = api;
+  const {yen, escape, icon, showHiddenStock = false, canAdjustStock = true} = api;
   const names = byId([...(state.archivedStock ?? []), ...state.stock]);
   const tickets = byId(state.tickets);
   const low = state.stock.filter(({quantity, minimum}) => quantity <= minimum);
@@ -185,21 +186,33 @@ function renderStock(state, api) {
       <td class="lr-numeric"><span class="lr-mobile-label" aria-hidden="true">仕入原価</span>¥${restockCost}<span class="lr-unit"> / ${unit}</span></td>
       <td class="lr-numeric"><span class="lr-mobile-label" aria-hidden="true">評価額</span>${yen(Math.round(valuation(item)))}</td>
       <td><span class="lr-badge${isLow ? ' lr-badge-warning' : ''}">${status}</span></td>
-      <td><button class="lr-link lr-adjust" type="button" data-action="stock-adjust" data-id="${escape(item.id)}" aria-label="${escape(item.name)}の在庫を調整">${icon('plus', 15)}調整</button></td></tr>`;
+      ${canAdjustStock ? `<td><div class="lr-stock-actions">
+        <button class="lr-link" type="button" data-action="stock-adjust" data-id="${escape(item.id)}" aria-label="${escape(item.name)}の入出庫">${icon('plus', 15)}入出庫</button>
+        <button class="lr-link" type="button" data-action="stocktake" data-id="${escape(item.id)}" aria-label="${escape(item.name)}の棚卸">棚卸</button>
+        </div></td>` : ''}</tr>`;
   });
   const movements = (state.movements || []).slice().sort((a, b) => asNumber(b.at) - asNumber(a.at));
   const movementRows = movements.map((entry) => {
     const item = names.get(entry.stockId);
-    const labels = {order: '注文出庫', return: '戻し入れ', adjust: '在庫調整'};
-    return `<tr><td class="lr-muted lr-numeric">${timeLabel(entry.at)}</td><td><strong>${escape(entry.stockName ?? item?.name ?? entry.stockId)}</strong></td>
-      <td>${escape(labels[entry.kind] || '入出庫')}${entry.reason ? `<span class="lr-row-note">${escape(entry.reason)}</span>` : ''}</td>
-      <td class="lr-numeric ${entry.quantity > 0 ? 'lr-positive' : ''}">${signedQuantity(entry.quantity)}<span class="lr-unit"> ${escape(entry.unit ?? item?.unit ?? '')}</span></td>
+    const labels = {order: '注文出庫', return: '戻し入れ', adjust: '在庫調整', purchase: '仕入れ・入庫',
+      loss: '廃棄・破損（ロス）', usage: '店舗消費', stocktake: '棚卸'};
+    const unit = escape(entry.unit ?? item?.unit ?? '');
+    const detail = entry.kind === 'stocktake' && Number.isFinite(entry.bookQuantity) && Number.isFinite(entry.actualQuantity)
+      ? `<span class="lr-row-note">帳簿 ${stockNumber.format(entry.bookQuantity)} ${unit} → 実数 ${stockNumber.format(entry.actualQuantity)} ${unit}</span>`
+      : entry.kind === 'purchase' && Number.isFinite(entry.unitCost) ? `<span class="lr-row-note">仕入単価 ¥${stockNumber.format(entry.unitCost)} / ${unit}</span>` : '';
+    const date = new Date(entry.at);
+    const time = entry.at && Number.isFinite(date.valueOf()) ? movementTime.format(date) : '—';
+    return `<tr><td class="lr-muted lr-numeric">${time}</td><td><strong>${escape(entry.stockName ?? item?.name ?? entry.stockId)}</strong></td>
+      <td>${escape(labels[entry.kind] || '入出庫')}${detail}${entry.reason ? `<span class="lr-row-note">${escape(entry.reason)}</span>` : ''}</td>
+      <td class="lr-numeric ${entry.quantity > 0 ? 'lr-positive' : ''}">${signedQuantity(entry.quantity)}<span class="lr-unit"> ${unit}</span></td>
       <td>${ticketLink(tickets.get(entry.ticketId), api)}</td></tr>`;
   });
   const stockValue = state.stock.reduce((sum, item) => sum + valuation(item), 0);
   const control = hiddenCount ? `<button type="button" class="btn lr-stock-filter" data-action="toggle-hidden-stock"
     aria-pressed="${showHiddenStock}" aria-label="非表示を含む">${icon('filter', 15)}非表示を含む${panelCount(hiddenCount, '件')}</button>` : '';
-  const balance = rows.length ? table(api, ['品目', '現在庫', '下限', '仕入原価', '評価額', '在庫状態', '操作'], rows, 'lr-stock-table')
+  const balanceColumns = ['品目', '現在庫', '下限', '仕入原価', '評価額', '在庫状態'];
+  if (canAdjustStock) balanceColumns.push('操作');
+  const balance = rows.length ? table(api, balanceColumns, rows, 'lr-stock-table')
     : empty(api, 'box', hiddenCount ? '表示中の在庫品目はありません' : '在庫品目がありません',
       hiddenCount ? '「非表示を含む」で品目を確認できます。' : '「品目設定」から品目を追加できます。');
   return `<div class="lr-view"><div class="lr-stats">
@@ -227,13 +240,18 @@ function describeClosing(period, current, api) {
   const discrepancy = close?.discrepancy;
   const status = close ? '<span class="lr-badge lr-badge-active">締め済み</span>' : '';
   const variance = discrepancy == null ? '—' : signedYen(discrepancy,yen,true);
+  const countDetails = close?.cashDenominations;
+  const countRows = countDetails && cashDenominations.filter((denomination) => countDetails[denomination] > 0)
+    .map((denomination) => `<div><dt>${yen(denomination)}</dt><dd>${number.format(countDetails[denomination])}枚</dd></div>`).join('');
   return `<section class="lr-panel lr-register" aria-label="レジ照合"><div class="lr-panel-head">
     <h2>${icon('wallet',18)} レジ照合</h2>${status}</div>
     <dl class="lr-register-values">
       <div><dt>理論残高</dt><dd>${yen(asNumber(current.expectedCash))}</dd></div>
       <div><dt>実残高</dt><dd>${close?.actualCash == null ? '—' : yen(asNumber(close.actualCash))}</dd></div>
       <div${discrepancy ? ' class="lr-variance"' : ''}><dt>差額</dt><dd>${variance}</dd></div>
-    </dl>${close?.reason ? `<p class="lr-report-note"><strong>差額理由</strong> ${escape(close.reason)}</p>` : ''}</section>`;
+    </dl>${close?.reason ? `<p class="lr-report-note"><strong>差額理由</strong> ${escape(close.reason)}</p>` : ''}
+    ${countDetails ? `<details class="lr-cash-count"><summary>金種別の内訳</summary>${countRows
+      ? `<dl class="lr-money-list">${countRows}</dl>` : '<p>現金なし</p>'}</details>` : ''}</section>`;
 }
 
 function registerBreakdown(state, period, current, api) {
