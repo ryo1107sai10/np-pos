@@ -36,7 +36,7 @@ test('open, seat, multi-table move, order, extend, split settlement, release and
   assert.equal(ticketAt(state, 'a2').endsAt, now + minutes(90));
   assert.equal(tableStatus(state, 'a2', now + minutes(52)), 'active');
 
-  state = apply(state, { type: 'discount', ticketId, amount: 1_300 }, now);
+  state = apply(state, { type: 'discount', ticketId, mode: 'amount', value: 1_300, reasonCode: 'service', reason: 'サービス対応' }, now);
   state = apply(state, { type: 'deposit', ticketId, method: 'cash', amount: 3_000 }, now);
   assert.equal(summary(state).expectedCash, 23_000);
   const due = quote(state, ticketId).remaining;
@@ -88,8 +88,8 @@ test('multi-item stock rejection is atomic and only reusable stock is returned',
   const lineId = ticketAt(state).lines.at(-1).id;
   assert.equal(quantityOf(state, 'soda'), beforeQty - 0.5);
   const served = apply(state, { type: 'serve', ticketId, lineId }, now);
-  assert.throws(() => apply(served, { type: 'cancelLine', ticketId, lineId, returnStock: true }, now), /提供済み/);
-  state = apply(state, { type: 'cancelLine', ticketId, lineId, returnStock: true }, now);
+  assert.throws(() => apply(served, { type: 'cancelLine', ticketId, lineId, returnStock: true, reason: '注文の変更' }, now), /提供済み/);
+  state = apply(state, { type: 'cancelLine', ticketId, lineId, returnStock: true, reason: '注文の変更' }, now);
   assert.equal(quantityOf(state, 'soda'), beforeQty);
   assert.equal(quote(state, ticketId).subtotal, 10_000);
 });

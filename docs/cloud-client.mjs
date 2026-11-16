@@ -475,6 +475,25 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
     leaveStore,
     submit,
     migrate,
+    async listAudit({ before, limit } = {}) {
+      const scope = activeScope;
+      assertScope(scope);
+      const roleSerial = scope.roleSerial;
+      const assertAdmin = () => {
+        if (current.store?.role !== 'admin' || roleSerial !== scope.roleSerial) {
+          throw new CloudError('forbidden', '監査ログの表示には店舗管理者の権限が必要です。', 403);
+        }
+      };
+      assertAdmin();
+      const query = new URLSearchParams();
+      if (before != null) query.set('before', before);
+      if (limit != null) query.set('limit', limit);
+      const suffix = query.size ? `?${query}` : '';
+      const result = await request(`${storePath(scope)}/audit${suffix}`);
+      assertScope(scope);
+      assertAdmin();
+      return result;
+    },
     listMembers() { return request(`${storePath()}/members`); },
     inviteMember(email, role) { return request(`${storePath()}/members`, { method: 'POST', body: { email, role } }); },
     updateMember(uid, role) { return request(`${storePath()}/members/${encodeURIComponent(uid)}`, { method: 'PATCH', body: { role } }); },

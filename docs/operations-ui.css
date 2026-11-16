@@ -1,0 +1,30 @@
+.ops-tools { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 13px; }
+.ops-tools .btn, .ops-actions .btn { min-height: 44px; white-space: normal; }
+.ops-actions { display: flex; flex-wrap: wrap; gap: 7px; }
+.ops-highlight { padding: 8px 10px; border: 1px solid #e9d7ae; border-radius: 10px; background: #fff8e7; color: #704615; font-size: 12px; line-height: 1.55; }
+.ops-highlight .btn { margin-top: 5px; min-height: 40px; }
+.ops-modal.modal { width: min(690px, calc(100% - 28px)); }
+.ops-modal .field textarea, .modal .field textarea[name=reason] {
+  width: 100%; min-height: 68px; resize: vertical; padding: 9px;
+  border: 1px solid #dce0ee; border-radius: 9px; background: #fff; color: #243152; font: inherit;
+}
+.ops-audit { min-width: 0; display: grid; gap: 8px; }
+.ops-audit-row { min-width: 0; border: 1px solid #dfe4ef; border-radius: 12px; background: #fff; }
+.ops-audit-row summary { min-height: 55px; padding: 10px 12px; color: #34415b; cursor: pointer; }
+.ops-audit-header { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 4px 9px; padding-left: 4px; overflow-wrap: anywhere; }
+.ops-audit-action { color: #3d3478; font-weight: 720; }
+.ops-audit-meta { display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 4px 0 0 14px; color: #647089; font-size: 11px; overflow-wrap: anywhere; }
+.ops-audit-detail { display: grid; gap: 8px; padding: 9px 12px 12px; border-top: 1px solid #e7e9f4; }
+.ops-audit-reason { color: #485474; font-size: 12px; overflow-wrap: anywhere; }
+.ops-audit-compare { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.ops-audit-compare > div { border: 1px solid #e5eaf4; border-radius: 8px; background: #fafbff; padding: 8px; }
+.ops-audit-compare h4, .ops-audit-compare dt { font-weight: 680; color: #46567a; }
+.ops-audit-compare dl { margin: 7px 0 0; display: grid; gap: 6px; }
+.ops-audit-compare dd { margin: 0; }
+.ops-audit-compare pre { margin: 2px 0; white-space: pre-wrap; overflow-wrap: anywhere; color: #343f5a; font-size: 11px; }
+.ops-audit > .btn { justify-self: start; min-height: 44px; }
+.ops-cancelled th:nth-child(4), .ops-cancelled td:nth-child(4) { min-width: 9ch; white-space: normal; overflow-wrap: anywhere; }
+@media (max-width: 610px) {
+  .ops-modal .field textarea, .modal .field textarea[name=reason] { font-size: 16px; }
+  .ops-modal .modal-foot .btn { min-height: 44px; }
+}

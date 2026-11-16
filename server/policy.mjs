@@ -6,10 +6,12 @@ const managerCommands = [...staffCommands, 'open', 'close', 'discount', 'stockAd
 const roleCommands = {
   staff: new Set(staffCommands),
   manager: new Set(managerCommands),
-  admin: new Set([...managerCommands, 'saveLayout', 'importLayout', 'saveStoreSettings', 'importStoreConfiguration']),
+  admin: new Set([...managerCommands, 'saveLayout', 'importLayout', 'saveStoreSettings', 'importStoreConfiguration',
+    'approveDiscount', 'rejectDiscount', 'saveControls', 'cancelSettlement', 'reopenTicket']),
 };
+const reasonCommands = new Set(['discount', 'cancelSettlement', 'reopenTicket', 'cancelLine']);
 const paymentMethods = new Set(['cash', 'card', 'qr']);
-const ticketStatuses = new Set(['open', 'paid', 'departed', 'void']);
+const ticketStatuses = new Set(['open', 'paid', 'departed', 'void', 'cancelled']);
 const emptyCommission = { fixed: 0, rate: 0, points: 0 };
 
 export class ApiError extends Error {
@@ -35,6 +37,10 @@ export function canOperate(role) {
 export function verifyCommand(role, command) {
   requireCondition(isRecord(command) && typeof command.type === 'string', 400, 'invalid-command', '操作を確認してください。');
   requireCondition(canOperate(role) && roleCommands[role].has(command.type), 403, 'forbidden', 'この操作には権限が必要です。');
+  if (reasonCommands.has(command.type)) {
+    requireCondition(typeof command.reason === 'string' && command.reason.trim().length > 0,
+      400, 'reason-required', '操作の理由を入力してください。');
+  }
   if (command.type === 'order') {
     requireCondition(Array.isArray(command.items) && command.items.length <= 100 && command.items.every(isRecord),
       400, 'invalid-command', '注文内容を確認してください。');
@@ -51,22 +57,36 @@ function acceptsCast(item, cast) {
     || cast.some((person) => person.enabled !== false && Object.values(person.commissionOverride ?? {}).some(Boolean));
 }
 
+function allSnapshotTickets(state) {
+  return [...state.tickets, ...state.closedDays.flatMap((day) => day.ticketSnapshots ?? []),
+    ...(state.cancelledSettlements ?? []).map(({ receipt }) => receipt)];
+}
+
 export function projectState(state, role, actorUid) {
   if (role === 'admin') return state;
   if (role !== 'manager' && role !== 'staff') return null;
   const next = structuredClone(state);
+  delete next.auditLog;
   if (role === 'manager') {
-    for (const ticket of [...next.tickets, ...next.closedDays.flatMap((day) => day.ticketSnapshots ?? [])]) {
+    for (const ticket of allSnapshotTickets(next)) {
       if (!actorUid || ticket.seatedByUid !== actorUid) ticket.customer = '';
       delete ticket.seatedByUid;
+      for (const entry of [ticket.discountDetails, ticket.discountRequest]) {
+        for (const field of ['actor', 'approvedBy']) {
+          if (entry?.[field] && entry[field].id !== actorUid) delete entry[field];
+        }
+      }
     }
     return next;
   }
   next.closedDays = [];
   next.movements = [];
+  delete next.cancelledSettlements;
   for (const ticket of next.tickets) {
     ticket.customer = '';
     delete ticket.seatedByUid;
+    delete ticket.discountDetails;
+    if (ticket.discountRequest) ticket.discountRequest = { id: ticket.discountRequest.id };
     for (const line of ticket.lines) {
       delete line.castCommissions;
       line.commission = emptyCommission;
@@ -118,6 +138,18 @@ function validTicket(ticket) {
       && Array.isArray(ticket.settlement.commission) && Array.isArray(ticket.settlement.taxBreakdown)));
 }
 
+function validCancelledSettlement(entry) {
+  return typeof entry.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(entry.date) && nonnegative(entry.at)
+    && typeof entry.reason === 'string' && isRecord(entry.receipt) && validTicket(entry.receipt)
+    && entry.ticketId === entry.receipt.id && entry.receipt.settlement != null;
+}
+
+function validControls(controls) {
+  if (controls === undefined) return true;
+  const limit = controls?.managerDiscountRateBps;
+  return isRecord(controls) && (limit === undefined || (Number.isInteger(limit) && limit >= 0 && limit <= 10_000));
+}
+
 export function validateSnapshot(state) {
   const message = 'このブラウザーの営業データを読み取れません。';
   requireCondition(isRecord(state) && isRecord(state.day) && ['open', 'closed'].includes(state.day.status)
@@ -126,6 +158,9 @@ export function validateSnapshot(state) {
     && ['tables', 'tickets', 'stock', 'menu', 'cast', 'movements'].every((key) => uniqueRecords(state[key]))
     && Array.isArray(state.closedDays) && state.closedDays.every((day) => isRecord(day) && typeof day.date === 'string'
       && (day.ticketSnapshots === undefined || (uniqueRecords(day.ticketSnapshots) && day.ticketSnapshots.every(validTicket))))
+    && (state.cancelledSettlements === undefined || (uniqueRecords(state.cancelledSettlements)
+      && state.cancelledSettlements.every(validCancelledSettlement)))
+    && validControls(state.controls)
     && Number.isSafeInteger(state.nextId) && state.nextId > 0
     && Number.isSafeInteger(state.nextTicket) && state.nextTicket > 0
     && state.tickets.every(validTicket)
@@ -140,7 +175,8 @@ export function validateSnapshot(state) {
     throw new ApiError(400, 'invalid-snapshot', message);
   }
   const migrated = structuredClone(state);
-  for (const ticket of [...migrated.tickets, ...migrated.closedDays.flatMap((day) => day.ticketSnapshots ?? [])]) {
+  delete migrated.auditLog;
+  for (const ticket of allSnapshotTickets(migrated)) {
     delete ticket.seatedByUid;
   }
   return migrated;

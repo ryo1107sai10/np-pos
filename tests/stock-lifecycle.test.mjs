@@ -43,7 +43,7 @@ test('hidden linked stock still records deductions and returns after settings sa
   const ordered = apply(hidden, { type: 'order', ticketId, items: [{ menuId: 'highball', quantity: 1 }] }, now);
   assert.equal(find(ordered.stock, 'soda').quantity, find(hidden.stock, 'soda').quantity - 0.25);
   const lineId = find(ordered.tickets, ticketId).lines.at(-1).id;
-  const returned = apply(ordered, { type: 'cancelLine', ticketId, lineId, returnStock: true }, now);
+  const returned = apply(ordered, { type: 'cancelLine', ticketId, lineId, returnStock: true, reason: '注文の変更' }, now);
   assert.equal(find(returned.stock, 'soda').quantity, find(hidden.stock, 'soda').quantity);
   assert.equal(find(returned.stock, 'soda').hidden, true);
 });
@@ -91,7 +91,7 @@ test('an unsettled unserved line keeps stock available for returns after unlinki
   assert.match(stockDeletionBlocker(ordered, syrupId, settings.menu), /未提供の注文/);
   assert.throws(() => save(ordered, settings, [syrupId]), /未提供の注文/);
   const lineId = find(ordered.tickets, ticketId).lines.at(-1).id;
-  const returned = apply(ordered, { type: 'cancelLine', ticketId, lineId, returnStock: true }, now + 1);
+  const returned = apply(ordered, { type: 'cancelLine', ticketId, lineId, returnStock: true, reason: '注文の変更' }, now + 1);
   assert.equal(find(returned.stock, syrupId).quantity, 1);
   const served = apply(ordered, { type: 'serve', ticketId, lineId }, now + 1);
   const deleted = save(served, settings, [syrupId]);

@@ -2,10 +2,10 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
-import { createDemo } from '../docs/engine.mjs';
+import { createDemo, quote, summary } from '../docs/engine.mjs';
 import worker from './index.mjs';
 import {
-  applyCommand, changeMember, createStore, inviteMember, listMembers, listStores, migrateState, readState, revokeInvite,
+  applyCommand, changeMember, createStore, inviteMember, listAudit, listMembers, listStores, migrateState, readState, revokeInvite,
 } from './database.mjs';
 
 const schema = readFileSync(new URL('schema.sql', import.meta.url), 'utf8');
@@ -121,7 +121,9 @@ test('offline-safe envelope protects one-time migration and returns complete chu
   await assert.rejects(migrateState(db, owner, tenant, { operationId: 'migration-invalid1', snapshot: {} }), { code: 'invalid-snapshot' });
   const applied = await migrateState(db, owner, tenant, { operationId: 'migration-confirm1', snapshot: original });
   assert.equal(applied.revision, 1);
-  assert.deepEqual(applied.state, original);
+  const expected = { ...original };
+  delete expected.auditLog;
+  assert.deepEqual(applied.state, expected);
   const retried = await migrateState(db, owner, tenant, { operationId: 'migration-confirm1', snapshot: original });
   assert.equal(retried.revision, 1);
   await assert.rejects(migrateState(db, owner, tenant, { operationId: 'migration-existing', snapshot: original }), { code: 'migration-not-empty' });
@@ -177,4 +179,127 @@ test('Worker rejects unauthenticated and disallowed cross-origin requests', asyn
   assert.equal(allowed.headers.get('access-control-allow-origin'), 'https://ryo1107sai10.github.io');
   assert.equal((await check('/api/stores', { headers: { Origin: 'https://unrelated.example.test' } })).status, 403);
   assert.equal((await check('/api/stores', { method: 'OPTIONS', headers: { Origin: 'http://127.0.0.1:8118' } })).status, 204);
+  assert.equal((await check('/api/stores/test-store/audit')).status, 401);
+});
+
+test('cloud audits are separate from browser data, tenant-scoped, paged, and tied to one committed revision', async () => {
+  const db = database();
+  const tenant = await store(db);
+  const otherTenant = await store(db);
+  assert.deepEqual(await listAudit(db, owner, tenant), { events: [], nextBefore: null });
+  await assert.rejects(listAudit(db, outsider, tenant), { code: 'store-access' });
+  const incoming = createDemo('closed');
+  incoming.auditLog = [{ id: 'forged-browser-log', action: 'discount' }];
+  await migrateState(db, owner, tenant, { operationId: 'ops-audit-migrate', snapshot: incoming });
+  await inviteMember(db, owner, tenant, helper.email, 'manager');
+  await listStores(db, helper);
+  const adjustment = { type: 'stockAdjust', stockId: 'fruit', quantity: 1, reason: '棚卸確認',
+    actor: { id: owner.uid, label: '偽の管理者', role: 'admin' } };
+  await command(db, helper, tenant, 1, 'ops-audit-stock01', adjustment);
+  await command(db, helper, tenant, 1, 'ops-audit-stock01', adjustment);
+  await assert.rejects(command(db, helper, tenant, 2, 'ops-audit-stock01', { ...adjustment, quantity: 2 }), { code: 'operation-reused' });
+  await assert.rejects(listAudit(db, helper, tenant), { code: 'forbidden' });
+  assert.equal((await readState(db, helper, tenant, null)).state.auditLog, undefined);
+  assert.equal((await readState(db, owner, tenant, null)).state.auditLog, undefined);
+  const first = await listAudit(db, owner, tenant, { limit: 1 });
+  assert.equal(first.events.length, 1);
+  assert.equal(first.events[0].action, 'stockAdjust');
+  assert.deepEqual(first.events[0].actor, { id: helper.uid, label: helper.email, role: 'manager' });
+  assert.equal(first.events[0].reason, '棚卸確認');
+  assert.equal(first.nextBefore, 2);
+  const second = await listAudit(db, owner, tenant, { before: first.nextBefore, limit: 1 });
+  assert.equal(second.events[0].action, 'migrate');
+  assert.equal(second.nextBefore, null);
+  assert.deepEqual(await listAudit(db, owner, tenant, { before: 1 }), { events: [], nextBefore: null });
+  assert.deepEqual(await listAudit(db, owner, otherTenant), { events: [], nextBefore: null });
+  await assert.rejects(listAudit(db, owner, tenant, { limit: 101 }), { code: 'invalid-audit-limit' });
+  await assert.rejects(listAudit(db, owner, tenant, { before: 0 }), { code: 'invalid-audit-cursor' });
+  await changeMember(db, owner, tenant, helper.uid, 'admin');
+  assert.equal((await listAudit(db, helper, tenant)).events.length, 2);
+  await changeMember(db, owner, tenant, helper.uid, 'manager');
+  await assert.rejects(listAudit(db, helper, tenant), { code: 'forbidden' });
+});
+
+test('server controls limit manager discounts and require administrator decisions and corrections', async () => {
+  const db = database();
+  const tenant = await store(db);
+  await inviteMember(db, owner, tenant, helper.email, 'manager');
+  await listStores(db, helper);
+  await inviteMember(db, owner, tenant, outsider.email, 'staff');
+  await listStores(db, outsider);
+  const opened = await command(db, owner, tenant, 0, 'ops-guard-opening', { type: 'open', openingCash: 0 });
+  const seated = await command(db, outsider, tenant, opened.revision, 'ops-guard-seating', {
+    type: 'seat', tableIds: ['a1'], setId: 'set60', guests: 1,
+  });
+  const ticketId = seated.state.tickets[0].id;
+  const discount = { type: 'discount', ticketId, mode: 'amount', value: 750, reasonCode: 'service', reason: '来店特典' };
+  await assert.rejects(command(db, outsider, tenant, 2, 'ops-guard-by-staff', discount), { code: 'forbidden' });
+  await assert.rejects(command(db, helper, tenant, 2, 'ops-guard-no-reason', { ...discount, reason: '' }), { code: 'reason-required' });
+  const pending = await command(db, helper, tenant, 2, 'ops-guard-discount', {
+    ...discount, actor: { id: owner.uid, label: owner.email, role: 'admin' },
+  });
+  assert.equal(pending.revision, 3);
+  assert.equal(pending.state.tickets[0].discount, 0);
+  const requestId = pending.state.tickets[0].discountRequest.id;
+  assert.ok(requestId);
+  const staffView = (await readState(db, outsider, tenant, null)).state.tickets[0];
+  assert.deepEqual(staffView.discountRequest, { id: requestId });
+  for (const type of ['approveDiscount', 'rejectDiscount', 'saveControls', 'cancelSettlement', 'reopenTicket']) {
+    await assert.rejects(command(db, helper, tenant, 3, 'ops-guard-manager-' + type, { type, ticketId, requestId, reason: '権限確認' }),
+      { code: 'forbidden' });
+  }
+  await assert.rejects(command(db, outsider, tenant, 3, 'ops-guard-pending', {
+    type: 'settle', ticketId, payments: [{ method: 'cash', amount: 6600 }],
+  }), { code: 'rejected-command' });
+  const approved = await command(db, owner, tenant, 3, 'ops-guard-approved', { type: 'approveDiscount', ticketId, requestId });
+  assert.equal(approved.state.tickets[0].discount, 750);
+  const events = (await listAudit(db, owner, tenant)).events;
+  assert.equal(events.find((event) => event.action === 'discountRequest').actor.id, helper.uid);
+  assert.equal(events.find((event) => event.action === 'approveDiscount').actor.id, owner.uid);
+});
+
+test('server reversals and reopen are atomic, auditable, and retain the original receipt without leaking names', async () => {
+  const db = database();
+  const tenant = await store(db);
+  await inviteMember(db, owner, tenant, helper.email, 'manager');
+  await listStores(db, helper);
+  await inviteMember(db, owner, tenant, outsider.email, 'staff');
+  await listStores(db, outsider);
+  const opened = await command(db, owner, tenant, 0, 'ops-reverse-opening', { type: 'open', openingCash: 1000 });
+  const seated = await command(db, owner, tenant, 1, 'ops-reverse-seating', {
+    type: 'seat', tableIds: ['a1'], setId: 'set60', guests: 2, customer: 'Owner reservation',
+  });
+  const ticketId = seated.state.tickets[0].id;
+  const ordered = await command(db, outsider, tenant, 2, 'ops-reverse-ordering', {
+    type: 'order', ticketId, items: [{ menuId: 'castDrink', quantity: 1, castIds: ['cast2'] }, { menuId: 'highball', quantity: 1 }],
+  });
+  const stockAfterOrder = (await readState(db, owner, tenant, null)).state.stock;
+  const total = quote(ordered.state, ticketId).total;
+  assert.equal(total, 16_368);
+  const settled = await command(db, outsider, tenant, 3, 'ops-reverse-settling', {
+    type: 'settle', ticketId, payments: [{ method: 'cash', amount: 10_000 }, { method: 'card', amount: 6368 }],
+  });
+  assert.equal(summary(settled.state).sales, total);
+  const cancel = { type: 'cancelSettlement', ticketId, reason: '支払い方法修正' };
+  const cancelled = await command(db, owner, tenant, 4, 'ops-reverse-cancelling', cancel);
+  const replay = await command(db, owner, tenant, 4, 'ops-reverse-cancelling', cancel);
+  assert.deepEqual(replay, cancelled);
+  assert.equal(cancelled.state.cancelledSettlements[0].receipt.settlement.total, total);
+  assert.equal(summary(cancelled.state).sales, 0);
+  assert.deepEqual(summary(cancelled.state).commission, []);
+  assert.equal(summary(cancelled.state).expectedCash, opened.state.day.openingCash);
+  assert.deepEqual(cancelled.state.stock, seated.state.stock);
+  assert.equal((await readState(db, helper, tenant, null)).state.cancelledSettlements[0].receipt.customer, '');
+  assert.equal((await readState(db, outsider, tenant, null)).state.cancelledSettlements, undefined);
+  const reopened = await command(db, owner, tenant, 5, 'ops-reverse-reopening', {
+    type: 'reopenTicket', ticketId, tableIds: ['a1'], reason: '支払いを再登録',
+  });
+  assert.equal(reopened.state.tickets[0].status, 'open');
+  assert.deepEqual(reopened.state.tickets[0].payments, []);
+  assert.deepEqual(reopened.state.stock, stockAfterOrder);
+  assert.equal(reopened.state.cancelledSettlements[0].receipt.customer, 'Owner reservation');
+  const events = (await listAudit(db, owner, tenant)).events;
+  assert.equal(events[0].action, 'reopenTicket');
+  assert.equal(events.filter((event) => event.action === 'cancelSettlement').length, 1);
+  assert.equal(events.find((event) => event.action === 'cancelSettlement').before.total, total);
 });

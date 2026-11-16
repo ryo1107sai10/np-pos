@@ -75,7 +75,7 @@ test('import keeps local-only items available for active order returns', () => {
   assert.deepEqual(find(imported.stock, customId), find(target.stock, customId));
   assert.deepEqual(imported.movements, target.movements);
 
-  const cancelled = apply(imported, { type: 'cancelLine', ticketId, lineId, returnStock: true }, now);
+  const cancelled = apply(imported, { type: 'cancelLine', ticketId, lineId, returnStock: true, reason: '注文の変更' }, now);
   assert.equal(find(cancelled.stock, customId).quantity, 10);
   assert.ok(cancelled.movements.some((entry) => entry.stockId === customId && entry.kind === 'return'));
 });

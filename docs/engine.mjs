@@ -1,4 +1,5 @@
 import { getStoreSettings, normalizeStoreSettings, replaceStoreSettings } from './store-settings.mjs';
+import { buildOperationAudit } from './operational-audit.mjs';
 
 const movementScale = 1_000_000;
 const pointsScale = 1_000;
@@ -18,6 +19,16 @@ const layoutFileFormat = 'np-pos.layout';
 const layoutFileVersion = 1;
 const storeFileFormat = 'np-pos.settings';
 const storeFileVersion = 2;
+const demoActor = Object.freeze({ id: 'demo-admin', label: 'デモ管理者', role: 'admin' });
+
+export const discountReasonCodes = Object.freeze({
+  service: 'サービス', coupon: 'クーポン', negotiation: '交渉', other: 'その他',
+});
+
+export function getManagerDiscountLimit(state) {
+  const limit = state.controls?.managerDiscountRateBps;
+  return Number.isInteger(limit) && limit >= 0 && limit <= 10_000 ? limit : 1_000;
+}
 
 function isLayoutPosition(x, y) {
   return Number.isInteger(x) && x >= 0 && x + layoutGrid.tableWidth <= layoutGrid.columns
@@ -402,17 +413,84 @@ function doClose(state, action, now) {
     ticketSnapshots: snapshotClosedTickets(state) });
 }
 
+function castNamesById(state) {
+  return new Map([...(state.archivedCast ?? []), ...state.cast].map(({id, name}) => [id, name]));
+}
+
+function snapshotSettledTicket(state, ticket, people) {
+  const snapshot = structuredClone(ticket);
+  snapshot.tableLabels = getTicketTableLabels(state, ticket).slice();
+  for (const line of snapshot.lines) {
+    line.castNames ??= line.castIds.map((id) => people.get(id) ?? id);
+  }
+  snapshot.settlement ??= quote(state, ticket.id);
+  return snapshot;
+}
+
 function snapshotClosedTickets(state) {
-  const people = new Map([...(state.archivedCast ?? []), ...state.cast].map(({id, name}) => [id, name]));
-  return state.tickets.filter(({status}) => status === 'paid' || status === 'departed').map((ticket) => {
-    const snapshot = structuredClone(ticket);
-    snapshot.tableLabels = getTicketTableLabels(state, ticket);
-    for (const line of snapshot.lines) {
-      line.castNames ??= line.castIds.map((id) => people.get(id) ?? id);
+  const people = castNamesById(state);
+  return state.tickets.filter(({status}) => status === 'paid' || status === 'departed')
+    .map((ticket) => snapshotSettledTicket(state, ticket, people));
+}
+
+function correctionReason(reason, actor) {
+  assert(actor?.role === 'admin', '会計の取消と伝票の再オープンは店舗管理者が行えます。');
+  const note = typeof reason === 'string' ? reason.trim() : '';
+  assert(note.length > 0 && note.length <= 120, '理由を120字以内で入力してください。');
+  return note;
+}
+
+function correctionStock(state, use, restoreArchived) {
+  const stock = state.stock.find(({ id }) => id === use.stockId);
+  if (stock) return stock;
+  const archived = state.archivedStock?.find(({ id }) => id === use.stockId);
+  assert(restoreArchived && archived, '注文明細に対応する在庫品目が見つかりません。在庫の設定を確認してください。');
+  const restored = { ...archived, category: 'その他', quantity: 0, value: 0, minimum: 0,
+    unitCost: use.unitCost, defaultUnitCost: use.unitCost, hidden: true };
+  state.stock.push(restored);
+  state.archivedStock = state.archivedStock.filter(({ id }) => id !== use.stockId);
+  return restored;
+}
+
+function reverseSettlement(state, ticket, action, now, actor) {
+  const reason = correctionReason(action.reason, actor);
+  assert(ticket.status === 'paid' || ticket.status === 'departed', '確定した会計を選択してください。');
+  const receipt = snapshotSettledTicket(state, ticket, castNamesById(state));
+  for (const line of ticket.lines.filter(({ cancelledAt }) => cancelledAt === null)) {
+    for (const use of line.stockUses ?? []) {
+      assert(use.quantity > 0 && Number.isFinite(use.unitCost) && use.unitCost >= 0, '出庫時の在庫記録を確認してください。');
+      const stock = correctionStock(state, use, true);
+      newStockMovement(state, stock, use.quantity, 'return', `${line.name}の会計取消`, now, ticket.id, line.id, use.unitCost);
     }
-    snapshot.settlement ??= quote(state, ticket.id);
-    return snapshot;
-  });
+  }
+  state.cancelledSettlements ??= [];
+  state.cancelledSettlements.unshift({ id: createId(state, 'settlement-cancel'), ticketId: ticket.id,
+    ticketNumber: ticket.number, date: state.day.date, at: now, reason, receipt });
+  recordTableAssignment(ticket, [], now);
+  ticket.deposits = [];
+  ticket.payments = [];
+  ticket.settlement = null;
+  ticket.settledAt = null;
+  ticket.status = 'cancelled';
+}
+
+function reopenTicket(state, ticket, action, now, actor) {
+  correctionReason(action.reason, actor);
+  assert(ticket.status === 'cancelled', '会計を取り消した伝票を選択してください。');
+  assert(state.cancelledSettlements?.some((entry) => entry.ticketId === ticket.id && entry.date === state.day.date),
+    '会計の取消履歴を確認してください。');
+  const tableIds = tableSet(state, action.tableIds, ticket.guests, ticket.id);
+  for (const line of ticket.lines.filter(({ cancelledAt }) => cancelledAt === null)) {
+    for (const use of line.stockUses ?? []) {
+      const stock = correctionStock(state, use, false);
+      use.unitCost = stock.unitCost;
+      newStockMovement(state, stock, -use.quantity, 'order', `${line.name}の伝票再オープン`, now, ticket.id, line.id, use.unitCost);
+    }
+  }
+  recordTableAssignment(ticket, tableIds, now);
+  ticket.tableIds = tableIds;
+  ticket.status = 'open';
+  ticket.departedAt = null;
 }
 
 function doStockAdjust(state, action, now) {
@@ -562,8 +640,85 @@ function doImportLayout(state, file) {
   });
 }
 
-export function apply(state, action, now = Date.now()) {
+function operationalReason(value, label) {
+  const reason = typeof value === 'string' ? value.trim() : '';
+  assert(reason.length > 0 && reason.length <= 120, `${label}を120文字以内で入力してください。`);
+  return reason;
+}
+
+function validateDiscountAmount(ticket, amount, subtotal) {
+  assert(amount <= subtotal, '値引きは小計以下を入力してください。');
+  const changed = calculateQuote({ ...ticket, discount: amount });
+  assert(changed.total >= totalOf(ticket.deposits), '値引き後の請求額が前受金を下回ります。');
+}
+
+function doDiscount(state, ticket, action, now, actor) {
+  assert(['admin', 'manager'].includes(actor.role), '値引きの操作にはマネージャー以上の権限が必要です。');
+  assert(typeof action.reasonCode === 'string' && Object.hasOwn(discountReasonCodes, action.reasonCode),
+    '値引きの理由区分を選択してください。');
+  const reason = operationalReason(action.reason, '値引き理由');
+  const { mode, value } = action;
+  assert(mode === 'amount' || mode === 'percent', '値引きの単位を選択してください。');
+  const { subtotal } = calculateQuote(ticket);
+  let amount;
+  let rateBps;
+  if (mode === 'percent') {
+    rateBps = Math.round(value * 100);
+    assert(typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100
+      && Math.abs(rateBps / 100 - value) < 1e-9, '値引き率を0から100の範囲で小数点以下2桁まで入力してください。');
+    amount = exactRate(subtotal, rateBps);
+  } else {
+    amount = money(value, '値引き額');
+  }
+  validateDiscountAmount(ticket, amount, subtotal);
+  const request = { amount, subtotal, mode, value, reasonCode: action.reasonCode, reason, actor: { ...actor }, at: now };
+  const limit = getManagerDiscountLimit(state);
+  if (actor.role === 'manager' && (amount > exactRate(subtotal, limit) || (subtotal > 0 && rateBps > limit))) {
+    ticket.discountRequest = { ...request, id: createId(state, 'discount') };
+    return;
+  }
+  ticket.discount = amount;
+  ticket.discountDetails = { ...request, approvedBy: { ...actor }, approvedAt: now,
+    ...(actor.role === 'manager' ? { managerLimitBps: limit } : {}) };
+  ticket.discountRequest = null;
+}
+
+function decideDiscount(ticket, action, now, actor) {
+  assert(actor.role === 'admin', '値引きの承認・却下には管理者権限が必要です。');
+  const request = ticket.discountRequest;
+  assert(request && request.id === action.requestId, '承認待ちの値引き申請が変わりました。再表示してください。');
+  if (action.type === 'rejectDiscount') {
+    operationalReason(action.reason, '却下理由');
+    ticket.discountRequest = null;
+    return;
+  }
+  const note = action.reason == null || (typeof action.reason === 'string' && !action.reason.trim())
+    ? '' : operationalReason(action.reason, '承認メモ');
+  const { subtotal } = calculateQuote(ticket);
+  assert(request.subtotal === subtotal, '申請時から小計が変わりました。値引きの申請を更新してください。');
+  validateDiscountAmount(ticket, request.amount, subtotal);
+  ticket.discount = request.amount;
+  ticket.discountDetails = { ...request, approvedBy: { ...actor }, approvedAt: now, note };
+  ticket.discountRequest = null;
+}
+
+export function apply(state, action, now = Date.now(), actor = demoActor) {
+  const authenticatedActor = { id: actor.id, label: actor.label, role: actor.role };
+  const next = reduce(state, action, now, authenticatedActor);
+  const audit = buildOperationAudit(state, next, action, now, authenticatedActor);
+  if (audit) next.auditLog = [audit, ...(next.auditLog ?? [])];
+  return next;
+}
+
+function reduce(state, action, now, actor) {
   const next = structuredClone(state);
+  if (action.type === 'saveControls') {
+    assert(actor.role === 'admin', '値引き上限の変更には管理者権限が必要です。');
+    const limit = action.managerDiscountRateBps;
+    assert(Number.isInteger(limit) && limit >= 0 && limit <= 10_000, '値引き上限を0から100%の範囲で入力してください。');
+    next.controls = { ...next.controls, managerDiscountRateBps: limit };
+    return next;
+  }
   if (action.type === 'saveLayout') {
     doSaveLayout(next, action);
     return next;
@@ -603,6 +758,14 @@ export function apply(state, action, now = Date.now()) {
 
   currentDay(next);
   const ticket = findTicket(next, action.ticketId);
+  if (action.type === 'cancelSettlement') {
+    reverseSettlement(next, ticket, action, now, actor);
+    return next;
+  }
+  if (action.type === 'reopenTicket') {
+    reopenTicket(next, ticket, action, now, actor);
+    return next;
+  }
   if (action.type === 'depart') {
     assert(ticket.status === 'paid', '会計を確定してから退店してください。');
     recordTableAssignment(ticket, [], now);
@@ -655,13 +818,16 @@ export function apply(state, action, now = Date.now()) {
       break;
     }
     case 'discount': {
-      const amount = money(action.amount, '値引き額');
-      assert(amount <= quote(next, ticket.id).subtotal, '値引きは小計以下を入力してください。');
-      ticket.discount = amount;
-      assert(quote(next, ticket.id).total >= totalOf(ticket.deposits), '値引き後の請求額が前受金を下回ります。');
+      doDiscount(next, ticket, action, now, actor);
+      break;
+    }
+    case 'approveDiscount':
+    case 'rejectDiscount': {
+      decideDiscount(ticket, action, now, actor);
       break;
     }
     case 'settle': {
+      assert(!ticket.discountRequest, '承認待ちの値引き申請を処理してから会計してください。');
       const due = quote(next, ticket.id).remaining;
       assert(Array.isArray(action.payments) && action.payments.length <= 10, '支払内容を確認してください。');
       for (const payment of action.payments) {
@@ -683,6 +849,8 @@ export function apply(state, action, now = Date.now()) {
       break;
     }
     case 'cancelLine': {
+      assert(['admin', 'manager'].includes(actor.role), '注文取消にはマネージャー以上の権限が必要です。');
+      operationalReason(action.reason, '注文の取消理由');
       const line = ticket.lines.find((entry) => entry.id === action.lineId && entry.cancelledAt === null);
       assert(line, '注文明細が見つかりません。');
       assert(!['セット', '延長'].includes(line.category) && line.menuId !== 'nominationExtra', 'この料金は伝票単位で取り消してください。');
@@ -697,6 +865,10 @@ export function apply(state, action, now = Date.now()) {
       const remaining = quote(next, ticket.id);
       assert(remaining.subtotal >= ticket.discount, '取り消す前に値引き額を調整してください。');
       assert(remaining.total >= totalOf(ticket.deposits), '取消後の請求額が前受金を下回ります。');
+      if (actor.role === 'manager' && ticket.discountDetails?.managerLimitBps !== undefined) {
+        assert(ticket.discount <= exactRate(remaining.subtotal, getManagerDiscountLimit(next)),
+          '注文取消後の値引きが承認上限を超えます。先に値引きを調整してください。');
+      }
       break;
     }
     case 'void':
@@ -729,7 +901,7 @@ export function summary(state) {
   let openTickets = 0;
   let paidTickets = 0;
   for (const ticket of state.tickets) {
-    if (ticket.status === 'void') continue;
+    if (ticket.status === 'void' || ticket.status === 'cancelled') continue;
     if (occupiedStatuses.has(ticket.status)) occupied += ticket.tableIds.length;
     for (const payment of [...ticket.deposits, ...ticket.payments]) payments[payment.method] += payment.amount;
     const totals = quote(state, ticket.id);
@@ -840,7 +1012,8 @@ export function createDemo(mode = 'live', now = Date.now()) {
   step({ type: 'depart', ticketId: past }, now - 42 * minute);
   const active = seat(['a1'], 2, '佐藤様', 'set60', 32);
   order(active, [['castDrink', 2, ['cast1']]], 25);
-  step({ type: 'discount', ticketId: active, amount: 1_300 }, now - 21 * minute);
+  step({ type: 'discount', ticketId: active, mode: 'amount', value: 1_300,
+    reasonCode: 'service', reason: 'サンプルのサービス値引き' }, now - 21 * minute);
   step({ type: 'deposit', ticketId: active, method: 'cash', amount: 3_000 }, now - 20 * minute);
   const almost = seat(['a2'], 3, '鈴木様', 'set60', 54);
   order(almost, [['nomination', 1, ['cast3']], ['oolong', 1, []]], 22);

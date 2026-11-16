@@ -116,7 +116,7 @@ test('cancelled lines release catalog references and prior lines with missing ca
   delete find(legacy.tickets, ticketId).lines.find((entry) => entry.menuId === 'castDrink').cancelledAt;
   assert.match(catalogDeletionBlocker(legacy, 'cast', 'cast2'), /利用中/);
   assert.match(catalogDeletionBlocker(legacy, 'menu', 'castDrink'), /利用中/);
-  const cancelled = send(state, { type: 'cancelLine', ticketId, lineId: line.id, returnStock: true });
+  const cancelled = send(state, { type: 'cancelLine', ticketId, lineId: line.id, returnStock: true, reason: '注文の変更' });
   const deleted = remove(remove(cancelled, 'menu', 'castDrink'), 'cast', 'cast2');
   assert.deepEqual(deleted.tickets, cancelled.tickets);
   assert.deepEqual(deleted.movements, cancelled.movements);

@@ -1,5 +1,5 @@
 import { createRemoteJWKSet, jwtVerify } from 'jose';
-import { applyCommand, changeMember, createStore, inviteMember, listMembers, listStores, migrateState, readState, revokeInvite } from './database.mjs';
+import { applyCommand, changeMember, createStore, inviteMember, listAudit, listMembers, listStores, migrateState, readState, revokeInvite } from './database.mjs';
 import { ApiError, isRecord, requireCondition } from './policy.mjs';
 
 const firebaseKeys = createRemoteJWKSet(new URL(
@@ -96,6 +96,14 @@ function sinceRevision(search) {
   return Number(value);
 }
 
+function auditPage(search) {
+  const before = search.get('before');
+  const limit = search.get('limit');
+  requireCondition(before === null || /^\d+$/.test(before), 400, 'invalid-audit-cursor', '監査ログの表示位置を確認してください。');
+  requireCondition(limit === null || /^\d+$/.test(limit), 400, 'invalid-audit-limit', '監査ログの表示件数を確認してください。');
+  return { before: before === null ? undefined : Number(before), limit: limit === null ? undefined : Number(limit) };
+}
+
 function validPathId(value) {
   try {
     const id = decodeURIComponent(value);
@@ -111,7 +119,7 @@ async function route(request, env, url) {
     const row = await env.DB.prepare('SELECT 1 AS ready').first();
     return { ok: row?.ready === 1 };
   }
-  const match = /^\/api\/stores(?:\/([^/]+)\/(state|commands|migrate|members|invites)(?:\/([^/]+))?)?$/.exec(url.pathname);
+  const match = /^\/api\/stores(?:\/([^/]+)\/(state|commands|migrate|members|invites|audit)(?:\/([^/]+))?)?$/.exec(url.pathname);
   if (!match) throw new ApiError(404, 'not-found', 'ページが見つかりません。');
   const actor = await firebaseActor(request, env);
   const db = env.DB.withSession?.('first-primary') ?? env.DB;
@@ -124,6 +132,7 @@ async function route(request, env, url) {
   const id = rawId && validPathId(rawId);
   requireCondition(storeId && (!rawId || id), 404, 'not-found', 'ページが見つかりません。');
   if (section === 'state' && method === 'GET' && !id) return readState(db, actor, storeId, sinceRevision(url.searchParams));
+  if (section === 'audit' && method === 'GET' && !id) return listAudit(db, actor, storeId, auditPage(url.searchParams));
   if (section === 'commands' && method === 'POST' && !id) return applyCommand(db, actor, storeId, await jsonBody(request));
   if (section === 'migrate' && method === 'POST' && !id) return migrateState(db, actor, storeId, await jsonBody(request, 8 * 1024 * 1024));
   if (section === 'members' && !id) {

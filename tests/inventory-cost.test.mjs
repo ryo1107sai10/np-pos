@@ -53,7 +53,7 @@ test('orders and returns retain historical costs while the inventory report pres
   assert.deepEqual(state.movements[0], originalMovement);
   state = adjust(state, 1.25);
   assert.equal(soda(state).unitCost, 131);
-  state = apply(state, { type: 'cancelLine', ticketId, lineId: line.id, returnStock: true }, now);
+  state = apply(state, { type: 'cancelLine', ticketId, lineId: line.id, returnStock: true, reason: '注文の変更' }, now);
   assert.equal(soda(state).quantity, 25.25);
   assert.equal(soda(state).value, 3306.25);
   assert.equal(state.movements[0].unitCost, 125);

@@ -150,11 +150,31 @@ async function snapshot(db, actor, storeId, since = null) {
 
 function visibleSnapshot(result, actorUid) {
   if (result.restricted || result.unchanged) return result;
-  return { state: projectState(result.state, result.role, actorUid), revision: result.revision, role: result.role };
+  const state = { ...result.state };
+  delete state.auditLog;
+  return { state: projectState(state, result.role, actorUid), revision: result.revision, role: result.role };
 }
 
 export async function readState(db, actor, storeId, since) {
   return visibleSnapshot(await snapshot(db, actor, storeId, since), actor.uid);
+}
+
+export async function listAudit(db, actor, storeId, { before = null, limit = 50 } = {}) {
+  requireCondition(before === null || (Number.isSafeInteger(before) && before > 0),
+    400, 'invalid-audit-cursor', '監査ログの表示位置を確認してください。');
+  requireCondition(Number.isInteger(limit) && limit >= 1 && limit <= 100,
+    400, 'invalid-audit-limit', '監査ログの表示件数を確認してください。');
+  const rows = await readRows(db, `SELECT m.role, e.revision, e.payload FROM np_members m
+    LEFT JOIN np_audit_events e ON e.store_id = m.store_id AND m.role = 'admin'
+      AND (? IS NULL OR e.revision < ?)
+    WHERE m.store_id = ? AND m.uid = ? ORDER BY e.revision DESC LIMIT ?`,
+  before, before, storeId, actor.uid, limit + 1);
+  adminRequired(memberRequired(rows[0]));
+  const page = rows.slice(0, limit).filter((row) => row.payload !== null);
+  return {
+    events: page.map(({ payload }) => JSON.parse(payload)),
+    nextBefore: rows.length > limit ? page.at(-1).revision : null,
+  };
 }
 
 function snapshotChunks(state) {
@@ -214,10 +234,19 @@ async function saveOperation(db, actor, storeId, command) {
   };
   checkRevision(current.revision, current.role);
   const now = Date.now();
+  const operator = { id: actor.uid, label: actor.email, role: current.role };
   let next;
-  if (operation === 'migrate') next = validateSnapshot(value);
+  let event;
+  if (operation === 'migrate') {
+    next = validateSnapshot(value);
+    event = { action: 'migrate', businessDate: next.day.date,
+      target: { kind: 'store', id: storeId, label: '店舗データ' }, before: null,
+      after: { tables: next.tables.length, tickets: next.tickets.length, closedDays: next.closedDays.length },
+      reason: 'このブラウザーの営業データを移行' };
+  }
   else {
-    try { next = apply(current.state, value, now); }
+    delete current.state.auditLog;
+    try { next = apply(current.state, value, now, operator); }
     catch (error) {
       if (error instanceof TypeError || error instanceof RangeError) {
         throw new ApiError(400, 'invalid-command', '入力した操作内容を確認してください。');
@@ -225,7 +254,9 @@ async function saveOperation(db, actor, storeId, command) {
       throw new ApiError(422, 'rejected-command', error.message);
     }
     if (value.type === 'seat') next.tickets.at(-1).seatedByUid = actor.uid;
+    event = next.auditLog?.[0];
   }
+  delete next.auditLog;
   const chunks = snapshotChunks(next);
   const revision = expectedRevision + 1;
   const conditionArgs = [storeId, operationId, actor.uid, revision, expectedRevision];
@@ -235,6 +266,11 @@ async function saveOperation(db, actor, storeId, command) {
       WHERE s.id = ? AND s.revision = ? AND m.uid = ? AND m.role = ? ON CONFLICT DO NOTHING`,
     operationId, operation === 'migrate' ? 'migrate' : value.type, fingerprint, revision, now, storeId, expectedRevision, actor.uid, current.role),
   ];
+  if (event) {
+    const payload = JSON.stringify({ ...event, id: operationId, at: now, actor: operator });
+    statements.push(prepared(db, `INSERT INTO np_audit_events (store_id, operation_id, revision, payload)
+      SELECT ?, ?, ?, ? WHERE ${currentOperation}`, storeId, operationId, revision, payload, ...conditionArgs));
+  }
   for (const [position, payload] of chunks.entries()) {
     if (payload === current.chunks[position]) continue;
     statements.push(prepared(db, `INSERT INTO np_state_chunks (store_id, position, payload)

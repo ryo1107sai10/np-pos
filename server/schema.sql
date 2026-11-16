@@ -48,3 +48,12 @@ CREATE TABLE IF NOT EXISTS np_operations (
   PRIMARY KEY (store_id, operation_id),
   UNIQUE (store_id, revision)
 );
+
+CREATE TABLE IF NOT EXISTS np_audit_events (
+  store_id TEXT NOT NULL,
+  operation_id TEXT NOT NULL,
+  revision INTEGER NOT NULL CHECK(revision > 0),
+  payload TEXT NOT NULL,
+  PRIMARY KEY (store_id, revision),
+  FOREIGN KEY (store_id, operation_id) REFERENCES np_operations(store_id, operation_id)
+);

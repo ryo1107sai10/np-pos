@@ -215,6 +215,7 @@ function renderDaily(state, api, period, current) {
   const currentClose = period.closed;
   const openingCash = currentClose ? currentClose.openingCash : state.day.openingCash;
   const settled = period.state.tickets.filter(({status}) => status === 'paid' || status === 'departed');
+  const cancelled = (state.cancelledSettlements ?? []).filter((entry) => entry.date === period.date);
   const payment = current.payments || {};
   const history = [...state.closedDays].reverse().map((entry) =>
     `<details class="lr-day"><summary><span class="lr-day-icon" aria-hidden="true">${icon('calendar', 18)}</span>
@@ -230,6 +231,11 @@ function renderDaily(state, api, period, current) {
     return `<tr><td>${receiptLink(ticket, period.date, api)}</td><td>${escape(seats)}</td><td class="lr-muted">${timeLabel(ticket.settledAt)}</td>
       <td class="lr-numeric"><strong>${yen(amount)}</strong></td></tr>`;
   });
+  const cancelledRows = cancelled.map((entry) => `<tr><td><button class="lr-link" type="button" data-action="cancelled-receipt"
+    data-id="${escape(entry.id)}" aria-label="取消済みの会計 No. ${escape(entry.ticketNumber)}">${escape(entry.ticketNumber)}${icon('chevron-right',14)}</button></td>
+    <td class="lr-muted">${timeLabel(entry.at)}</td>
+    <td class="lr-numeric">${yen(entry.receipt.settlement.total)}</td>
+    <td>${escape(entry.reason)}</td></tr>`);
   return `<div class="lr-view">${dayPicker(state, period.date, api)}<div class="lr-stats">
     ${stat(api, 'chart', '確定売上', yen(asNumber(current.sales)), 'accent')}
     ${stat(api, 'users', '会計済みのお客様', `${asNumber(current.guests)}<small> 名</small>`)}
@@ -239,6 +245,7 @@ function renderDaily(state, api, period, current) {
     ${panel('会計履歴', receiptRows.length ? table(api, ['伝票', '卓', '会計時刻', '税込金額'], receiptRows, 'lr-payment-table')
       : empty(api, 'ticket', period.legacy ? '集計の保存がある営業日です' : '会計履歴はまだありません',
         period.legacy ? 'この営業日の会計件数と売上を上の集計で確認できます。' : '会計を確定した伝票がここに表示されます。'), panelCount(receiptRows.length, '件'))}
+    ${cancelledRows.length ? panel('会計取消の履歴', table(api,['取消済み伝票','取消時刻','元の会計額','取消理由'],cancelledRows,'ops-cancelled'),panelCount(cancelledRows.length,'件')) : ''}
     ${panel('締め履歴', history || empty(api, 'history', '締め履歴はまだありません', '閉店を確定すると、その営業日の実残高と売上を確認できます。'), panelCount(state.closedDays.length, '件'))}</div>`;
 }
 
