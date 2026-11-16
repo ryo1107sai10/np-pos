@@ -1,4 +1,4 @@
-import { getTableLabel } from './engine.mjs';
+import { getTicketCommissionDetails, getTicketTableLabels } from './engine.mjs';
 
 const formatDay = new Intl.DateTimeFormat('ja-JP', {
   month: 'short', day: 'numeric', weekday: 'short', timeZone: 'Asia/Tokyo',
@@ -83,33 +83,82 @@ function commissionOverview(api, earned, pending) {
   </section>`;
 }
 
-function renderCommission(state, api, result) {
-  const {yen, escape, quote} = api;
-  const earned = result.commission || [];
-  const pending = result.pendingCommission || [];
+function reportPeriod(state, {reportDate}) {
+  const closed = state.closedDays.find((entry) => entry.date === reportDate)
+    ?? state.closedDays.find((entry) => entry.date === state.day.date);
+  const date = closed?.date ?? state.day.date;
+  const tickets = closed?.ticketSnapshots ?? (date === state.day.date ? state.tickets : []);
+  return { date, closed, state: { ...state, tickets },
+    legacy: Boolean(closed && date !== state.day.date && !closed.ticketSnapshots && closed.tickets) };
+}
+
+function dayPicker(state, date, {escape, icon}) {
+  const past = state.closedDays.filter((entry) => entry.date !== state.day.date);
+  return `<div class="lr-day-picker"><label for="report-day">${icon('calendar', 17)}営業日</label>
+    <select id="report-day" data-report-date>
+      <option value=""${date === state.day.date ? ' selected' : ''}>${escape(state.day.date)}（最新）</option>
+      ${past.map((entry) => `<option value="${escape(entry.date)}"${date === entry.date ? ' selected' : ''}>${escape(entry.date)}</option>`).join('')}
+    </select></div>`;
+}
+
+function receiptLink(ticket, date, {escape, icon}) {
+  return `<button class="lr-link" type="button" data-action="history-receipt" data-id="${escape(ticket.id)}" data-date="${escape(date)}"
+    aria-label="会計内容 No. ${escape(ticket.number || ticket.id)}">${escape(ticket.number || ticket.id)}${icon('chevron-right', 14)}</button>`;
+}
+
+function renderCommission(state, api, period, result) {
+  const {yen, escape} = api;
+  const earned = result.commission ?? [];
+  const pending = result.pendingCommission ?? [];
   const earnedByCast = new Map(earned.map((item) => [item.castId, item]));
   const pendingByCast = new Map(pending.map((item) => [item.castId, item]));
-  const previousCast = state.archivedCast ?? [];
-  const names = byId([...previousCast, ...state.cast]);
-  const roster = [...state.cast, ...previousCast.filter(({id}) => earnedByCast.has(id) || pendingByCast.has(id))];
-  const castRows = roster.map(({id, name}) => {
-    const final = earnedByCast.get(id) || {};
-    const estimate = pendingByCast.get(id) || {};
-    return `<tr><td><span class="lr-person"><span class="lr-avatar" aria-hidden="true">${escape(Array.from(name).at(0) || '')}</span>${escape(name)}</span></td>
+  const names = new Map([...(state.archivedCast ?? []), ...state.cast].map(({id, name}) => [id, name]));
+  const details = period.state.tickets
+    .filter(({status}) => ['open', 'paid', 'departed'].includes(status))
+    .sort((a, b) => asNumber(b.settledAt ?? b.createdAt) - asNumber(a.settledAt ?? a.createdAt))
+    .flatMap((ticket) => getTicketCommissionDetails(period.state, ticket.id).map((entry) => ({ ticket, entry })));
+  const historicalNames = new Map();
+  for (const {entry} of details) {
+    if (entry.castName && !historicalNames.has(entry.castId)) historicalNames.set(entry.castId, entry.castName);
+  }
+  const castName = (id) => (period.closed ? historicalNames.get(id) : names.get(id))
+    ?? names.get(id) ?? historicalNames.get(id) ?? id;
+  const activeCastIds = period.closed ? [] : state.cast.filter((person) => person.enabled !== false).map(({id}) => id);
+  const ids = new Set([...activeCastIds, ...earnedByCast.keys(), ...pendingByCast.keys()]);
+  const selected = ids.has(api.commissionCast) ? api.commissionCast : null;
+  const castRows = [...ids].map((id) => {
+    const name = castName(id);
+    const final = earnedByCast.get(id) ?? {};
+    const estimate = pendingByCast.get(id) ?? {};
+    return `<tr><td><button type="button" class="lr-person lr-link lr-cast-filter" data-action="commission-cast" data-id="${escape(id)}"
+      aria-label="${escape(name)}の明細" aria-pressed="${id === selected}"><span class="lr-avatar" aria-hidden="true">${escape(Array.from(name).at(0) ?? '')}</span>${escape(name)}</button></td>
       <td class="lr-numeric">${yen(asNumber(final.sales))}</td><td class="lr-numeric"><strong class="${final.amount ? 'lr-positive' : 'lr-quiet-value'}">${yen(asNumber(final.amount))}</strong></td>
       <td class="lr-numeric ${estimate.amount ? 'lr-estimate' : 'lr-quiet-value'}">${yen(asNumber(estimate.amount))}</td><td class="lr-numeric">${number.format(asNumber(final.points))}<span class="lr-unit"> pt</span></td></tr>`;
   });
-  const details = typeof quote === 'function' ? state.tickets
-    .filter(({status}) => status === 'paid' || status === 'departed')
-    .sort((a, b) => asNumber(b.settledAt) - asNumber(a.settledAt))
-    .flatMap((ticket) => (quote(state, ticket.id).commission || []).map((entry) =>
-      `<tr><td>${ticketLink(ticket, api)}</td><td>${escape(names.get(entry.castId)?.name || '—')}</td>
-        <td class="lr-muted">${timeLabel(ticket.settledAt)}</td><td class="lr-numeric">${yen(entry.sales)}</td>
-        <td class="lr-numeric"><strong class="lr-positive">${yen(entry.amount)}</strong></td></tr>`)) : [];
-  return `<div class="lr-view lr-commission">${commissionOverview(api, earned, pending)}
-    ${panel('キャスト別成績', table(api, ['キャスト', '個人売上', '確定歩合', '見込み歩合', '確定ポイント'], castRows, 'lr-commission-roster'), panelCount(castRows.length, '名'))}
-    ${panel('確定歩合の明細', details.length ? table(api, ['伝票', 'キャスト', '会計時刻', '個人売上', '歩合'], details, 'lr-payment-table')
-      : empty(api, 'ticket', '確定歩合はまだありません', '歩合対象の注文を含む伝票の会計を確定すると表示されます。'), panelCount(details.length, '件'))}</div>`;
+  const detailSets = [
+    { name: '確定歩合の明細', pending: false, empty: '会計を確定すると、対象の注文明細がここに表示されます。' },
+    { name: '見込み歩合の明細', pending: true, empty: '未会計の注文にキャストを割り当てると、見込み歩合が表示されます。' },
+  ];
+  const detailPanels = detailSets.filter((set) => !set.pending || !period.closed).map((set) => {
+    const rows = details
+      .filter(({ticket, entry}) => (ticket.status === 'open') === set.pending && (!selected || selected === entry.castId))
+      .map(({ticket, entry}) => `<tr><td>${set.pending ? ticketLink(ticket, api) : receiptLink(ticket, period.date, api)}</td>
+        <td><strong>${escape(entry.name)}</strong></td><td>${escape(entry.castName ?? castName(entry.castId))}</td>
+        <td class="lr-muted">${timeLabel(set.pending ? (entry.createdAt ?? ticket.createdAt) : ticket.settledAt)}</td>
+        <td class="lr-numeric"><span class="lr-mobile-label" aria-hidden="true">個人売上</span>${yen(entry.sales)}</td>
+        <td class="lr-numeric"><span class="lr-mobile-label" aria-hidden="true">歩合</span><strong class="${set.pending ? 'lr-estimate' : 'lr-positive'}">${yen(entry.amount)}</strong>
+        <span class="lr-unit"> · ${number.format(entry.points)} pt</span></td></tr>`);
+    return panel(set.name, rows.length ? table(api, ['伝票', '注文明細', 'キャスト', set.pending ? '注文時刻' : '会計時刻', '個人売上', '歩合'],
+      rows, 'lr-payment-table lr-commission-detail') : empty(api, 'ticket', '該当する明細はありません',
+      period.legacy ? 'この営業日の保存済み歩合はキャスト別成績で確認できます。' : set.empty), panelCount(rows.length, '件'));
+  }).join('');
+  const selectedControl = selected ? `<div class="lr-commission-filter"><strong>${escape(castName(selected))}の明細</strong>
+    <button type="button" class="btn btn-secondary" data-action="commission-cast" data-id="">すべてのキャスト</button></div>` : '';
+  return `<div class="lr-view lr-commission">${dayPicker(state, period.date, api)}${commissionOverview(api, earned, pending)}
+    ${panel('キャスト別成績', castRows.length
+      ? table(api, ['キャスト', '個人売上', '確定歩合', '見込み歩合', '確定ポイント'], castRows, 'lr-commission-roster')
+      : empty(api, 'users', '該当する成績はありません', 'キャストの歩合が計上された営業日を選べます。'), panelCount(castRows.length, '名'))}
+    ${selectedControl}${detailPanels}</div>`;
 }
 
 function renderStock(state, api) {
@@ -161,12 +210,11 @@ function moneyRows(values, {yen}) {
     `<div><dt>${label}</dt><dd>${yen(asNumber(amount))}</dd></div>`).join('')}</dl>`;
 }
 
-function renderDaily(state, api, result) {
+function renderDaily(state, api, period, current) {
   const {yen, icon, escape} = api;
-  const currentClose = state.day.status === 'closed' && state.closedDays.find((entry) => entry.date === state.day.date);
-  const current = currentClose || result;
+  const currentClose = period.closed;
   const openingCash = currentClose ? currentClose.openingCash : state.day.openingCash;
-  const settled = state.tickets.filter(({status}) => status === 'paid' || status === 'departed');
+  const settled = period.state.tickets.filter(({status}) => status === 'paid' || status === 'departed');
   const payment = current.payments || {};
   const history = [...state.closedDays].reverse().map((entry) =>
     `<details class="lr-day"><summary><span class="lr-day-icon" aria-hidden="true">${icon('calendar', 18)}</span>
@@ -177,25 +225,27 @@ function renderDaily(state, api, result) {
   const cashRows = [['釣銭準備金', openingCash], ['レジ理論残高', current.expectedCash]];
   if (currentClose) cashRows.push(['レジ実残高', currentClose.actualCash], ['差額', currentClose.discrepancy]);
   const receiptRows = settled.slice().sort((a, b) => asNumber(b.settledAt) - asNumber(a.settledAt)).map((ticket) => {
-    const amount = typeof api.quote === 'function' ? api.quote(state, ticket.id).total : 0;
-    const seats = ticket.tableIds.map((id) => getTableLabel(state, id)).join('・');
-    return `<tr><td>${ticketLink(ticket, api)}</td><td>${escape(seats)}</td><td class="lr-muted">${timeLabel(ticket.settledAt)}</td>
+    const amount = typeof api.quote === 'function' ? api.quote(period.state, ticket.id).total : 0;
+    const seats = getTicketTableLabels(state, ticket).join('・');
+    return `<tr><td>${receiptLink(ticket, period.date, api)}</td><td>${escape(seats)}</td><td class="lr-muted">${timeLabel(ticket.settledAt)}</td>
       <td class="lr-numeric"><strong>${yen(amount)}</strong></td></tr>`;
   });
-  return `<div class="lr-view"><div class="lr-stats">
+  return `<div class="lr-view">${dayPicker(state, period.date, api)}<div class="lr-stats">
     ${stat(api, 'chart', '確定売上', yen(asNumber(current.sales)), 'accent')}
     ${stat(api, 'users', '会計済みのお客様', `${asNumber(current.guests)}<small> 名</small>`)}
     ${stat(api, 'ticket', '会計済み伝票', `${asNumber(current.tickets)}<small> 件</small>`)}</div>
     <div class="lr-split">${panel('支払方法別の入金', moneyRows(cashMethods.map(([key, label]) => [label, payment[key]]), api), '<span class="lr-muted">前受金を含む</span>')}
     ${panel('レジ残高', moneyRows(cashRows, api), currentClose ? '<span class="lr-badge lr-badge-active">締め済み</span>' : '')}</div>
     ${panel('会計履歴', receiptRows.length ? table(api, ['伝票', '卓', '会計時刻', '税込金額'], receiptRows, 'lr-payment-table')
-      : empty(api, 'ticket', '会計履歴はまだありません', '会計を確定した伝票がここに表示されます。'), panelCount(receiptRows.length, '件'))}
+      : empty(api, 'ticket', period.legacy ? '集計の保存がある営業日です' : '会計履歴はまだありません',
+        period.legacy ? 'この営業日の会計件数と売上を上の集計で確認できます。' : '会計を確定した伝票がここに表示されます。'), panelCount(receiptRows.length, '件'))}
     ${panel('締め履歴', history || empty(api, 'history', '締め履歴はまだありません', '閉店を確定すると、その営業日の実残高と売上を確認できます。'), panelCount(state.closedDays.length, '件'))}</div>`;
 }
 
 export function renderReport(page, state, api) {
-  const result = api.summary(state);
-  if (page === 'commission') return renderCommission(state, api, result);
   if (page === 'stock') return renderStock(state, api);
-  return renderDaily(state, api, result);
+  const period = reportPeriod(state, api);
+  const result = period.closed ?? api.summary(state);
+  if (page === 'commission') return renderCommission(state, api, period, result);
+  return renderDaily(state, api, period, result);
 }

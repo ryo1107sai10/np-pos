@@ -136,9 +136,11 @@ test('automatic nomination surcharge works for existing active tickets with an i
   state = order(state, ticketId, 'nomination', ['cast1', 'cast2']);
   state = configure(state, (settings) => {
     castMember(settings, 'cast1').enabled = false;
-    settings.cast = settings.cast.filter((person) => person.id !== 'cast2');
     menuItem(settings, 'nominationExtra').price = 1_250;
   });
+  // Legacy data can contain a cast archived before the active-ticket deletion guard.
+  state.archivedCast = [castMember(state, 'cast2')];
+  state.cast = state.cast.filter((person) => person.id !== 'cast2');
 
   state = apply(state, { type: 'extend', ticketId, menuId: 'extend30' }, now);
   const line = state.tickets[0].lines.at(-1);
@@ -149,8 +151,15 @@ test('automatic nomination surcharge works for existing active tickets with an i
   state = configure(state, (settings) => { menuItem(settings, 'nominationExtra').enabled = false; });
   state = apply(state, { type: 'extend', ticketId, menuId: 'extend30' }, now);
   assert.equal(state.tickets[0].lines.at(-1).menuId, 'extend30');
+  const amount = quote(state, ticketId).remaining;
+  state = apply(state, { type: 'settle', ticketId, payments: [{ method: 'cash', amount }] }, now);
+  state = apply(state, { type: 'depart', ticketId }, now);
   state = configure(state, (settings) => { settings.menu = settings.menu.filter((item) => item.id !== 'nominationExtra'); });
-  state = apply(state, { type: 'extend', ticketId, menuId: 'extend30' }, now);
+  state = seat(state);
+  const freshTicketId = state.tickets.at(-1).id;
+  state = order(state, freshTicketId, 'nomination', ['cast3']);
+  state = apply(state, { type: 'extend', ticketId: freshTicketId, menuId: 'extend30' }, now);
+  assert.equal(state.tickets.at(-1).lines.filter((item) => item.menuId === 'nominationExtra').length, 0);
   assert.equal(state.tickets[0].lines.filter((item) => item.menuId === 'nominationExtra').length, 1);
 });
 

@@ -241,6 +241,10 @@ function outputCommission(map) {
 export function quote(state, ticketId) {
   const ticket = findTicket(state, ticketId);
   if (ticket.settlement) return structuredClone(ticket.settlement);
+  return calculateQuote(ticket);
+}
+
+function calculateQuote(ticket) {
   const lines = ticket.lines.filter((line) => line.cancelledAt === null);
   const subtotal = lines.reduce((total, line) => total + line.total, 0);
   const discount = Math.min(ticket.discount, subtotal);
@@ -251,6 +255,7 @@ export function quote(state, ticketId) {
   const serviceByLine = allocate(service, serviceWeights);
   const groupedTax = new Map();
   const commission = new Map();
+  const commissionDetails = [];
 
   lines.forEach((line, index) => {
     groupedTax.set(line.taxRate, (groupedTax.get(line.taxRate) ?? 0) + netByLine[index] + serviceByLine[index]);
@@ -261,7 +266,10 @@ export function quote(state, ticketId) {
       const sales = equalShare(netByLine[index], count, castIndex);
       const fixed = equalShare(rule.fixed * line.quantity, count, castIndex);
       const points = equalShare(Math.round(rule.points * pointsScale) * line.quantity, count, castIndex);
-      addCommission(commission, castId, sales, fixed + exactRate(sales, Math.round(rule.rate * 100)), points);
+      const amount = fixed + exactRate(sales, Math.round(rule.rate * 100));
+      addCommission(commission, castId, sales, amount, points);
+      commissionDetails.push({ castId, castName: line.castNames?.[castIndex] ?? null,
+        lineId: line.id, name: line.name, createdAt: line.createdAt, sales, amount, points: points / pointsScale });
     });
   });
 
@@ -272,7 +280,28 @@ export function quote(state, ticketId) {
   const deposit = totalOf(ticket.deposits);
   const paid = totalOf(ticket.payments);
   return { subtotal, discount, service, tax, total, deposit, paid, remaining: Math.max(0, total - deposit - paid),
-    commission: outputCommission(commission), taxBreakdown };
+    commission: outputCommission(commission), commissionDetails, taxBreakdown };
+}
+
+export function getTicketCommissionDetails(state, ticketId) {
+  const ticket = findTicket(state, ticketId);
+  if (!ticket.settlement) return calculateQuote(ticket).commissionDetails;
+  if (ticket.settlement.commissionDetails) return structuredClone(ticket.settlement.commissionDetails);
+  const calculated = calculateQuote(ticket);
+  const stored = ticket.settlement.commission ?? [];
+  const byCast = new Map(calculated.commission.map((entry) => [entry.castId, entry]));
+  const matches = stored.length === byCast.size && stored.every(({castId, sales, amount, points}) => {
+    const entry = byCast.get(castId);
+    return entry && entry.sales === sales && entry.amount === amount && entry.points === points;
+  });
+  return matches ? calculated.commissionDetails
+    : stored.map((entry) => ({ ...entry, castName: null, lineId: null, name: '伝票合計', createdAt: null }));
+}
+
+export function getTicketTableLabels(state, ticket) {
+  if (ticket.tableLabels) return ticket.tableLabels;
+  const ids = ticket.tableIds.length ? ticket.tableIds : (ticket.tableHistory ?? []).map(({tableId}) => tableId);
+  return [...new Set(ids)].map((id) => getTableLabel(state, id));
 }
 
 function newStockMovement(state, stock, amount, kind, reason, now, ticketId = null, sourceLineId = null, unitCost = stock.unitCost) {
@@ -300,7 +329,7 @@ function addLine(state, ticket, menu, quantity, castIds, now, { includeHistorica
     id: createId(state, 'line'), menuId: menu.id, name: menu.name, category: menu.category, quantity, price: menu.price,
     total: menu.price * quantity, castIds: castIds.slice(), createdAt: now, stockUses: [], cancelledAt: null,
     providedAt: null, taxRate: menu.taxRate ?? 1_000, serviceEligible: menu.serviceEligible !== false,
-    commission: getItemCommission(menu),
+    commission: getItemCommission(menu), castNames: castIds.map((id) => castById.get(id).name),
     castCommissions: castIds.map((id) => getItemCommission(menu, castById.get(id))),
   };
   for (const use of menu.recipe ?? []) {
@@ -332,6 +361,10 @@ function doOpen(state, action, now) {
   assert(typeof date === 'string' && /^\d{4}-\d\d-\d\d$/.test(date) && Number.isFinite(Date.parse(date))
     && new Date(date).toISOString().slice(0, 10) === date, '営業日を指定してください。');
   assert(!state.closedDays.some((day) => day.date === date), 'この営業日は締め済みです。次の営業日を入力してください。');
+  const previous = state.closedDays.find((day) => day.date === state.day.date);
+  if (previous && !previous.ticketSnapshots && state.tickets.length) {
+    previous.ticketSnapshots = snapshotClosedTickets(state);
+  }
   state.tickets = [];
   state.day = { status: 'open', date, openingCash: money(action.openingCash, '釣銭準備金'), openedAt: now,
     closedAt: null, closingCash: null };
@@ -365,7 +398,21 @@ function doClose(state, action, now) {
   state.day = { ...state.day, status: 'closed', closedAt: now, closingCash: actualCash };
   state.closedDays.unshift({ date: state.day.date, openedAt: state.day.openedAt, closedAt: now,
     openingCash: state.day.openingCash, actualCash, expectedCash: totals.expectedCash, discrepancy, reason,
-    sales: totals.sales, guests: totals.guests, tickets: totals.tickets, commission: totals.commission, payments: totals.payments });
+    sales: totals.sales, guests: totals.guests, tickets: totals.tickets, commission: totals.commission, payments: totals.payments,
+    ticketSnapshots: snapshotClosedTickets(state) });
+}
+
+function snapshotClosedTickets(state) {
+  const people = new Map([...(state.archivedCast ?? []), ...state.cast].map(({id, name}) => [id, name]));
+  return state.tickets.filter(({status}) => status === 'paid' || status === 'departed').map((ticket) => {
+    const snapshot = structuredClone(ticket);
+    snapshot.tableLabels = getTicketTableLabels(state, ticket);
+    for (const line of snapshot.lines) {
+      line.castNames ??= line.castIds.map((id) => people.get(id) ?? id);
+    }
+    snapshot.settlement ??= quote(state, ticket.id);
+    return snapshot;
+  });
 }
 
 function doStockAdjust(state, action, now) {
@@ -526,7 +573,8 @@ export function apply(state, action, now = Date.now()) {
     return next;
   }
   if (action.type === 'saveStoreSettings') {
-    replaceStoreSettings(next, validatedStoreSettings(action.settings, next), action.removeStockIds);
+    const { removeMenuIds, removeCastIds, removeStockIds } = action;
+    replaceStoreSettings(next, validatedStoreSettings(action.settings, next), removeStockIds, { removeMenuIds, removeCastIds });
     return next;
   }
   if (action.type === 'importStoreConfiguration') {

@@ -212,7 +212,7 @@
   min-height: 44px;
 }
 
-.store-editor-stock-removal {
+.store-editor-removal {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -222,10 +222,10 @@
   border-top: 1px solid #e7ebf4;
 }
 
-.store-editor-stock-removal .btn { min-height: 44px; }
-.store-editor-stock-removal .field-help { flex: 1 1 10rem; min-width: 0; overflow-wrap: anywhere; }
+.store-editor-removal .btn { min-height: 44px; }
+.store-editor-removal .field-help { flex: 1 1 10rem; min-width: 0; overflow-wrap: anywhere; }
 
-.store-editor-stock-removal.is-confirming {
+.store-editor-removal.is-confirming {
   display: grid;
   gap: 8px;
   padding: 10px;
@@ -234,7 +234,7 @@
   background: #fff8fa;
 }
 
-.store-editor-stock-removal.is-confirming p {
+.store-editor-removal.is-confirming p {
   display: grid;
   gap: 4px;
   color: #713247;
@@ -242,7 +242,7 @@
   overflow-wrap: anywhere;
 }
 
-.store-editor-stock-removal-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.store-editor-removal-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .store-editor-removal-note {
   padding: 8px 10px;
   border: 1px solid #ebccd6;

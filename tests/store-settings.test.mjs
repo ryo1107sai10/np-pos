@@ -66,20 +66,22 @@ test('layout-only settings files continue to import without changing existing me
 
 test('combined import preserves local orders, cash, stock and archived cast identity', () => {
   let target = createDemo('live', now);
+  const paid = target.tickets.find((ticket) => ticket.status === 'paid');
+  target = apply(target, { type: 'depart', ticketId: paid.id }, now);
   const targetSettings = adjustedSettings(target);
-  targetSettings.cast.find(({ id }) => id === 'cast2').commissionOverride = { fixed: 920 };
+  targetSettings.cast.find(({ id }) => id === 'cast4').commissionOverride = { fixed: 920 };
   target = apply(target, { type: 'saveStoreSettings', settings: targetSettings }, now);
   const source = createDemo('closed', now);
   const file = exportStoreConfiguration(source);
-  file.settings.cast = file.settings.cast.filter(({ id }) => id !== 'cast2');
+  file.settings.cast = file.settings.cast.filter(({ id }) => id !== 'cast4');
   const imported = apply(target, {
     type: 'importStoreConfiguration', configuration: parseStoreConfiguration(JSON.stringify(file)),
   }, now);
   assert.deepEqual(operations(imported), operations(target));
-  assert.equal(imported.cast.some(({ id }) => id === 'cast2'), false);
-  assert.deepEqual(imported.archivedCast.find(({ id }) => id === 'cast2').commissionOverride, { fixed: 920 });
-  assert.equal(imported.archivedCast.find(({ id }) => id === 'cast2').name, '凛');
-  assert.equal(exportStoreConfiguration(imported).settings.cast.some(({ id }) => id === 'cast2'), false);
+  assert.equal(imported.cast.some(({ id }) => id === 'cast4'), false);
+  assert.deepEqual(imported.archivedCast.find(({ id }) => id === 'cast4').commissionOverride, { fixed: 920 });
+  assert.equal(imported.archivedCast.find(({ id }) => id === 'cast4').name, '葵');
+  assert.equal(exportStoreConfiguration(imported).settings.cast.some(({ id }) => id === 'cast4'), false);
   const restored = apply(imported, { type: 'saveStoreSettings', settings: targetSettings }, now);
   assert.deepEqual(restored.archivedCast, []);
   assert.deepEqual(operations(restored), operations(target));

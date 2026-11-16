@@ -1,9 +1,9 @@
-import { apply, businessDate, createDemo, exportStoreConfiguration, getItemCommission, getLayoutAreas, getLayoutTables, getTableLabel, getTicketForTable, parseStoreConfiguration, quote, summary, tableStatus, yen } from './engine.mjs';
+import { apply, businessDate, createDemo, exportStoreConfiguration, getItemCommission, getLayoutAreas, getLayoutTables, getTableLabel, getTicketForTable, getTicketTableLabels, parseStoreConfiguration, quote, summary, tableStatus, yen } from './engine.mjs';
 import { icon } from './icons.mjs';
 import { renderReport } from './reports.mjs';
 import { bindLayoutEditor, commitLayoutFields, floorLayoutStage, handleLayoutEditorAction, layoutAreaTabs, newLayoutDraft, renderLayoutEditor } from './floor-layout.mjs';
 import { renderLayoutTransfer } from './layout-transfer.mjs';
-import { getStoreSettings, stockDeletionBlocker } from './store-settings.mjs';
+import { catalogDeletionBlocker, getStoreSettings, stockDeletionBlocker } from './store-settings.mjs';
 import { commitStoreSettingsEditor, handleStoreSettingsEditorAction, renderStoreSettingsEditor } from './store-settings-editor.mjs';
 
 const app = document.querySelector('#app');
@@ -34,6 +34,8 @@ let area = null;
 let { view: floorView, area: planArea } = loadFloorView();
 let filter = 'all';
 let showHiddenStock = false;
+let reportDate = '';
+let commissionCast = '';
 let mobileDetails = false;
 let modal = null;
 let priorFocus = null;
@@ -140,6 +142,10 @@ function tableName(id) {
 function staffName(id) {
   return state.cast.find((person) => person.id === id)?.name
     ?? state.archivedCast?.find((person) => person.id === id)?.name ?? id;
+}
+
+function lineStaffNames(line) {
+  return (line.castIds ?? []).map((id, index) => line.castNames?.[index] ?? staffName(id)).map(escape).join('・');
 }
 
 function extensionPlans() {
@@ -251,6 +257,19 @@ function totalRows(q, { settlement = false, large = false } = {}) {
   </dl>`;
 }
 
+function receiptBody(ticket, totals) {
+  const lines = ticket.lines.filter((line) => line.cancelledAt == null);
+  const payments = [...ticket.deposits, ...ticket.payments];
+  return `<section aria-labelledby="receipt-lines-title">
+    <h3 id="receipt-lines-title">注文明細</h3>
+    <ul class="ticket-lines">${lines.map((line) => {
+      const cast = lineStaffNames(line);
+      return `<li class="ticket-line"><span class="line-desc">${escape(line.name)} <em>${yen(line.price)} × ${line.quantity}</em>${cast ? `<small>${cast}</small>` : ''}</span><span class="money">${yen(line.total)}</span></li>`;
+    }).join('')}</ul></section>
+    ${totalRows(totals, { settlement: true, large: true })}
+    ${payments.length ? `<ul class="deposit-list">${payments.map((entry) => `<li><span>${methods[entry.method]}</span><strong>${yen(entry.amount)}</strong></li>`).join('')}</ul>` : ''}`;
+}
+
 function renderDetail() {
   const ticket = selected && getTicketForTable(state, selected);
   const detailClose = `<button type="button" class="icon-btn detail-mobile-close" data-action="hide-detail" aria-label="伝票詳細を閉じる">${icon('x',18)}</button>`;
@@ -267,7 +286,7 @@ function renderDetail() {
     <div class="detail-meta"><span>${icon('users',13)}${ticket.guests}名${ticket.customer ? ` · ${escape(ticket.customer)}` : ''}</span><span>${settled ? `${icon('check',13)}退店待ち` : `${icon('clock',13)}<time data-ends="${ticket.endsAt}">${timer(ticket.endsAt)}</time>`}</span></div>
     ${ticket.tableIds.length > 1 ? `<div class="detail-links" aria-label="同じ伝票の卓">${ticket.tableIds.map(id=>`<span class="detail-link">${escape(tableName(id))}</span>`).join('')}</div>` : ''}
     <div class="detail-aux"><h3>注文明細 <small>${lines.length}</small></h3>${settled ? '' : button('卓移動・連結','move',{glyph:'move',id:ticket.id})}</div>
-    <ul class="ticket-lines">${lines.length ? lines.map((line) => `<li class="ticket-line"><span class="line-desc">${escape(line.name)} <em>×${line.quantity}</em>${line.castIds.length ? `<small>${line.castIds.map(staffName).map(escape).join('・')}</small>` : ''}</span><span class="money">${yen(line.total)}</span>${!settled && !['セット','延長'].includes(line.category) ? `<button class="line-remove" type="button" data-action="cancel-line" data-id="${escape(line.id)}" data-ticket="${escape(ticket.id)}" aria-label="${escape(line.name)}を取り消す">${icon('x',13)}</button>` : ''}</li>`).join('') : '<li class="lines-empty">注文明細はありません。</li>'}</ul>
+    <ul class="ticket-lines">${lines.length ? lines.map((line) => `<li class="ticket-line"><span class="line-desc">${escape(line.name)} <em>×${line.quantity}</em>${line.castIds.length ? `<small>${lineStaffNames(line)}</small>` : ''}</span><span class="money">${yen(line.total)}</span>${!settled && !['セット','延長'].includes(line.category) ? `<button class="line-remove" type="button" data-action="cancel-line" data-id="${escape(line.id)}" data-ticket="${escape(ticket.id)}" aria-label="${escape(line.name)}を取り消す">${icon('x',13)}</button>` : ''}</li>`).join('') : '<li class="lines-empty">注文明細はありません。</li>'}</ul>
     ${totalRows(q,{settlement:settled})}
     ${!settled ? `<div class="mini-tools">${button('前受金','deposit',{glyph:'wallet',tone:'quiet',id:ticket.id})}${button('値引き','discount',{glyph:'minus',tone:'quiet',id:ticket.id})}${quickItem ? button(escape(quickItem.name),'order',{glyph:'plus',tone:'quiet',id:ticket.id,data:'data-product="highball"'}) : ''}${button('卓履歴','seat-history',{glyph:'history',tone:'quiet',id:ticket.id})}</div>` : ''}
     <div class="detail-actions">${!settled ? `${button('注文','order',{glyph:'plus',tone:'secondary',id:ticket.id})}${button('延長','extend',{glyph:'clock',id:ticket.id,disabled:!extensionPlans().length})}${button('会計へ進む','settle',{glyph:'arrow-right',tone:'primary',id:ticket.id,cls:'btn-block'})}` : `${button('会計内訳','receipt',{glyph:'ticket',id:ticket.id,cls:'btn-block'})}${button('退店・卓を解放','depart',{glyph:'checkout',tone:'primary',id:ticket.id,cls:'btn-block'})}`}</div></div></aside>`;
@@ -279,7 +298,7 @@ function render({ preserveFocus = false } = {}) {
   const focusId = focused?.dataset.id;
   lastStatuses = state.tables.map((table)=>tableStatus(state,table.id)).join('|');
   lastMinute = dateTime.format(Date.now());
-  app.innerHTML = `<div class="shell">${renderSide()}<main class="workspace" id="workspace" tabindex="-1">${renderTop()}${page==='floor' ? renderFloor() : renderReport(page,state,{yen,summary,quote,escape,icon,showHiddenStock})}</main></div>`;
+  app.innerHTML = `<div class="shell">${renderSide()}<main class="workspace" id="workspace" tabindex="-1">${renderTop()}${page==='floor' ? renderFloor() : renderReport(page,state,{yen,summary,quote,escape,icon,showHiddenStock,reportDate,commissionCast})}</main></div>`;
   document.title = `NP POS | ${pages[page].title}`;
   if (focusAction) [...app.querySelectorAll('[data-action]')].find((el) => el.dataset.action === focusAction && el.dataset.id === focusId)?.focus({ preventScroll: true });
 }
@@ -348,6 +367,10 @@ function storeImportTarget(configuration, fresh) {
 
 function checkStockDeletion(id, menu) {
   return stockDeletionBlocker(state, id, menu);
+}
+
+function checkCatalogDeletion(kind, id, menu) {
+  return catalogDeletionBlocker(state, kind, id, menu);
 }
 
 function exportStoreFile() {
@@ -436,7 +459,8 @@ function paintDialog(layoutFileInput) {
       return;
     }
     case 'store-settings':
-      present('店舗設定', renderStoreSettingsEditor(modal.editor, { escape, icon, yen, stockDeletionBlocker: checkStockDeletion }),
+      present('店舗設定', renderStoreSettingsEditor(modal.editor, { escape, icon, yen,
+        stockDeletionBlocker: checkStockDeletion, catalogDeletionBlocker: checkCatalogDeletion }),
         '店舗設定を保存', { style: 'store-settings-dialog' });
       dialog.querySelector('#submit-dialog').formNoValidate = true;
       return;
@@ -495,8 +519,17 @@ function paintDialog(layoutFileInput) {
       present('退店を確定',`${headline}<p class="form-copy">${escape(titles(ticket))}を空席に戻します。確定済みの伝票は営業レポートから確認できます。</p>`,'退店・卓を解放');
       return;
     case 'receipt':
-      present(`会計内訳 No. ${ticket.number}`,`${headline}${totalRows(q,{settlement:true,large:true})}<ul class="deposit-list">${[...ticket.deposits,...ticket.payments].map((entry)=>`<li><span>${methods[entry.method]}</span><strong>${yen(entry.amount)}</strong></li>`).join('')}</ul>`,null);
+      present(`会計内訳 No. ${ticket.number}`, headline + receiptBody(ticket, q), null);
       return;
+    case 'history-receipt': {
+      const archived = modal.receipt;
+      const labels = getTicketTableLabels(state, archived).join('・');
+      const info = [labels, `${archived.guests}名`, archived.customer].filter(Boolean).map(escape).join(' · ');
+      const header = `<div class="modal-context">${icon('calendar',16)}<strong>${escape(modal.date)}</strong><span>${info}</span></div>`;
+      const totals = archived.settlement ?? quote({ ...state, tickets: [archived] }, archived.id);
+      present(`会計内訳 No. ${archived.number}`, header + receiptBody(archived, totals), null);
+      return;
+    }
     case 'cancel-line': {
       const line = ticket.lines.find((item)=>item.id===modal.lineId);
       present('注文を取り消す',`${headline}<p class="form-copy">${escape(line.name)} ×${line.quantity}（${yen(line.total)}）を取り消します。</p>${line.stockUses.length ? `<label class="inline-check"><input type="checkbox" name="returnStock" ${line.providedAt ? 'disabled' : 'checked'}>未提供で再利用できる在庫を戻す</label>` : ''}`,'注文を取り消す');
@@ -611,6 +644,11 @@ function clickAction(target) {
     render({ preserveFocus: true });
     return;
   }
+  if (action === 'commission-cast') {
+    commissionCast = id === commissionCast ? '' : id ?? '';
+    render({ preserveFocus: true });
+    return;
+  }
   if (action === 'floor-view') {
     const nextArea = area ?? planArea;
     setFloorView(id, nextArea);
@@ -636,7 +674,9 @@ function clickAction(target) {
     return;
   }
   if (action.startsWith('store-editor-') && modal?.editor) {
-    if (handleStoreSettingsEditorAction(dialog, modal.editor, target, { stockDeletionBlocker: checkStockDeletion })) paintDialog();
+    if (handleStoreSettingsEditorAction(dialog, modal.editor, target, {
+      stockDeletionBlocker: checkStockDeletion, catalogDeletionBlocker: checkCatalogDeletion,
+    })) paintDialog();
     return;
   }
   if (action === 'edit-layout') {
@@ -651,6 +691,13 @@ function clickAction(target) {
   if (action === 'hide-detail') { mobileDetails=false; render(); return; }
   if (action === 'dismiss') { dialog.close(); return; }
   if (action === 'open-ticket') { openTicket(id); return; }
+  if (action === 'history-receipt') {
+    const date = target.dataset.date;
+    const archived = state.closedDays.find((day) => day.date === date)?.ticketSnapshots?.find((entry) => entry.id === id);
+    const receipt = archived ?? (date === state.day.date ? state.tickets.find((entry) => entry.id === id) : null);
+    if (receipt && ['paid', 'departed'].includes(receipt.status)) openDialog(action, { receipt, date });
+    return;
+  }
   if (action === 'table') {
     if (state.day.status === 'closed') { openDialog('open'); return; }
     const ticket = getTicketForTable(state,id);
@@ -676,6 +723,7 @@ function clickAction(target) {
     saveState(sample);
     selected = fromOpening ? null : 'a1';
     area=null; filter='all'; showHiddenStock=false; mobileDetails=false;
+    reportDate = ''; commissionCast = '';
     if (!fromOpening) setFloorView('list', getLayoutAreas(state)[0]);
     go('floor');
     if (action==='demo-start') openDialog('open');
@@ -739,8 +787,10 @@ function submitDialog(form) {
     case 'store-settings': {
       if (!commitStoreSettingsEditor(dialog, modal.editor)) return;
       const removeStockIds = [...(modal.editor.removeStockIds ?? [])];
+      const removeMenuIds = [...(modal.editor.removeMenuIds ?? [])];
+      const removeCastIds = [...(modal.editor.removeCastIds ?? [])];
       const settings = structuredClone(modal.editor.settings);
-      commit({ type: 'saveStoreSettings', settings, removeStockIds }, '店舗設定を保存しました。', () => {
+      commit({ type: 'saveStoreSettings', settings, removeStockIds, removeMenuIds, removeCastIds }, '店舗設定を保存しました。', () => {
         showHiddenStock = false;
       });
       break;
@@ -797,7 +847,10 @@ function submitDialog(form) {
       commit({type:'cancelLine',ticketId:id,lineId:modal.lineId,returnStock:data.has('returnStock')},'注文を取り消しました。');
       break;
     case 'close':
-      commit({type:'close',actualCash:numeric('actualCash'),reason:value('reason')},'閉店しました。営業レポートに締めを保存しました。',()=>{selected=null;mobileDetails=false;page='reports';history.replaceState(null,'','#reports');});
+      commit({type:'close',actualCash:numeric('actualCash'),reason:value('reason')},'閉店しました。営業レポートに締めを保存しました。',()=>{
+        selected = null; mobileDetails = false; reportDate = ''; commissionCast = '';
+        page = 'reports'; history.replaceState(null, '', '#reports');
+      });
       window.scrollTo(0,0);
       break;
     case 'stock-adjust':
@@ -816,6 +869,12 @@ document.addEventListener('click',(event)=> {
 });
 app.addEventListener('change',(event)=> {
   if (event.target.id==='area-filter') { area=event.target.value || null;render();app.querySelector('#area-filter')?.focus(); }
+  if (event.target.matches('[data-report-date]')) {
+    reportDate = event.target.value;
+    commissionCast = '';
+    render();
+    app.querySelector('[data-report-date]')?.focus({ preventScroll: true });
+  }
 });
 dialog.addEventListener('change', (event) => {
   if (event.target.name === 'layout-file') readStoreFile(event.target);

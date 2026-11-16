@@ -8,6 +8,7 @@ const menuFields = ['id', 'name', 'category', 'price', 'duration', 'enabled', 'p
 const castFields = ['id', 'name', 'initials', 'color', 'enabled'];
 const stockFields = ['id', 'name', 'category', 'unit', 'minimum', 'hidden'];
 const commissionFields = ['fixed', 'rate', 'points'];
+const inUseTicketStatuses = new Set(['open', 'paid']);
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -172,7 +173,38 @@ export function stockDeletionBlocker(state, stockId, menu = state.menu) {
   return '';
 }
 
-export function replaceStoreSettings(state, { menu, cast, stock }, removeStockIds = []) {
+export function catalogDeletionBlocker(state, kind, id, menu = state.menu) {
+  if (kind !== 'menu' && kind !== 'cast') return '削除する設定項目を確認してください。';
+  const item = state[kind].find((entry) => entry.id === id);
+  if (!item) return '削除する設定項目が見つかりません。';
+  const inUse = (state.tickets ?? []).some((ticket) => inUseTicketStatuses.has(ticket.status)
+    && (ticket.lines ?? []).some((line) => line.cancelledAt == null
+      && (kind === 'menu' ? line.menuId === id : line.castIds?.includes(id))));
+  if (inUse) return `「${item.name}」は利用中または退店待ちの伝票にひもづいているため削除できません。`;
+  if (kind === 'menu' && item.category === 'セット'
+    && !menu.some((entry) => entry.id !== id && entry.category === 'セット' && entry.enabled !== false)) {
+    return '利用できる初回セットを1件以上残してください。';
+  }
+  return '';
+}
+
+function verifyCatalogRemovals(state, menu, cast, removeMenuIds, removeCastIds) {
+  for (const [kind, next, requested] of [['menu', menu, removeMenuIds], ['cast', cast, removeCastIds]]) {
+    const currentIds = new Set(state[kind].map(({ id }) => id));
+    const retainedIds = new Set(next.map(({ id }) => id));
+    assert(Array.isArray(requested) && requested.every((id) => currentIds.has(id) && !retainedIds.has(id))
+      && new Set(requested).size === requested.length, '削除する設定項目の指定を確認してください。');
+    for (const id of currentIds) {
+      if (retainedIds.has(id)) continue;
+      const blocker = catalogDeletionBlocker(state, kind, id, menu);
+      assert(!blocker, blocker);
+    }
+  }
+}
+
+export function replaceStoreSettings(state, { menu, cast, stock }, removeStockIds = [], {
+  removeMenuIds = [], removeCastIds = [],
+} = {}) {
   assert(Array.isArray(removeStockIds) && removeStockIds.every((id) => typeof id === 'string')
     && new Set(removeStockIds).size === removeStockIds.length, '削除する在庫品目の指定を確認してください。');
   for (const id of removeStockIds) {
@@ -180,6 +212,7 @@ export function replaceStoreSettings(state, { menu, cast, stock }, removeStockId
     assert(!blocker, blocker);
     assert(!stock?.some((item) => item.id === id), '同じ在庫品目の更新と削除を同時に指定できません。');
   }
+  verifyCatalogRemovals(state, menu, cast, removeMenuIds, removeCastIds);
   const archive = new Map((state.archivedCast ?? []).map((person) => [person.id, person]));
   for (const person of state.cast) archive.set(person.id, projectCast(person));
   for (const person of cast) archive.delete(person.id);
