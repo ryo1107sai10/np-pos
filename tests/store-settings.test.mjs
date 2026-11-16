@@ -37,12 +37,12 @@ test('portable settings serialize authorized setup fields and combine them with 
   const file = exportStoreConfiguration(source);
   assert.deepEqual(Object.keys(file), ['format', 'version', 'layout', 'settings']);
   assert.equal(file.format, 'np-pos.settings');
-  assert.equal(file.version, 1);
+  assert.equal(file.version, 2);
   assert.equal(file.layout.tables[0].name, '正面席');
   assert.ok(file.layout.areas.includes('ラウンジ'));
-  assert.deepEqual(Object.keys(file.settings), ['menu', 'cast']);
+  assert.deepEqual(Object.keys(file.settings), ['menu', 'cast', 'stock']);
   const portable = JSON.stringify(file);
-  assert.doesNotMatch(portable, /"(tickets|customer|cash|movements|stock|openingCash|closedDays|internalCost|stockValue|internalPayroll|closedTotal)"\s*:/);
+  assert.doesNotMatch(portable, /"(tickets|customer|cash|movements|openingCash|closedDays|internalCost|stockValue|internalPayroll|closedTotal)"\s*:/);
   assert.doesNotMatch(portable, /佐藤様|伊藤様/);
   assert.deepEqual(parseStoreConfiguration(`\uFEFF${portable}`), { layout: file.layout, settings: file.settings });
 
@@ -90,7 +90,7 @@ test('invalid settings files fail before changing destination configuration', ()
   const untouched = structuredClone(target);
   const file = exportStoreConfiguration(target);
   assert.throws(() => parseStoreConfiguration('{invalid'), /JSON形式/);
-  assert.throws(() => parseStoreConfiguration(JSON.stringify({ ...file, version: 2 })), /バージョン/);
+  assert.throws(() => parseStoreConfiguration(JSON.stringify({ ...file, version: 3 })), /バージョン/);
   assert.throws(() => parseStoreConfiguration(JSON.stringify({ ...file, settings: {} })), /設定形式/);
   const removedTable = structuredClone(file);
   removedTable.layout.tables = removedTable.layout.tables.filter(({ id }) => id !== 'a1');

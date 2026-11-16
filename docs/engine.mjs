@@ -17,7 +17,7 @@ const newTableId = /^table-[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3
 const layoutFileFormat = 'np-pos.layout';
 const layoutFileVersion = 1;
 const storeFileFormat = 'np-pos.settings';
-const storeFileVersion = 1;
+const storeFileVersion = 2;
 
 function isLayoutPosition(x, y) {
   return Number.isInteger(x) && x >= 0 && x + layoutGrid.tableWidth <= layoutGrid.columns
@@ -70,11 +70,13 @@ export function parseLayoutFile(text) {
   return normalizeLayoutFile(parseSettingsJson(text, '卓配置ファイル'));
 }
 
-function validatedStoreSettings(settings, state) {
+function validatedStoreSettings(settings, state, requireStock = false) {
   return normalizeStoreSettings(settings, {
     menuIds: new Set(menu.map(({ id }) => id)),
     castIds: new Set(cast.map(({ id }) => id)),
-    stockIds: state ? new Set(state.stock.map(({ id }) => id)) : null,
+    stockMasterIds: new Set(stockSeed.map(([id]) => id)),
+    localStockIds: state ? new Set(state.stock.map(({ id }) => id)) : null,
+    requireStock,
   });
 }
 
@@ -89,8 +91,11 @@ export function parseStoreConfiguration(text) {
   const file = parseSettingsJson(text, '店舗設定ファイル');
   if (file?.format === layoutFileFormat) return { layout: normalizeLayoutFile(file), settings: null };
   assert(file?.format === storeFileFormat, 'NP POSの店舗設定ファイルを選択してください。');
-  assert(file.version === storeFileVersion, 'このバージョンの店舗設定ファイルには対応していません。');
-  return { layout: normalizeLayoutFile(file.layout), settings: validatedStoreSettings(file.settings) };
+  const legacy = file.version === 1;
+  assert(legacy || file.version === storeFileVersion, 'このバージョンの店舗設定ファイルには対応していません。');
+  const input = legacy ? { menu: file.settings?.menu, cast: file.settings?.cast } : file.settings;
+  const settings = validatedStoreSettings(input, null, !legacy);
+  return { layout: normalizeLayoutFile(file.layout), settings };
 }
 
 export function yen(amount) {
@@ -274,8 +279,7 @@ function newStockMovement(state, stock, amount, kind, reason, now, ticketId = nu
   const quantity = decimalUnits(stock.quantity) + decimalUnits(amount);
   assert(quantity >= 0, `${stock.name}の在庫が不足しています。`);
   const oldValue = stock.value;
-  let newValue = oldValue + amount * unitCost;
-  if (quantity === 0) newValue = 0;
+  const newValue = quantity === 0 ? 0 : Math.max(0, oldValue + amount * unitCost);
   stock.quantity = quantity / movementScale;
   stock.value = Math.round(newValue * movementScale) / movementScale;
   stock.unitCost = quantity > 0 ? Math.round(stock.value / stock.quantity * movementScale) / movementScale : stock.unitCost;
@@ -371,7 +375,8 @@ function doStockAdjust(state, action, now) {
   assert(units !== 0, '数量の増減を入力してください。');
   const reason = String(action.reason ?? '').trim().slice(0, 120);
   assert(reason.length > 0, '調整理由を入力してください。');
-  newStockMovement(state, stock, units / movementScale, 'adjust', reason, now);
+  const unitCost = units > 0 ? stock.defaultUnitCost ?? stock.unitCost : stock.unitCost;
+  newStockMovement(state, stock, units / movementScale, 'adjust', reason, now, null, null, unitCost);
 }
 
 function layoutName(value, label) {
@@ -764,7 +769,7 @@ export function createDemo(mode = 'live', now = Date.now()) {
     tables: structuredClone(sampleTables),
     tickets: [], menu: structuredClone(menu), cast: structuredClone(cast),
     stock: stockSeed.map(([id, name, category, unit, quantity, minimum, unitCost]) => ({ id, name, category, unit, quantity,
-      minimum, unitCost, value: quantity * unitCost })),
+      minimum, unitCost, value: quantity * unitCost, defaultUnitCost: unitCost })),
     movements: [], closedDays: [], nextId: 1, nextTicket: 101,
   };
   if (mode === 'closed') return state;

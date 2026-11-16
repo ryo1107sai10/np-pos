@@ -2,11 +2,16 @@ const tabs = [
   { id: 'menu', label: 'メニュー', glyph: 'store' },
   { id: 'plans', label: 'セット・延長', glyph: 'clock' },
   { id: 'cast', label: 'キャスト歩合', glyph: 'users' },
+  { id: 'stock', label: '在庫品目', glyph: 'box' },
 ];
 const orderCategories = ['ドリンク', 'ボトル', 'フード', '指名'];
 const surchargeId = 'nominationExtra';
 const priceMax = 100_000_000;
-const nameLimits = { menu: 60, cast: 24 };
+const nameLimits = { menu: 60, cast: 24, stock: 60 };
+const stockUnitLimit = 16;
+const stockMinimumMax = 1_000_000;
+const stockPrecision = 0.000001;
+const stockNumber = new Intl.NumberFormat('ja-JP', { maximumFractionDigits: 6 });
 const commissionFields = [
   { name: 'fixed', label: '固定額（円 / 点）', max: priceMax, step: 1 },
   { name: 'rate', label: '売上歩合（%）', max: 100, step: 0.01 },
@@ -14,8 +19,9 @@ const commissionFields = [
 ];
 
 function visibleItems(editor) {
-  const { menu, cast } = editor.settings;
+  const { menu, cast, stock } = editor.settings;
   if (editor.tab === 'cast') return cast;
+  if (editor.tab === 'stock') return stock;
   return menu.filter((entry) => editor.tab === 'plans'
     ? ['セット', '延長'].includes(entry.category)
     : orderCategories.includes(entry.category));
@@ -25,13 +31,22 @@ function selectedItem(editor, items = visibleItems(editor)) {
   return items.find((entry) => entry.id === editor.selected[editor.tab]) ?? items[0];
 }
 
-function itemRow(item, selected, { escape, icon, yen }) {
+function rowSummary(item, { escape, yen }) {
+  if (item.unit) {
+    const cost = Number.isFinite(item.defaultUnitCost) ? `仕入原価 ¥${stockNumber.format(item.defaultUnitCost)}` : '原価未設定';
+    return `${escape(item.unit)} · 下限 ${stockNumber.format(item.minimum)} · ${cost}`;
+  }
+  if (item.category) {
+    return `${escape(item.category)}${Number.isFinite(item.duration) ? ` · ${item.duration}分` : ''} · ${Number.isFinite(item.price) ? yen(item.price) : '料金未設定'}`;
+  }
+  return Object.keys(item.commissionOverride ?? {}).length ? '個別歩合' : '商品設定に準拠';
+}
+
+function itemRow(item, selected, api) {
+  const { escape, icon } = api;
   const active = item.enabled !== false;
-  const info = item.category
-    ? `${escape(item.category)}${Number.isFinite(item.duration) ? ` · ${item.duration}分` : ''} · ${Number.isFinite(item.price) ? yen(item.price) : '料金未設定'}`
-    : Object.keys(item.commissionOverride ?? {}).length ? '個別歩合' : '商品設定に準拠';
   return `<li><button class="store-editor-row" type="button" data-action="store-editor-select" data-id="${escape(item.id)}" aria-pressed="${item === selected}">
-    <span><strong>${escape(item.name)}</strong><small>${info}</small></span>
+    <span><strong>${escape(item.name)}</strong><small>${rowSummary(item, api)}</small></span>
     ${active ? '' : '<span class="store-editor-off">停止中</span>'}${icon('chevron-right', 14)}</button></li>`;
 }
 
@@ -40,7 +55,7 @@ function addButton(kind, label, icon) {
 }
 
 function itemList(editor, items, selected, api) {
-  const heading = { menu: '商品', plans: '料金プラン', cast: 'キャスト' }[editor.tab];
+  const heading = { menu: '商品', plans: '料金プラン', cast: 'キャスト', stock: '在庫品目' }[editor.tab];
   let additions;
   switch (editor.tab) {
     case 'plans':
@@ -49,6 +64,9 @@ function itemList(editor, items, selected, api) {
       break;
     case 'cast':
       additions = addButton('cast', 'キャストを追加', api.icon);
+      break;
+    case 'stock':
+      additions = addButton('stock', '品目を追加', api.icon);
       break;
     default:
       additions = addButton('menu', '商品を追加', api.icon);
@@ -67,8 +85,8 @@ function itemList(editor, items, selected, api) {
   </section>`;
 }
 
-function textInput(label, value, limit, escape) {
-  return `<label class="field"><span>${label}</span><input name="store-name" type="text" value="${escape(value)}" required maxlength="${limit}" autocomplete="off"></label>`;
+function textInput(label, value, limit, escape, name = 'name') {
+  return `<label class="field"><span>${label}</span><input name="store-${name}" type="text" value="${escape(value)}" required maxlength="${limit}" autocomplete="off"></label>`;
 }
 
 function numberInput(label, name, value, { min = 0, max, step = 1, required = false, placeholder } = {}) {
@@ -105,6 +123,17 @@ function castInspector(person, api) {
     ${toggle('注文の歩合対象に表示する', 'enabled', person.enabled !== false)}`;
 }
 
+function stockInspector(item, { escape }) {
+  return `<h3 id="store-inspector-heading">在庫品目の設定</h3>
+    ${textInput('品目名', item.name, nameLimits.stock, escape)}
+    <div class="store-editor-basic-grid">
+      ${textInput('単位', item.unit, stockUnitLimit, escape, 'unit')}
+      ${numberInput('在庫の下限', 'minimum', item.minimum, { max: stockMinimumMax, step: stockPrecision, required: true })}
+      ${numberInput('仕入原価（円 / 単位）', 'unit-cost', item.defaultUnitCost, { max: priceMax, step: stockPrecision, required: true })}
+    </div>
+    <p class="field-help">補充時は、設定した1単位あたりの原価を使います。単位の変更後も在庫数量やメニューの使用量は同じ数値を引き継ぎます。</p>`;
+}
+
 function menuInspector(item, editor, api) {
   const ordinary = editor.tab === 'menu';
   const surcharge = item.id === surchargeId;
@@ -122,22 +151,33 @@ function menuInspector(item, editor, api) {
     ${ordinary || surcharge ? `<details class="store-editor-advanced"><summary>${api.icon('users', 16)}<span>商品の標準歩合</span>${api.icon('chevron-down', 14)}</summary>
     <div class="store-editor-advanced-body">${commissionInputs(item.commission)}
     ${ordinary ? toggle('注文時にキャストの選択を必須にする', 'required-cast', item.requiresCast) : ''}</div></details>` : ''}
-    ${ordinary ? stockInputs(item, api.stock, api) : ''}`;
+    ${ordinary ? stockInputs(item, editor.settings.stock, api) : ''}`;
+}
+
+function itemInspector(selected, editor, api) {
+  if (editor.tab === 'stock') return stockInspector(selected, api);
+  if (editor.tab === 'cast') return castInspector(selected, api);
+  return menuInspector(selected, editor, api);
 }
 
 export function renderStoreSettingsEditor(editor, api) {
   const items = visibleItems(editor);
   const selected = selectedItem(editor, items);
-  const inspector = selected && (editor.tab === 'cast' ? castInspector(selected, api) : menuInspector(selected, editor, api));
+  const inspector = selected && itemInspector(selected, editor, api);
+  const note = editor.tab === 'stock' ? '品目を追加したら、メニューの「在庫連動」で1点あたりの使用量を指定できます。'
+    : '料金と歩合は、保存後の新しい注文明細に適用されます。';
   const discard = selected && editor.additions?.has(selected.id) ? `<button type="button" class="btn btn-quiet store-editor-discard"
     data-action="store-editor-discard-new" data-id="${escape(selected.id)}">${api.icon('x', 15)}追加を取り消す</button>` : '';
+  const linked = discard && editor.tab === 'stock'
+    && editor.settings.menu.some((item) => item.recipe?.some(({ stockId }) => stockId === selected.id));
   return `<div class="store-editor">
     <div class="store-editor-tabs" role="group" aria-label="設定の種類">${tabs.map(({ id, label, glyph }) =>
       `<button type="button" data-action="store-editor-tab" data-id="${id}" aria-pressed="${id === editor.tab}">${api.icon(glyph, 15)}<span>${label}</span></button>`).join('')}</div>
-    <p class="form-copy store-editor-note">料金と歩合は、保存後の新しい注文明細に適用されます。</p>
+    <p class="form-copy store-editor-note">${note}</p>
     <div class="store-editor-main">
       ${itemList(editor, items, selected, api)}
-      ${inspector ? `<section class="store-editor-inspector" aria-labelledby="store-inspector-heading">${inspector}${discard}</section>` : ''}
+      ${inspector ? `<section class="store-editor-inspector" aria-labelledby="store-inspector-heading">${inspector}${discard}
+        ${linked ? '<p class="field-help">追加を取り消すと、この品目とのメニュー連動も取り消します。</p>' : ''}</section>` : ''}
     </div>
   </div>`;
 }
@@ -183,12 +223,16 @@ export function commitStoreSettingsEditor(dialog, editor) {
   if (!entry) return true;
   const read = (field) => dialog.querySelector(`[name="store-${field}"]`);
   const name = read('name').value.trim().normalize('NFC');
+  const unitInput = read('unit');
+  const unit = unitInput?.value.trim().normalize('NFC');
   const error = dialog.querySelector('.form-error');
   error.hidden = true;
-  if (!name || /[\p{Cc}\u2028\u2029]/u.test(name)) {
-    error.textContent = '名前を入力してください。';
+  const invalidText = !name || /[\p{Cc}\u2028\u2029]/u.test(name) ? read('name')
+    : unitInput && (!unit || /[\p{Cc}\u2028\u2029]/u.test(unit)) ? unitInput : null;
+  if (invalidText) {
+    error.textContent = invalidText === unitInput ? '単位を入力してください。' : '名前を入力してください。';
     error.hidden = false;
-    read('name').focus();
+    invalidText.focus();
     return false;
   }
   const invalid = dialog.querySelector('.store-editor-inspector input:invalid, .store-editor-inspector select:invalid');
@@ -197,6 +241,13 @@ export function commitStoreSettingsEditor(dialog, editor) {
     if (details) details.open = true;
     invalid.reportValidity();
     return false;
+  }
+  if (editor.tab === 'stock') {
+    entry.name = name;
+    entry.unit = unit;
+    entry.minimum = read('minimum').valueAsNumber;
+    entry.defaultUnitCost = read('unit-cost').valueAsNumber;
+    return true;
   }
   if (read('enabled').checked) delete entry.enabled;
   else entry.enabled = false;
@@ -223,6 +274,12 @@ function newItem(editor, kind) {
     const person = { id: `cast-${crypto.randomUUID()}`, name, initials: '新', color: 'violet' };
     editor.settings.cast.push(person);
     return person;
+  }
+  if (kind === 'stock') {
+    const name = availableName('新しい在庫品目', editor.settings.stock);
+    const item = { id: `stock-${crypto.randomUUID()}`, name, category: 'その他', unit: '個', minimum: 0 };
+    editor.settings.stock.push(item);
+    return item;
   }
   const defaults = {
     menu: { name: '新しい商品', category: 'ドリンク' },
@@ -283,8 +340,16 @@ export function handleStoreSettingsEditorAction(dialog, editor, target) {
     }
     case 'store-editor-discard-new': {
       if (!editor.additions?.delete(id)) return false;
-      const key = editor.tab === 'cast' ? 'cast' : 'menu';
+      const key = editor.tab === 'plans' ? 'menu' : editor.tab;
       editor.settings[key] = editor.settings[key].filter((item) => item.id !== id);
+      if (key === 'stock') {
+        for (const item of editor.settings.menu) {
+          if (!item.recipe?.some(({ stockId }) => stockId === id)) continue;
+          const recipe = item.recipe.filter(({ stockId }) => stockId !== id);
+          if (recipe.length) item.recipe = recipe;
+          else delete item.recipe;
+        }
+      }
       delete editor.selected[editor.tab];
       break;
     }

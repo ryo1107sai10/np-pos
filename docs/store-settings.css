@@ -25,7 +25,7 @@
 
 .store-editor-tabs {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 4px;
   padding: 4px;
   border: 1px solid #e0deee;
@@ -323,8 +323,13 @@
   .store-editor-list { max-block-size: min(21dvh, 165px); }
 }
 
-@media (max-width: 370px) {
+@media (max-width: 500px) {
   .store-editor-tabs button { font-size: 12px; }
   .store-editor-tabs .icon { display: none; }
+}
+
+@media (max-width: 370px) {
+  .store-editor-tabs { gap: 2px; }
+  .store-editor-tabs button { padding-inline: 1px; font-size: 11px; }
   .store-editor-commission-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

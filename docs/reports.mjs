@@ -7,6 +7,7 @@ const formatTime = new Intl.DateTimeFormat('ja-JP', {
   hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'Asia/Tokyo',
 });
 const number = new Intl.NumberFormat('ja-JP', {maximumFractionDigits: 3});
+const stockNumber = new Intl.NumberFormat('ja-JP', {maximumFractionDigits: 6});
 const asNumber = (value) => Number(value) || 0;
 const byId = (items) => new Map(items.map((item) => [item.id, item]));
 const total = (items, field) => items.reduce((sum, item) => sum + asNumber(item[field]), 0);
@@ -27,7 +28,7 @@ function timeLabel(value) {
 
 function signedQuantity(value) {
   const quantity = asNumber(value);
-  return `${quantity > 0 ? '+' : quantity < 0 ? '−' : ''}${number.format(Math.abs(quantity))}`;
+  return `${quantity > 0 ? '+' : quantity < 0 ? '−' : ''}${stockNumber.format(Math.abs(quantity))}`;
 }
 
 function stat({icon}, glyph, label, value, tone = '') {
@@ -111,35 +112,40 @@ function renderCommission(state, api, result) {
       : empty(api, 'ticket', '確定歩合はまだありません', '歩合対象の注文を含む伝票の会計を確定すると表示されます。'), panelCount(details.length, '件'))}</div>`;
 }
 
-function renderStock(state, api, result) {
+function renderStock(state, api) {
   const {yen, escape, icon} = api;
   const names = byId(state.stock);
   const tickets = byId(state.tickets);
   const low = state.stock.filter(({quantity, minimum}) => quantity <= minimum);
+  const valuation = (item) => item.value ?? item.quantity * asNumber(item.unitCost);
   const rows = state.stock.map((item) => {
     const isLow = item.quantity <= item.minimum;
-    return `<tr><td><strong>${escape(item.name)}</strong></td><td class="lr-numeric"><span class="lr-mobile-label" aria-hidden="true">現在庫</span><strong>${number.format(item.quantity)}</strong><span class="lr-unit"> ${escape(item.unit)}</span></td>
-      <td class="lr-numeric lr-muted"><span class="lr-mobile-label" aria-hidden="true">下限</span>${number.format(item.minimum)} ${escape(item.unit)}</td>
-      <td class="lr-numeric"><span class="lr-mobile-label" aria-hidden="true">評価額</span>${yen(Math.round(item.quantity * asNumber(item.unitCost)))}</td>
-      <td><span class="lr-badge${isLow ? ' lr-badge-warning' : ''}">${isLow ? '残りわずか' : '在庫あり'}</span></td>
+    const status = item.quantity === 0 ? '在庫なし' : isLow ? '残りわずか' : '在庫あり';
+    const restockCost = stockNumber.format(item.defaultUnitCost ?? item.unitCost);
+    const unit = escape(item.unit);
+    return `<tr><td><strong>${escape(item.name)}</strong></td><td class="lr-numeric"><span class="lr-mobile-label" aria-hidden="true">現在庫</span><strong>${stockNumber.format(item.quantity)}</strong><span class="lr-unit"> ${unit}</span></td>
+      <td class="lr-numeric lr-muted"><span class="lr-mobile-label" aria-hidden="true">下限</span>${stockNumber.format(item.minimum)} ${unit}</td>
+      <td class="lr-numeric"><span class="lr-mobile-label" aria-hidden="true">仕入原価</span>¥${restockCost}<span class="lr-unit"> / ${unit}</span></td>
+      <td class="lr-numeric"><span class="lr-mobile-label" aria-hidden="true">評価額</span>${yen(Math.round(valuation(item)))}</td>
+      <td><span class="lr-badge${isLow ? ' lr-badge-warning' : ''}">${status}</span></td>
       <td><button class="lr-link lr-adjust" type="button" data-action="stock-adjust" data-id="${escape(item.id)}" aria-label="${escape(item.name)}の在庫を調整">${icon('plus', 15)}調整</button></td></tr>`;
   });
   const movements = (state.movements || []).slice().sort((a, b) => asNumber(b.at) - asNumber(a.at));
   const movementRows = movements.map((entry) => {
     const item = names.get(entry.stockId);
     const labels = {order: '注文出庫', return: '戻し入れ', adjust: '在庫調整'};
-    return `<tr><td class="lr-muted lr-numeric">${timeLabel(entry.at)}</td><td><strong>${escape(item?.name || entry.stockId)}</strong></td>
+    return `<tr><td class="lr-muted lr-numeric">${timeLabel(entry.at)}</td><td><strong>${escape(entry.stockName ?? item?.name ?? entry.stockId)}</strong></td>
       <td>${escape(labels[entry.kind] || '入出庫')}${entry.reason ? `<span class="lr-row-note">${escape(entry.reason)}</span>` : ''}</td>
-      <td class="lr-numeric ${entry.quantity > 0 ? 'lr-positive' : ''}">${signedQuantity(entry.quantity)}<span class="lr-unit"> ${escape(item?.unit || '')}</span></td>
+      <td class="lr-numeric ${entry.quantity > 0 ? 'lr-positive' : ''}">${signedQuantity(entry.quantity)}<span class="lr-unit"> ${escape(entry.unit ?? item?.unit ?? '')}</span></td>
       <td>${ticketLink(tickets.get(entry.ticketId), api)}</td></tr>`;
   });
-  const stockValue = state.stock.reduce((sum, item) => sum + asNumber(item.quantity) * asNumber(item.unitCost), 0);
+  const stockValue = state.stock.reduce((sum, item) => sum + valuation(item), 0);
   return `<div class="lr-view"><div class="lr-stats">
     ${stat(api, 'box', '管理品目', `${state.stock.length}<small> 品目</small>`)}
     ${stat(api, 'alert', '下限に達した品目', `${low.length}<small> 品目</small>`, low.length ? 'warning' : '')}
     ${stat(api, 'wallet', '現在庫評価額', yen(Math.round(stockValue)), 'accent')}
-    </div>${panel('在庫残高', table(api, ['品目', '現在庫', '下限', '評価額', '在庫状態', '操作'], rows, 'lr-stock-table'))}
-    ${panel('在庫の入出庫履歴', movementRows.length ? table(api, ['時刻', '品目', '種別', '増減', '伝票'], movementRows)
+    </div>${panel('在庫残高', table(api, ['品目', '現在庫', '下限', '仕入原価', '評価額', '在庫状態', '操作'], rows, 'lr-stock-table'))}
+    ${panel('在庫の入出庫履歴', movementRows.length ? table(api, ['時刻', '品目', '種別', '増減', '伝票'], movementRows, 'lr-stock-history')
       : empty(api, 'history', '入出庫の記録はまだありません', '在庫連動のメニューを注文すると、出庫がここに表示されます。'), panelCount(movementRows.length, '件'))}</div>`;
 }
 
@@ -183,6 +189,6 @@ function renderDaily(state, api, result) {
 export function renderReport(page, state, api) {
   const result = api.summary(state);
   if (page === 'commission') return renderCommission(state, api, result);
-  if (page === 'stock') return renderStock(state, api, result);
+  if (page === 'stock') return renderStock(state, api);
   return renderDaily(state, api, result);
 }

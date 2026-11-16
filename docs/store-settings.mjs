@@ -1,11 +1,12 @@
 const orderCategories = new Set(['ドリンク', 'ボトル', 'フード', '指名']);
 const menuCategories = new Set(['セット', '延長', ...orderCategories]);
 const castColors = new Set(['violet', 'rose', 'sky', 'green', 'amber']);
-const generatedId = /^(menu|cast)-[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
+const generatedId = /^(menu|cast|stock)-[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 const stockIdPattern = /^[a-zA-Z0-9_-]+$/;
 const menuFields = ['id', 'name', 'category', 'price', 'duration', 'enabled', 'popular', 'requiresCast',
   'taxRate', 'serviceEligible'];
 const castFields = ['id', 'name', 'initials', 'color', 'enabled'];
+const stockFields = ['id', 'name', 'category', 'unit', 'minimum'];
 const commissionFields = ['fixed', 'rate', 'points'];
 
 function assert(condition, message) {
@@ -38,7 +39,14 @@ function projectCast(person) {
 }
 
 export function getStoreSettings(state) {
-  return { menu: state.menu.map(projectMenu), cast: state.cast.map(projectCast) };
+  return {
+    menu: state.menu.map(projectMenu),
+    cast: state.cast.map(projectCast),
+    stock: state.stock.map((item) => ({
+      ...pick(item, stockFields),
+      defaultUnitCost: item.defaultUnitCost ?? item.unitCost,
+    })),
+  };
 }
 
 function validateId(id, kind, builtIn, label) {
@@ -116,23 +124,51 @@ function normalizeCast(person, { castIds }) {
   return { ...projectCast(person), name, initials: [...name][0], color: person.color ?? 'violet' };
 }
 
-export function normalizeStoreSettings(settings, options) {
+function normalizeStock(item, stockMasterIds) {
+  assert(isRecord(item), '在庫品目の形式を確認してください。');
+  validateId(item.id, 'stock', stockMasterIds, '在庫品目');
+  const name = normalizeName(item.name, 60, '品目名');
+  const category = normalizeName(item.category === undefined ? 'その他' : item.category, 24, `「${name}」の分類名`);
+  const unit = normalizeName(item.unit, 16, `「${name}」の単位`);
+  assert(isAmount(item.minimum, 0, 1_000_000, 1_000_000),
+    `「${name}」の下限は0以上の数値を小数第6位まで入力してください。`);
+  assert(isAmount(item.defaultUnitCost, 0, 100_000_000, 1_000_000),
+    `「${name}」の仕入原価は0円以上の数値を小数第6位まで入力してください。`);
+  return { id: item.id, name, category, unit, minimum: item.minimum, defaultUnitCost: item.defaultUnitCost };
+}
+
+export function normalizeStoreSettings(settings, { menuIds, castIds, stockMasterIds, localStockIds, requireStock }) {
   assert(isRecord(settings) && Array.isArray(settings.menu) && Array.isArray(settings.cast),
     'メニューとキャストの設定形式を確認してください。');
-  const menu = settings.menu.map((item) => normalizeMenu(item, options));
-  const cast = settings.cast.map((person) => normalizeCast(person, options));
+  assert(Array.isArray(settings.stock) || (!requireStock && settings.stock === undefined),
+    '在庫品目の設定形式を確認してください。');
+  const stock = settings.stock?.map((item) => normalizeStock(item, stockMasterIds));
+  const importedIds = stock?.map(({ id }) => id) ?? [];
+  assert(new Set(importedIds).size === importedIds.length, '同じ在庫品目IDが重複しています。');
+  const stockIds = stock || localStockIds ? new Set([...(localStockIds ?? []), ...importedIds]) : null;
+  const menu = settings.menu.map((item) => normalizeMenu(item, { menuIds, stockIds }));
+  const cast = settings.cast.map((person) => normalizeCast(person, { castIds }));
   assert(new Set(menu.map(({ id }) => id)).size === menu.length, '同じメニューIDが重複しています。');
   assert(new Set(cast.map(({ id }) => id)).size === cast.length, '同じキャストIDが重複しています。');
   assert(menu.some((item) => item.category === 'セット' && item.enabled !== false),
     '利用できる初回セットを1件以上設定してください。');
-  return { menu, cast };
+  return stock ? { menu, cast, stock } : { menu, cast };
 }
 
-export function replaceStoreSettings(state, { menu, cast }) {
+export function replaceStoreSettings(state, { menu, cast, stock }) {
   const archive = new Map((state.archivedCast ?? []).map((person) => [person.id, person]));
   for (const person of state.cast) archive.set(person.id, projectCast(person));
   for (const person of cast) archive.delete(person.id);
   if (archive.size || state.archivedCast) state.archivedCast = [...archive.values()];
   state.menu = menu;
   state.cast = cast;
+  if (!stock) return;
+  const existingStock = new Map(state.stock.map((item) => [item.id, item]));
+  for (const item of stock) {
+    const existing = existingStock.get(item.id);
+    existingStock.set(item.id, existing ? { ...existing, ...item } : {
+      ...item, quantity: 0, unitCost: item.defaultUnitCost, value: 0,
+    });
+  }
+  state.stock = [...existingStock.values()];
 }

@@ -7,6 +7,7 @@ function previewConfiguration({ layout, settings }, fileName, escape, icon) {
     const extensions = settings.menu.filter((item) => item.category === '延長').length;
     totals.push(['メニュー', settings.menu.length - sets - extensions], ['キャスト', settings.cast.length],
       ['セット', sets], ['延長料金', extensions]);
+    if (settings.stock) totals.push(['在庫品目', settings.stock.length]);
   }
 
   return `<section class="layout-transfer-preview" aria-labelledby="layout-transfer-preview-heading" aria-live="polite">
@@ -34,7 +35,7 @@ export function renderLayoutTransfer({ fileName, configuration, error, loading, 
     <section class="layout-transfer-export" aria-labelledby="layout-transfer-export-heading">
       <span class="layout-transfer-icon layout-transfer-icon-download">${icon('arrow-right', 18)}</span>
       <div class="layout-transfer-export-copy"><h3 id="layout-transfer-export-heading">書き出し</h3>
-      <p>メニュー・料金・キャスト歩合と卓レイアウトを一つのファイルに保存します。</p></div>
+      <p>メニュー・料金・歩合・在庫品目と卓レイアウトを一つのファイルに保存します。</p></div>
       <button type="button" class="btn btn-secondary layout-transfer-export-button" data-action="layout-export">設定を書き出す</button>
     </section>
     <section class="layout-transfer-import" aria-labelledby="layout-transfer-import-heading">
@@ -45,7 +46,7 @@ export function renderLayoutTransfer({ fileName, configuration, error, loading, 
       <label class="layout-transfer-file-label" for="layout-transfer-file">設定ファイル</label>
       <input type="file" class="layout-transfer-file" id="layout-transfer-file" name="layout-file" accept=".json,application/json" aria-describedby="layout-transfer-file-help${error && !loading ? ' layout-transfer-error' : ''}"${error && !loading ? ' aria-invalid="true"' : ''}>
       <div class="layout-transfer-result">${result}</div>
-      ${configuration && !error && !loading ? `<p class="layout-transfer-replace">読み込むと、この端末の${configuration.settings ? '店舗設定と卓配置' : '卓配置'}が置き換わります。</p>` : ''}
+      ${configuration && !error && !loading ? `<p class="layout-transfer-replace">この端末の${configuration.settings ? '店舗設定と卓配置' : '卓配置'}を更新します。${configuration.settings?.stock ? '在庫数はこの端末の記録を引き継ぎます。' : ''}</p>` : ''}
     </section>
     ${fresh ? `<p class="layout-transfer-fresh">${icon('info', 16)}<span>初回は開店前の状態から始めます。</span></p>` : ''}
   </div>`;

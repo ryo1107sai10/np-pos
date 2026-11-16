@@ -25,7 +25,7 @@ const methods = { cash: '現金', card: 'カード', qr: 'QR決済' };
 const categories = ['よく使う', 'ドリンク', 'ボトル', 'フード', '指名'];
 const dateTime = new Intl.DateTimeFormat('ja-JP', { timeZone: 'Asia/Tokyo', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
 const prettyDate = new Intl.DateTimeFormat('ja-JP', { timeZone: 'Asia/Tokyo', month: 'long', day: 'numeric', weekday: 'short' });
-const number = new Intl.NumberFormat('ja-JP', { maximumFractionDigits: 3 });
+const number = new Intl.NumberFormat('ja-JP', { maximumFractionDigits: 6 });
 
 let state = loadState();
 let page = readPage();
@@ -168,7 +168,8 @@ function renderTop() {
   const date = prettyDate.format(new Date(`${state.day.date}T12:00:00+09:00`));
   return `<div class="workspace-top"><div class="open-meta"><span class="workspace-store">${icon('store',15)}<span class="store-label">銀座店</span><span class="mobile-wordmark"><img src="np-pos.svg" width="20" height="20" alt="">NP POS</span></span><span class="meta-sep"></span>${icon('calendar',16)}<span>${date} 営業日</span></div><div class="workspace-time"><span class="live ${isOpen ? '' : 'closed'}"><span class="dot"></span>${isOpen ? '営業中' : '営業時間外'}</span><span class="meta-sep"></span><time id="workspace-time">${dateTime.format(Date.now())}</time><span>JST</span></div></div>
     <header class="page-head"><div><h1>${pages[page].title}</h1><p>${pages[page].help}</p></div><div class="actions">
-    ${page === 'floor' ? (isOpen ? button('閉店処理','close',{ glyph: 'checkout' }) + button('来店登録','seat',{ glyph: 'plus', tone: 'primary', disabled: state.tables.length === 0 }) : button('開店する','open',{ glyph: 'power', tone: 'primary' })) : ''}</div></header>`;
+    ${page === 'floor' ? (isOpen ? button('閉店処理','close',{ glyph: 'checkout' }) + button('来店登録','seat',{ glyph: 'plus', tone: 'primary', disabled: state.tables.length === 0 }) : button('開店する','open',{ glyph: 'power', tone: 'primary' })) : ''}
+    ${page === 'stock' ? button('品目設定', 'stock-settings', { glyph: 'settings' }) : ''}</div></header>`;
 }
 
 function renderMetrics() {
@@ -420,7 +421,7 @@ function paintDialog(layoutFileInput) {
       return;
     }
     case 'store-settings':
-      present('店舗設定', renderStoreSettingsEditor(modal.editor, { escape, icon, stock: state.stock, yen }),
+      present('店舗設定', renderStoreSettingsEditor(modal.editor, { escape, icon, yen }),
         '店舗設定を保存', { style: 'store-settings-dialog' });
       dialog.querySelector('#submit-dialog').formNoValidate = true;
       return;
@@ -498,7 +499,8 @@ function paintDialog(layoutFileInput) {
     }
     case 'stock-adjust': {
       const stock = state.stock.find((item)=>item.id===modal.stockId);
-      present('在庫を調整',`<p class="form-copy">${escape(stock.name)} · 現在庫 <strong>${number.format(stock.quantity)}${escape(stock.unit)}</strong></p><div class="form-grid">${label(`数量の増減（${escape(stock.unit)}）`,'<input name="quantity" type="number" step="0.001" required placeholder="例 2 または -0.5">')}${label('調整理由','<input name="reason" required maxlength="120" placeholder="例　仕入れ、棚卸差異">')}</div>`,'調整を確定');
+      const cost = number.format(stock.defaultUnitCost ?? stock.unitCost);
+      present('在庫を調整',`<p class="form-copy">${escape(stock.name)} · 現在庫 <strong>${number.format(stock.quantity)}${escape(stock.unit)}</strong></p><div class="form-grid">${label(`数量の増減（${escape(stock.unit)}）`,'<input name="quantity" type="number" step="0.000001" required placeholder="例 2 または -0.5">')}${label('調整理由','<input name="reason" required maxlength="120" placeholder="例　仕入れ、棚卸差異">')}</div><p class="field-help">在庫を増やすと、仕入原価 ¥${cost} / ${escape(stock.unit)}で記録します。</p>`,'調整を確定');
       return;
     }
   }
@@ -608,8 +610,9 @@ function clickAction(target) {
     return;
   }
   if (action === 'layout-export') { exportStoreFile(); return; }
-  if (action === 'store-settings') {
-    openDialog(action, { editor: { settings: getStoreSettings(state), tab: 'menu', selected: {} } });
+  if (action === 'store-settings' || action === 'stock-settings') {
+    const tab = action === 'stock-settings' ? 'stock' : 'menu';
+    openDialog('store-settings', { editor: { settings: getStoreSettings(state), tab, selected: {} } });
     return;
   }
   if (action.startsWith('store-editor-') && modal?.editor) {
@@ -641,12 +644,12 @@ function clickAction(target) {
   if (['demo','open','seat','close'].includes(action)) {openDialog(action); return;}
   if (action === 'demo-start' || action === 'demo-live') {
     const fromOpening = action === 'demo-start';
-    const sample = createDemo(fromOpening ? 'closed' : 'live');
+    let sample = createDemo(fromOpening ? 'closed' : 'live');
     if (fromOpening) {
       sample.tables = structuredClone(state.tables);
       sample.layoutAreas = getLayoutAreas(state);
       sample.archivedTables = structuredClone(state.archivedTables ?? []);
-      Object.assign(sample, getStoreSettings(state));
+      sample = apply(sample, { type: 'saveStoreSettings', settings: getStoreSettings(state) });
     }
     saveState(sample);
     selected = fromOpening ? null : 'a1';
