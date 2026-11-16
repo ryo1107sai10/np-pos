@@ -1,6 +1,10 @@
 const inputKeys = new Set(['hourlyPay','commission','pointPay','baseGross','minutes','points','number']);
 const operators = new Set(['+','-','*','/']);
 export const advancedPayrollBases = new Set(['formula','threshold','progressive']);
+export const payrollActualNames = Object.freeze({
+  personalSales:'確定した個人売上（円）',workdays:'勤務日数',lateDays:'遅刻日数',absenceDays:'欠勤日数',noShowDays:'無断欠勤日数',
+});
+export const payrollLineMetrics = Object.freeze({quantity:'数量',sales:'個人売上（円）',commission:'確定歩合（円）',points:'ポイント'});
 export class PayrollFormulaError extends Error {}
 
 function check(condition, message) {
@@ -12,8 +16,36 @@ function isNumber(value) {
     && Math.abs(Math.round(value * 10_000) - value * 10_000) < 0.01;
 }
 
+export function payrollLineKey(kind,metric,id) {
+  try { return `${kind}:${metric}:${encodeURIComponent(id)}`; }
+  catch { return null; }
+}
+
+export function parsePayrollActualKey(key) {
+  if (typeof key !== 'string') return null;
+  if (Object.hasOwn(payrollActualNames,key)) return {kind:'summary',id:key};
+  const match = /^(menu|category):(quantity|sales|commission|points):([^:]{1,1152})$/.exec(key);
+  if (!match) return null;
+  const [,kind,metric,encoded] = match;
+  try {
+    const id = decodeURIComponent(encoded);
+    return id.length <= (kind === 'menu' ? 128 : 24) && id.trim() === id
+      && !/[\p{Cc}\u2028\u2029]/u.test(id) && payrollLineKey(kind,metric,id) === key ? {kind,metric,id} : null;
+  } catch { return null; }
+}
+
+export function usedPayrollActualKeys(rules) {
+  return [...new Set(rules.flatMap(({basis,left,right}) => advancedPayrollBases.has(basis)
+    ? [left,...(basis === 'formula' ? [right] : [])] : []).filter(parsePayrollActualKey))];
+}
+
+export function isPayrollActualValue(value) {
+  return typeof value === 'number' && Number.isSafeInteger(Math.round(value * 10_000))
+    && Math.abs(Math.round(value * 10_000) - value * 10_000) < 0.01;
+}
+
 function validateKey(key,index) {
-  if (inputKeys.has(key)) return true;
+  if (inputKeys.has(key) || parsePayrollActualKey(key)) return true;
   if (typeof key !== 'string') return false;
   if (/^var:[A-Za-z0-9-]{1,128}$/.test(key)) return true;
   return /^item:\d{1,2}$/.test(key) && Number(key.slice(5)) < index;
@@ -46,6 +78,10 @@ function operand(key, constant, previous, context) {
   if (key.startsWith('var:')) {
     check(Object.hasOwn(context.variables,key.slice(4)),'給与の個人別変数を登録してください。');
     return context.variables[key.slice(4)];
+  }
+  if (parsePayrollActualKey(key)) {
+    check(context.actuals && Object.hasOwn(context.actuals,key),'給与の実績値を確認してください。');
+    return context.actuals[key];
   }
   return context[key];
 }
@@ -123,9 +159,20 @@ export function savePayrollVariables(state,action,allocateId) {
   state.payroll.variables = rows;
 }
 
-export function normalizeFormulaContext(state) {
+export function normalizeFormulaContext(state,rules = []) {
   check(state && typeof state.variables === 'object' && state.variables && !Array.isArray(state.variables)
     && Object.entries(state.variables).every(([key,value])=>/^[A-Za-z0-9-]{1,128}$/.test(key) && isNumber(value)),
   '確定済みの給与計算値を確認してください。');
-  return {variables:Object.fromEntries(Object.entries(state.variables))};
+  const context = {variables:Object.fromEntries(Object.entries(state.variables))};
+  const keys = usedPayrollActualKeys(rules);
+  if (!keys.length) return context;
+  const {actuals,actualLabels} = state;
+  const matching = (object) => object && typeof object === 'object' && !Array.isArray(object)
+    && Object.keys(object).length === keys.length && keys.every((key) => Object.hasOwn(object,key));
+  check(matching(actuals) && matching(actualLabels)
+    && keys.every((key) => isPayrollActualValue(actuals[key]) && (key === 'personalSales' || actuals[key] >= 0)
+      && typeof actualLabels[key] === 'string' && actualLabels[key].trim() && actualLabels[key].length <= 160),
+  '確定済みの給与実績値を確認してください。');
+  return {...context,actuals:Object.fromEntries(keys.map((key)=>[key,actuals[key]])),
+    actualLabels:Object.fromEntries(keys.map((key)=>[key,actualLabels[key]]))};
 }

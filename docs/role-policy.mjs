@@ -34,7 +34,8 @@ const groups = {
   customers:{
     title:'顧客管理', detail:'来店時の顧客選択、顧客情報と履歴の閲覧・登録',
     commands:['setTicketCustomer','setTicketCompanion','saveCustomer','recoverReceivable'],
-    actions:['ticket-customer','ticket-companions','save-ticket-companion','customer-new','customer-detail','customer-edit','customer-visit'],
+    actions:['ticket-customer','ticket-companions','save-ticket-companion','customer-new','customer-detail','customer-edit','customer-visit',
+      'customer-anniversary-add','customer-anniversary-remove'],
     pages:['customers'],
   },
   inventory:{
@@ -77,7 +78,8 @@ const permissions = {
   voidTickets:{title:'使用中の伝票取消',commands:['void'],actions:['void']},
   printing:groups.printing,
   customers:{...groups.customers,commands:['setTicketCustomer','setTicketCompanion','saveCustomer','recoverReceivable']},
-  editCustomers:{title:'顧客情報の登録・編集',commands:['saveCustomer'],actions:['customer-new','customer-edit']},
+  editCustomers:{title:'顧客情報の登録・編集',commands:['saveCustomer'],actions:['customer-new','customer-edit',
+    'customer-anniversary-add','customer-anniversary-remove']},
   inventory:{...groups.inventory,commands:[],actions:['stock-history','stock-ticket','stock-barcode-search']},
   editInventory:{title:'入出庫・棚卸',commands:groups.inventory.commands,actions:['stock-adjust','stocktake','stock-cancel-purchase']},
   reports:{...groups.reports,commands:['recoverReceivable'],actions:groups.reports.actions.filter((action) =>

@@ -51,6 +51,8 @@ const valueLabels = {
   personalSalesMode:'値引きの個人売上への反映', ...personalSalesDiscountModes,
   calculationSettings:'会計の計算設定', serviceRateBps:'サービス料率', serviceRounding:'サービス料の端数',
   taxRounding:'消費税の端数', serviceBase:'サービス料の計算基準', priceMode:'メニュー価格',
+  allowOrderServiceExclusion:'注文明細ごとのサービス料除外', serviceExcluded:'サービス料対象外',
+  serviceExclusionReason:'サービス料の除外理由',
   beforeDiscount:'値引き前',afterDiscount:'値引き後',exclusive:'税抜価格',inclusive:'税込価格',
   floor:'切り捨て',round:'四捨五入',ceil:'切り上げ',
   amount: '金額', total: '合計', subtotal: '小計', discount: '値引き額', status: '状態', payments: '支払い',

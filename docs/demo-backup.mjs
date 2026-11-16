@@ -4,6 +4,7 @@ import { validateCastAttendanceSnapshot } from './cast-self.mjs';
 import { validateShiftsSnapshot } from './shifts.mjs';
 import { normalizeRolePolicy } from './role-policy.mjs';
 import { normalizeStaffLabor } from './labor-workspace.mjs';
+import { isCustomerAnniversaries } from './customers.mjs';
 
 const format = 'np-pos.demo-backup';
 export const demoBackupMaxBytes = 12 * 1024 * 1024;
@@ -24,6 +25,7 @@ function validateDemoSnapshot(state) {
       state[key] === undefined || identified(state[key]))) throw new Error(invalid);
   try {
     if (new Set(state.closedDays.map(({date})=>date)).size !== state.closedDays.length) throw new Error(invalid);
+    if (state.customers?.some(({anniversaries})=>!isCustomerAnniversaries(anniversaries))) throw new Error(invalid);
     parseStoreConfiguration(JSON.stringify(exportStoreConfiguration(state)));
     if (state.rolePolicy !== undefined) normalizeRolePolicy(state.rolePolicy);
     if (state.staffLabor !== undefined) normalizeStaffLabor(state.staffLabor);

@@ -1,5 +1,5 @@
 import { addCardFeeTax, canWaivePaymentFee, depositGrossAmount, getDepositPaymentTerms, getPaymentFeeGroups, normalizeCardFeeSettings } from './card-fee.mjs';
-import { calculationTaxGroup, defaultItemTaxRateBps, getCalculationSettings, getTicketCalculationSettings,
+import { calculationTaxGroup, canExcludeOrderService, defaultItemTaxRateBps, getCalculationSettings, getTicketCalculationSettings,
   normalizeCalculationSettings, roundCalculationRate } from './calculation-settings.mjs';
 import { getStoreSettings, normalizeStoreSettings, replaceStoreSettings } from './store-settings.mjs';
 import { buildOperationAudit } from './operational-audit.mjs';
@@ -330,7 +330,7 @@ function calculateQuote(ticket, frozenFee = null) {
   const discountByLine = allocate(discount, listedAmounts);
   const netByLine = listedAmounts.map((amount, index) => amount - discountByLine[index]);
   const serviceBase = settings.serviceBase === 'beforeDiscount' ? listedAmounts : netByLine;
-  const serviceWeights = lines.map((line, index) => line.serviceEligible ? serviceBase[index] : 0);
+  const serviceWeights = lines.map((line, index) => line.serviceEligible && line.serviceExcluded !== true ? serviceBase[index] : 0);
   const service = roundCalculationRate(serviceWeights.reduce((sum, weight) => sum + weight, 0),
     settings.serviceRateBps, settings.serviceRounding);
   const serviceByLine = allocate(service, serviceWeights);
@@ -436,7 +436,7 @@ function newStockMovement(state, stock, amount, kind, reason, now, ticketId = nu
   return movement;
 }
 
-function addLine(state, ticket, menu, quantity, castIds, now, { includeHistoricalCast = false } = {}) {
+function addLine(state, ticket, menu, quantity, castIds, now, { includeHistoricalCast = false, serviceExcluded = false } = {}) {
   const people = includeHistoricalCast
     ? [...(state.archivedCast ?? []), ...state.cast]
     : state.cast.filter((person) => person.enabled !== false);
@@ -451,6 +451,7 @@ function addLine(state, ticket, menu, quantity, castIds, now, { includeHistorica
     ...(menu.hideReceiptLine === true && menu.price === 0 && {hideReceiptLine:true}),
     total: menu.price * quantity, castIds: castIds.slice(), createdAt: now, stockUses: [], cancelledAt: null,
     providedAt: null, taxRate: menu.taxRate ?? defaultItemTaxRateBps, serviceEligible: menu.serviceEligible !== false,
+    ...(serviceExcluded && {serviceExcluded:true}),
     commission: getItemCommission(menu), castNames: castIds.map((id) => castById.get(id).name),
     castCommissions: castIds.map((id) => getItemCommission(menu, castById.get(id))),
     ...(menu.requiresCast && { requiresCast: true }),
@@ -522,9 +523,17 @@ function editLiveTicketLine(state, ticket, action, now, actor) {
   assert(line.category !== '延長', '延長の変更は一度取り消してから正しいプランを登録してください。');
   assert(line.category !== 'セット' || !action.castIds?.length, '初回セットには歩合対象者を指定できません。');
   const updated = editTicketLineSnapshot(state,line,action);
+  const serviceChanged = action.serviceExcluded !== undefined && action.serviceExcluded !== (line.serviceExcluded === true);
+  if (action.serviceExcluded !== undefined) assert(typeof action.serviceExcluded === 'boolean', 'サービス料の除外設定を確認してください。');
+  if (serviceChanged) {
+    assert(canExcludeOrderService(state, actor.role), 'サービス料の除外には店舗設定と管理者権限が必要です。');
+    assert(line.serviceEligible === true, 'この明細はサービス料の対象外です。');
+    if (action.serviceExcluded) updated.serviceExcluded = true;
+    else delete updated.serviceExcluded;
+  }
   if (line.quantity !== updated.quantity) reconcileEditedLineStock(state,ticket,line,updated,now);
   ticket.lines[index] = updated;
-  if (updated.total < line.total) assertReducedTicketAmounts(state,ticket,actor,'訂正');
+  if (updated.total < line.total || (serviceChanged && action.serviceExcluded)) assertReducedTicketAmounts(state,ticket,actor,'訂正');
 }
 
 function extendTicket(state, ticket, menu, now, automatic = false, assignments = [{menu,quantity:ticket.guests}]) {
@@ -1562,12 +1571,19 @@ function reduce(state, action, now, actor) {
       break;
     }
     case 'order':
-      assert(Array.isArray(action.items) && action.items.length > 0, '商品を追加してください。');
+      assert(Array.isArray(action.items) && action.items.length > 0 && action.items.length <= 100, '商品を100明細以内で追加してください。');
       for (const item of action.items) {
         const menu = next.menu.find((entry) => entry.id === item.menuId);
         assert(menu && !['セット', '延長'].includes(menu.category), '初回セットと延長は専用画面で登録してください。');
         assert(menu.enabled !== false, 'このメニューは提供を停止しています。');
-        addLine(next, ticket, menu, item.quantity, item.castIds ?? [], now);
+        const {serviceExcluded,serviceExclusionReason} = item;
+        if (serviceExcluded !== undefined) assert(typeof serviceExcluded === 'boolean', 'サービス料の除外設定を確認してください。');
+        if (serviceExcluded) {
+          assert(canExcludeOrderService(next, actor.role), 'サービス料の除外には店舗設定と管理者権限が必要です。');
+          assert(menu.serviceEligible !== false, 'この商品はサービス料の対象外です。');
+          operationalReason(serviceExclusionReason, 'サービス料の除外理由');
+        }
+        addLine(next, ticket, menu, item.quantity, item.castIds ?? [], now, {serviceExcluded});
       }
       break;
     case 'extend':

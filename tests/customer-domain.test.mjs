@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { apply, createDemo, quote, summary } from '../docs/engine.mjs';
-import { renderCompanionEditor, renderCompanionResults, renderSeatCustomer, renderSeatCustomerResults, renderSeatCustomerSelection } from '../docs/customer-ui.mjs';
+import { renderCompanionEditor, renderCompanionResults, renderCustomerNotices, renderSeatCustomer, renderSeatCustomerResults, renderSeatCustomerSelection } from '../docs/customer-ui.mjs';
 import { projectState,validateSnapshot,verifyCommand } from '../server/policy.mjs';
-import { findCustomer, findSettledCustomerTicket, getCustomerDetail, isAssignedCustomer, listUnlinkedVisits, parseCustomersCsv,
+import { findCustomer, findSettledCustomerTicket, getCustomerDetail, getCustomerNotices, isAssignedCustomer, listUnlinkedVisits, parseCustomersCsv,
   searchCustomers } from '../docs/customers.mjs';
+import { writeDemoBackup, readDemoBackup } from '../docs/demo-backup.mjs';
 
 const now = Date.parse('2026-11-16T21:00:00+09:00');
 const admin = { id: 'admin-1', label: '店舗管理者', role: 'admin' };
@@ -29,6 +30,41 @@ function departPaid(state, ticketId, at = now) {
     payments: [{ method: 'cash', amount: quote(state, ticketId).remaining }] }, admin, at);
   return run(paid, { type: 'depart', ticketId }, admin, at);
 }
+
+test('customer notices cross New Year, include only bottles with remaining stock, and follow profile access', () => {
+  const anniversaries = [{monthDay:'01-05',label:'節目'},{monthDay:'02-29',label:'閏日の記念日'}];
+  const state = register(register(opened(),{name:'管理者が登録',birthday:'1990-12-29'}),{
+    name:'担当顧客',birthday:'1996-12-29',anniversaries,bottleKeeps:[
+      {name:'期限切れ',quantity:0.5,expiresAt:'2026-12-28'},
+      {name:'境界日',quantity:1,expiresAt:'2027-01-05'},
+      {name:'期限は先',quantity:1,expiresAt:'2027-01-06'},
+      {name:'空瓶',quantity:0,expiresAt:'2026-12-28'},
+    ],
+  },manager);
+  assert.deepEqual(getCustomerNotices(projectState(state,'manager',manager.id),'2026-12-29')
+    .map(({label,daysUntil})=>[label,daysUntil]),[['誕生日',0],['節目',7],['境界日',7],['期限切れ',-1]]);
+  assert.deepEqual(getCustomerNotices(projectState(state,'staff',staff.id),'2026-12-29'),[]);
+  assert.equal(getCustomerNotices(state,'2027-02-27').some(({kind})=>kind === 'anniversary'),false);
+  assert.equal(getCustomerNotices(state,'2028-02-27').find(({kind})=>kind === 'anniversary')?.date,'2028-02-29');
+  const html = renderCustomerNotices(projectState(state,'manager',manager.id),{role:'manager',escape:String,icon:()=>'',businessDate:'2026-12-29'});
+  assert.match(html,/節目/);
+  assert.doesNotMatch(html,/管理者が登録|空瓶/);
+});
+
+test('anniversaries validate, survive snapshots and backup, deduplicate when merged, and can be removed', async () => {
+  const anniversary = {monthDay:'11-16',label:'初来店'};
+  let state = register(register(opened(),{name:'A',anniversaries:[anniversary]}),{name:'B',anniversaries:[anniversary]});
+  const [source,target] = state.customers;
+  assert.throws(()=>register(state,{name:'C',anniversaries:[{monthDay:'02-30',label:'無効な日付'}]}), /記念日/);
+  assert.throws(()=>register(state,{name:'C',anniversaries:[anniversary,anniversary]}), /記念日/);
+  state = run(state,{type:'mergeCustomers',sourceId:source.id,targetId:target.id,reason:'同じ顧客'});
+  assert.deepEqual(validateSnapshot(state).customers[0].anniversaries,[anniversary]);
+  const restored = (await readDemoBackup(await writeDemoBackup(state,now))).snapshot;
+  assert.deepEqual(restored.customers[0].anniversaries,[anniversary]);
+  state = run(restored,{type:'saveCustomer',customerId:target.id,customer:{anniversaries:[]}});
+  assert.equal(state.customers[0].anniversaries,undefined);
+  assert.deepEqual(state.auditLog[0].after.changedFields,['anniversaries']);
+});
 
 test('same-ticket companions have scoped visit history and primary-only sales attribution', () => {
   let state = register(register(register(opened(),{name:'代表客'}),{name:'同席客',phone:'070-1234-5678'}),{name:'別の顧客'});

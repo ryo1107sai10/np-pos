@@ -127,9 +127,10 @@ function auditMovements(before, after) {
   }));
 }
 
-function auditLine({id,name,quantity,price,total,castIds,castNames,cancelledAt,providedAt}) {
+function auditLine({id,name,quantity,price,total,castIds,castNames,cancelledAt,providedAt,serviceExcluded}) {
   return {id,name,quantity,price,amount:total,castNames:castNames ?? castIds,
-    ...(cancelledAt && {cancelledAt}),...(providedAt && {providedAt})};
+    ...(cancelledAt && {cancelledAt}),...(providedAt && {providedAt}),
+    ...(serviceExcluded === true && {serviceExcluded:true})};
 }
 
 function auditTicket(before, after, action) {
@@ -173,7 +174,11 @@ function auditTicket(before, after, action) {
     newValues.line = { ...oldValues.line, cancelled: true };
   }
   if (action.type === 'order' || action.type === 'extend') {
-    newValues.lines = current.lines.slice(previous.lines.length).map(auditLine);
+    newValues.lines = current.lines.slice(previous.lines.length).map((line,index) => ({
+      ...auditLine(line),
+      ...(action.type === 'order' && line.serviceExcluded === true
+        && {serviceExclusionReason:textReason(action.items[index].serviceExclusionReason)}),
+    }));
     if (action.type === 'extend') {
       oldValues.endsAt = previous.endsAt;
       newValues.endsAt = current.endsAt;
@@ -182,6 +187,10 @@ function auditTicket(before, after, action) {
   if (action.type === 'editTicketLine' || action.type === 'serve') {
     oldValues.line = auditLine(previous.lines.find(({id}) => id === action.lineId));
     newValues.line = auditLine(current.lines.find(({id}) => id === action.lineId));
+    if (action.type === 'editTicketLine' && oldValues.line.serviceExcluded !== newValues.line.serviceExcluded) {
+      oldValues.line.serviceExcluded = oldValues.line.serviceExcluded === true;
+      newValues.line.serviceExcluded = newValues.line.serviceExcluded === true;
+    }
   }
   if (action.type === 'cancelTicketExtension') {
     const reversed = current.lines.filter((line,index) => line.cancelledAt !== previous.lines[index].cancelledAt);
@@ -262,7 +271,7 @@ function auditCustomers(before, after, action) {
   const oldCustomer = previous.find(({ id }) => id === action.customerId);
   const newCustomer = oldCustomer ? latest.find(({ id }) => id === oldCustomer.id) : latest.at(-1);
   const changedFields = ['name', 'kana', 'phone', 'birthday', 'castId', 'memo', 'flagged', 'creditEnabled',
-    'creditLimit', 'bottleKeeps','email','receiptRecipient','daysOff','tags','photo']
+    'creditLimit', 'bottleKeeps','email','receiptRecipient','daysOff','tags','photo','anniversaries']
     .filter((key) => !sameValue(oldCustomer?.[key], newCustomer[key]));
   if (!changedFields.length) return null;
   const auditFields = ['name', 'castId', 'flagged', 'creditEnabled', 'creditLimit'].filter((key) => changedFields.includes(key));

@@ -1,6 +1,7 @@
 import { normalizeEmployeeProfiles, payrollAttendanceItems, replaceAttendanceItems, saveEmployeeProfile } from './payroll-records.mjs';
 import { advancedPayrollBases, calculateAdvancedPayrollRule, ensurePayrollVariableReferences, getPayrollVariables, getPayrollVariableValues,
   normalizeAdvancedPayrollRule, normalizeFormulaContext, normalizePayrollVariables, savePayrollVariables } from './payroll-formula.mjs';
+import { getPayrollActualContext } from './payroll-actuals.mjs';
 
 const dailyPayActions = new Set(['requestDailyPay', 'reviewDailyPay', 'payDailyPay']);
 const payrollActions = new Set(['savePayrollDraft', 'finalizePayroll', 'savePayrollRate', 'savePayrollSettings',
@@ -192,7 +193,7 @@ function settledTickets(state, month, includes = () => true, unavailable = []) {
     const incomplete = !snapshots || (day.tickets != null && snapshots.length !== day.tickets)
       || snapshots.some(({settlement}) => !Array.isArray(settlement?.commission));
     if (incomplete && Array.isArray(day.commission)) {
-      legacy.push({ settlement:{ commission:day.commission } });
+      legacy.push({ settlement:{ commission:day.commission },legacyDate:day.date,legacyTicketCount:day.tickets });
       continue;
     }
     if (incomplete && day.tickets !== 0) unavailable.push(day.date);
@@ -200,6 +201,7 @@ function settledTickets(state, month, includes = () => true, unavailable = []) {
   }
   if (state.day.date.slice(0, 7) === month && includes(state.day.date)
     && !state.closedDays.some(({date}) => date === state.day.date)) {
+    if (state.tickets.some(({status,settlement})=>paidStatuses.has(status) && !Array.isArray(settlement?.commission))) unavailable.push(state.day.date);
     for (const ticket of state.tickets) tickets.set(ticket.id, ticket);
   }
   return [...tickets.values()].filter(({status, settlement}) => paidStatuses.has(status)
@@ -319,12 +321,15 @@ export function previewPayroll(state, input) {
   const template = getPayrollTemplates(state).find(({id,isDefault}) => templateId ? id === templateId : isDefault);
   const settings = getPayrollSettings(state);
   if (template) settings.statementRules = template.rules.map((row) => ({...row}));
-  const commissionData = confirmedCommission(settledTickets(state,month),castId);
+  const unavailableDates = [];
+  const tickets = settledTickets(state,month,undefined,unavailableDates);
+  const commissionData = confirmedCommission(tickets,castId);
   const {rawCommission,commissionDetails} = commissionData;
   const attendanceItems = payrollAttendanceItems(state,month,castId);
   const {minutes,hourlyPay,commission,points,pointPay} = calculateDatedPay(work,commissionData,attendanceItems,settings);
   const hasFormula = settings.statementRules.some(({basis}) => advancedPayrollBases.has(basis));
-  const formulaContext = hasFormula ? {variables:getPayrollVariableValues(state,castId)} : null;
+  const formulaContext = hasFormula ? {variables:getPayrollVariableValues(state,castId),
+    ...getPayrollActualContext(state,{month,castId,work,tickets,unavailableDates,rules:settings.statementRules})} : null;
   const statementItems = calculateStatementItems(settings,hourlyPay,commission,pointPay,{...formulaContext,minutes,points});
   const {allowanceTotal,deductionTotal} = adjustmentTotals(allowances,deductions,[...statementItems,...attendanceItems]);
   const paidDailyPay = getPayrollDailyPays(state,{month,castId}).filter(({status}) => status === 'paid')
@@ -535,7 +540,7 @@ function normalizeFinalSnapshot(state, record, snapshot) {
   });
   const minutes = normalizedWork.reduce((sum, row) => sum + row.minutes, 0);
   const hasFormula = settings.statementRules.some(({basis}) => advancedPayrollBases.has(basis));
-  const formulaContext = hasFormula ? normalizeFormulaContext(snapshot.formulaContext) : null;
+  const formulaContext = hasFormula ? normalizeFormulaContext(snapshot.formulaContext,settings.statementRules) : null;
   const statementItems = calculateStatementItems(settings,hourlyPay,commission,pointPay,{...formulaContext,minutes,points});
   const attendanceItems = snapshot.attendanceItems ?? [];
   check(Array.isArray(attendanceItems) && attendanceItems.length <= 1550,'確定済みの勤怠項目を確認してください。');

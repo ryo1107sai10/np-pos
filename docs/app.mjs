@@ -23,14 +23,14 @@ import { createCloudClient } from './cloud-client.mjs';
 import { renderCloudBanner, renderCloudEntry, renderCloudMigration, renderCloudPanel, renderCloudRestricted, renderStoreOverview } from './cloud-ui.mjs';
 import { createStoreGroupDemo } from './store-group-demo.mjs';
 import { renderStoreGroups } from './store-group-ui.mjs';
-import { findCustomer, findSettledCustomerTicket, getCustomerDetail, isAssignedCustomer, parseCustomersCsv } from './customers.mjs';
+import { customerAnniversaryLimit, findCustomer, findSettledCustomerTicket, getCustomerDetail, isAssignedCustomer, parseCustomersCsv } from './customers.mjs';
 import { ticketHasReceivable } from './receivables.mjs';
 import { cashMovementCategories, cashMovementKinds, editableCashMovement } from './cash-ledger.mjs';
 import { cashAccountOptions, readCashAccounts, renderCashAccountRow, renderCashAccounts, vaultBalance } from './cash-accounts.mjs';
 import { purchaseCancellationBlocker } from './inventory-operations.mjs';
 import { findPrintableTicket, getPrintAutoKind, getPrintDocuments, getPrintSettings, getPrintTenderReceived } from './print-domain.mjs';
 import { printDocumentTitles, renderExtensionQuote, renderPrintOptions, renderPrintPreview, renderPrintSettings } from './print-ui.mjs';
-import { createBillingDemo, createCashDemo, createLaborDemo, createPayrollDemo, createPhaseTwoDemo, createPeriodReportDemo } from './phase-two-demo.mjs';
+import { createBillingDemo, createCashDemo, createCustomerNoticeDemo, createLaborDemo, createPayrollDemo, createPhaseTwoDemo, createPeriodReportDemo, createVisitAnalyticsDemo } from './phase-two-demo.mjs';
 import * as customerUI from './customer-ui.mjs';
 import { operationReason, renderAuditLog, renderDiscountForm, renderPersonalSalesAdjustment } from './operations-ui.mjs';
 import { getAdjustablePersonalSalesPeople, personalSalesDiscountModes } from './personal-sales.mjs';
@@ -55,7 +55,7 @@ import { renderLaborHighlights, renderLaborReport, renderStaffAttendance, render
 import { getAvailableInitialSets, suggestInitialSet } from './set-schedule.mjs';
 import { getCastWorkspace, listCastAttendance } from './cast-self.mjs';
 import { readManagedAttendance, renderCastAttendance, renderCastShiftRequest, renderCastWorkspace, renderManagedAttendance, renderManagedBreakRow } from './cast-self-ui.mjs';
-import { getCalculationSettings } from './calculation-settings.mjs';
+import { canExcludeOrderService, getCalculationSettings } from './calculation-settings.mjs';
 import { handleInitialSetScheduleClick, readInitialSetSchedule, renderInitialSetSchedule } from './set-schedule-ui.mjs';
 
 const app = document.querySelector('#app');
@@ -652,7 +652,7 @@ function renderDetail(notices, now) {
     ${!settled && selectedTable && permittedAction('table-auto-extension')
       ? renderTableAutoExtensionControl(selectedTable,autoModel,{escape,icon,tableName}) : ''}
     <div class="detail-aux"><h3>注文明細 <small>${lines.length}</small></h3>${settled ? '' : button('卓移動・連結','move',{glyph:'move',id:ticket.id})}</div>
-    <ul class="ticket-lines">${lines.length ? lines.map((line) => `<li class="ticket-line"><span class="line-desc">${escape(line.name)} <em>×${line.quantity}</em>${line.castIds.length ? `<small>${lineStaffNames(line)}</small>` : ''}${line.autoExtension ? '<small>自動延長</small>' : ''}</span><span class="money">${yen(line.total)}</span>${renderTicketLineControls(ticket,line)}</li>`).join('') : '<li class="lines-empty">注文明細はありません。</li>'}</ul>
+    <ul class="ticket-lines">${lines.length ? lines.map((line) => `<li class="ticket-line"><span class="line-desc">${escape(line.name)} <em>×${line.quantity}</em>${line.castIds.length ? `<small>${lineStaffNames(line)}</small>` : ''}${line.autoExtension ? '<small>自動延長</small>' : ''}${line.serviceExcluded === true ? '<small>サービス料対象外</small>' : ''}</span><span class="money">${yen(line.total)}</span>${renderTicketLineControls(ticket,line)}</li>`).join('') : '<li class="lines-empty">注文明細はありません。</li>'}</ul>
     ${totalRows(q,{settlement:settled})}${pending}
     <div class="mini-tools">${!settled ? `${button('前受金','deposit',{glyph:'wallet',tone:'quiet',id:ticket.id})}${button('値引き','discount',{glyph:'minus',tone:'quiet',id:ticket.id})}${button('個人売上を調整','personal-sales-adjustment',{glyph:'users',tone:'quiet',id:ticket.id})}${quickItem ? button(escape(quickItem.name),'order',{glyph:'plus',tone:'quiet',id:ticket.id,data:'data-product="highball"'}) : ''}${button('卓履歴','seat-history',{glyph:'history',tone:'quiet',id:ticket.id})}${printButton(ticket,state.day.date,'check','確認伝票を印刷',{tone:'quiet'})}` : ''}${ticketAuditButton(ticket,state.day.date)}</div>
     <div class="detail-actions">${!settled ? `${button('注文','order',{glyph:'plus',tone:'secondary',id:ticket.id})}${button('延長','extend',{glyph:'clock',id:ticket.id,disabled:!extensionPlans().length})}${button('会計へ進む','settle',{glyph:'arrow-right',tone:'primary',id:ticket.id,cls:'btn-block',disabled:Boolean(requested)})}` : `${button('会計内訳','receipt',{glyph:'ticket',id:ticket.id,cls:'btn-block'})}${button('退店・卓を解放','depart',{glyph:'checkout',tone:'primary',id:ticket.id,cls:'btn-block'})}`}</div></div></aside>`;
@@ -677,8 +677,10 @@ function customerWorkspaceState() {
 function renderOperationalNotices() {
   const stock = state.stock.filter(({hidden,quantity,minimum}) => !hidden && quantity <= minimum);
   const items = stock.map((entry) => `<li><strong>${escape(entry.name)}</strong><span>${number.format(entry.quantity)} ${escape(entry.unit)}</span></li>`);
+  const customers = permittedAction('customer-detail') ? `<section class="ops-notice-section"><h3>誕生日・記念日・ボトル期限</h3>
+    ${customerUI.renderCustomerNotices(customerWorkspaceState(),customerUIApi())}</section>` : '';
   return `<section class="ops-notice-section"><h3>下限に達した在庫</h3>${items.length
-    ? `<ul class="ops-notices-list">${items.join('')}</ul>` : '<p class="field-help">該当するお知らせはありません。</p>'}</section>`;
+    ? `<ul class="ops-notices-list">${items.join('')}</ul>` : '<p class="field-help">該当するお知らせはありません。</p>'}</section>${customers}`;
 }
 
 function renderOperationsNav() {
@@ -1910,7 +1912,7 @@ function paintDialog(layoutFileInput) {
       return;
     case 'payroll-template-editor': {
       const template = getPayrollTemplates(state).find(({id}) => id === modal.templateId);
-      present(template ? 'テンプレートを編集' : 'テンプレートを追加',payrollUI.renderPayrollTemplateEditor(template,{escape,icon,variables:getPayrollVariables(state)}),
+      present(template ? 'テンプレートを編集' : 'テンプレートを追加',payrollUI.renderPayrollTemplateEditor(template,{escape,icon,state,variables:getPayrollVariables(state)}),
         'テンプレートを保存',{style:'ops-modal modal-wide'});
       return;
     }
@@ -1976,7 +1978,7 @@ function paintDialog(layoutFileInput) {
         present('体験クエスト','<p class="form-copy">体験クエストの練習中です。</p>' + button('練習を終了','practice-stop'),null,{style:'ops-modal'});
         return;
       }
-      present('サンプル操作',`${renderPracticeEntry()}<p class="form-copy">開店から試すと、現在の卓配置と店舗設定で営業をやり直せます。ほかのサンプルを選ぶと、店舗設定・卓配置・操作履歴がサンプルの初期状態に戻ります。</p><div class="demo-options">${button('開店から試す','demo-start',{glyph:'power',tone:'primary'})}${button('営業中のサンプルを読み込む','demo-live',{glyph:'refresh'})}${button('入出金と日報を試す','demo-cash',{glyph:'cash'})}${button('期間集計とCSVを試す','demo-reports',{glyph:'download'})}${button('自動延長とカード会計を試す','demo-billing',{glyph:'clock'})}${button('給与・日払いを試す','demo-payroll',{glyph:'wallet'})}${button('勤怠・人件費を試す','demo-labor',{glyph:'users'})}</div>
+      present('サンプル操作',`${renderPracticeEntry()}<p class="form-copy">開店から試すと、現在の卓配置と店舗設定で営業をやり直せます。ほかのサンプルを選ぶと、店舗設定・卓配置・操作履歴がサンプルの初期状態に戻ります。</p><div class="demo-options">${button('開店から試す','demo-start',{glyph:'power',tone:'primary'})}${button('営業中のサンプルを読み込む','demo-live',{glyph:'refresh'})}${button('入出金と日報を試す','demo-cash',{glyph:'cash'})}${button('期間集計とCSVを試す','demo-reports',{glyph:'download'})}${button('滞在・指名分析を試す','demo-analytics',{glyph:'chart'})}${button('自動延長とカード会計を試す','demo-billing',{glyph:'clock'})}${button('給与・日払いを試す','demo-payroll',{glyph:'wallet'})}${button('勤怠・人件費を試す','demo-labor',{glyph:'users'})}${button('顧客のお知らせを試す','demo-customer-notices',{glyph:'bell'})}</div>
         <section aria-labelledby="demo-role-label"><h3 id="demo-role-label">デモの権限</h3><p class="form-copy">現在の権限は${escape(currentRoleLabel())}です。同じデモデータで役割を切り替えて確認できます。</p><div class="ops-actions">${['admin','manager','staff','cast'].map((role) =>
           button(`${cloudLabels[role]}で試す`,'demo-role',{id:role,tone:!currentProfileId()&&role===demoRole?'primary':'secondary'})).join('')}
           ${Object.entries(state.rolePolicy?.custom ?? {}).map(([id,{label}]) => button(`${escape(label)}で試す`,'demo-role',
@@ -2010,7 +2012,8 @@ function paintDialog(layoutFileInput) {
       present('卓移動・連結',`${headline}<p class="form-copy">移動先または追加する卓を選択してください。チェックを外した卓は、確定時に空席になります。</p>${seatPicker(ticket.tableIds,{ticketId:id})}`,'卓の変更を確定',{style:'modal-wide'});
       return;
     case 'order':
-      present('注文を追加',`${headline}<div class="order-tools"><div class="seg order-seg" role="group" aria-label="メニューのカテゴリ">${orderCategoryNames().map((text)=>`<button type="button" data-action="category" data-id="${escape(text)}" aria-pressed="${modal.category===text}">${escape(text)}</button>`).join('')}</div><label class="field"><span class="sr-only">メニュー検索</span><input id="menu-search" placeholder="メニューを検索" value="${escape(modal.search)}"></label></div><div id="order-products">${renderProducts()}</div><div id="order-selection">${renderProductDetails()}</div><div id="order-cart" aria-live="polite">${renderOrderCart()}</div>`,'注文を確定',{style:'modal-wide'});
+      present('注文を追加',`${headline}<div class="order-tools"><div class="seg order-seg" role="group" aria-label="メニューのカテゴリ">${orderCategoryNames().map((text)=>`<button type="button" data-action="category" data-id="${escape(text)}" aria-pressed="${modal.category===text}">${escape(text)}</button>`).join('')}</div><label class="field"><span class="sr-only">メニュー検索</span><input id="menu-search" placeholder="メニューを検索" value="${escape(modal.search)}"></label></div><div id="order-products">${renderProducts()}</div><div id="order-selection">${renderProductDetails()}</div><div id="order-cart" aria-live="polite">${renderOrderCart()}</div><div id="order-service-preview" role="status"></div>`,'注文を確定',{style:'modal-wide'});
+      updateOrderServicePreview();
       return;
     case 'extend': {
       const activePlanId = modal.extensionId ?? extensionPlans()[0]?.id;
@@ -2164,11 +2167,14 @@ function paintDialog(layoutFileInput) {
       const options = line.category === 'セット' ? '' : `<fieldset class="choices"><legend>歩合を付けるキャスト</legend><div class="choice-grid">
         ${available.map((person)=>`<label class="choice"><input type="checkbox" name="castIds" value="${escape(person.id)}"${selectedCast.has(person.id) ? ' checked' : ''}><span>${escape(person.name)}</span></label>`).join('')}
         </div></fieldset>`;
+      const serviceControl = line.serviceEligible === true && canExcludeOrderService(state,currentRole())
+        ? `${orderServiceChoice(line.serviceExcluded === true)}<div id="order-service-preview" role="status"></div>` : '';
       present('注文を訂正',`${headline}<p class="form-copy">${escape(line.name)}${(line.stockUses.length || menu?.recipe?.length) && line.providedAt
         ? '。提供済みの在庫は、請求数量を減らしても戻りません。' : ''}</p><div class="form-grid">
         ${label('数量',`<input type="number" name="quantity" min="1" max="100" required inputmode="numeric" value="${line.quantity}">`)}
         ${label('単価（円）',`<input type="number" name="linePrice" min="0" max="100000000" required inputmode="numeric" value="${line.price}">`)}
-        </div>${options}${operationReason({title:'注文の訂正理由'})}`,'注文の訂正を保存',{style:'ops-modal'});
+        </div>${options}${serviceControl}${operationReason({title:'注文の訂正理由'})}`,'注文の訂正を保存',{style:'ops-modal'});
+      updateOrderServicePreview();
       return;
     }
     case 'cancel-ticket-extension': {
@@ -2523,6 +2529,10 @@ function commissionLabel({ fixed, rate, points }) {
   return [fixed && `${yen(fixed)}/点`, rate && `${rate}%`, points && `${points} Pt/点`].filter(Boolean).join(' · ');
 }
 
+function orderServiceChoice(checked) {
+  return `<label class="inline-check"><input type="checkbox" name="orderServiceExcluded"${checked ? ' checked' : ''}>この明細にサービス料をかけない</label>`;
+}
+
 function renderProductDetails() {
   const item = state.menu.find((product)=>product.id === modal.product && product.enabled !== false);
   if (!item) return '<p class="form-copy order-tip">追加するメニューを選択してください。</p>';
@@ -2559,26 +2569,30 @@ function renderProductDetails() {
   } else if (item.requiresCast) {
     castChoices = '<p class="field-help">店舗設定で注文に使うキャストを有効にしてください。</p>';
   }
+  const excluded = draft?.serviceExcluded === true;
+  const serviceControl = item.serviceEligible !== false && canExcludeOrderService(state,currentRole())
+    ? `${orderServiceChoice(excluded)}<div id="order-service-reason"${excluded ? '' : ' hidden'}>
+      ${label('サービス料の除外理由',`<textarea name="orderServiceReason" maxlength="120"${excluded ? ' required' : ''}>${escape(draft?.serviceExclusionReason ?? '')}</textarea>`)}</div>` : '';
   return `<section class="order-selection"><div class="order-selected"><div><h3>${escape(item.name)}</h3><p>${yen(item.price)} / 点</p></div><label class="field order-qty"><span>数量</span><input name="quantity" type="number" min="1" max="100" step="1" inputmode="numeric" value="${draft?.quantity ?? 1}" required></label></div>
     ${stockInfo ? `<p class="field-help">${icon('box',14)} 在庫引き落とし / 点　${stockInfo}</p>` : ''}
-    ${castChoices}<div class="ops-actions">${button(draft ? '明細の変更を反映' : '注文リストに追加','order-line-stage',{tone:'secondary',glyph:'plus'})}
+    ${castChoices}${serviceControl}<div class="ops-actions">${button(draft ? '明細の変更を反映' : '注文リストに追加','order-line-stage',{tone:'secondary',glyph:'plus'})}
       ${draft ? button('変更をやめる','order-line-reset',{tone:'quiet'}) : ''}</div></section>`;
 }
 
 function renderOrderCart() {
   if (!modal.orderItems.length) return '';
   return `<section class="order-cart"><h3>注文リスト <small>${modal.orderItems.length}件</small></h3>
-    <ul>${modal.orderItems.map(({menuId,quantity,castIds},index) => {
+    <ul>${modal.orderItems.map(({menuId,quantity,castIds,serviceExcluded},index) => {
       const item = state.menu.find(({id})=>id === menuId);
       const name = item?.name ?? '現在選べない商品';
-      return `<li><span><strong>${escape(name)} ×${quantity}</strong>${castIds.length ? `<small>${castIds.map(staffName).map(escape).join('・')}</small>` : ''}</span>
+      return `<li><span><strong>${escape(name)} ×${quantity}</strong>${castIds.length ? `<small>${castIds.map(staffName).map(escape).join('・')}</small>` : ''}${serviceExcluded === true ? '<small>サービス料対象外</small>' : ''}</span>
         <span class="money">${item ? yen(item.price * quantity) : '—'}</span><div class="ops-actions">
         ${button('編集','order-line-edit',{id:index,tone:'quiet',data:`aria-label="${escape(name)}の明細を編集"`})}
         ${button('除外','order-line-remove',{id:index,tone:'quiet',data:`aria-label="${escape(name)}を注文リストから除外"`})}</div></li>`;
     }).join('')}</ul></section>`;
 }
 
-function currentOrderLine(form) {
+function currentOrderLine(form, preview = false) {
   const item = state.menu.find(({id,enabled})=>id === modal.product && enabled !== false);
   if (!item) throw new Error('追加するメニューを選択してください。');
   const data = new FormData(form);
@@ -2586,7 +2600,54 @@ function currentOrderLine(form) {
   const castIds = data.getAll('castIds');
   if (!Number.isInteger(quantity) || quantity < 1 || quantity > 100) throw new Error('数量は1〜100の整数で入力してください。');
   if (item.requiresCast && !castIds.length) throw new Error('担当キャストを選択してください。');
-  return {menuId:item.id,quantity,castIds};
+  const serviceExcluded = data.has('orderServiceExcluded');
+  const reason = String(data.get('orderServiceReason') ?? '').trim();
+  if (serviceExcluded && !preview && (!reason || reason.length > 120)) {
+    throw new Error('サービス料の除外理由を120文字以内で入力してください。');
+  }
+  return {menuId:item.id,quantity,castIds,
+    ...(serviceExcluded && {serviceExcluded,serviceExclusionReason:preview ? 'プレビュー' : reason})};
+}
+
+function orderItemsFromForm(form, preview = false) {
+  const items = [...modal.orderItems];
+  if (modal.product) {
+    const line = currentOrderLine(form,preview);
+    if (modal.editingOrderIndex !== undefined) items[modal.editingOrderIndex] = line;
+    else items.push(line);
+  }
+  return items;
+}
+
+function editTicketLineCommand(form, preview = false) {
+  const data = new FormData(form);
+  const line = state.tickets.find(({id}) => id === modal.ticketId)?.lines.find(({id}) => id === modal.lineId);
+  const serviceExcluded = data.has('orderServiceExcluded');
+  const changeService = form.elements.orderServiceExcluded && serviceExcluded !== (line?.serviceExcluded === true);
+  return {type:'editTicketLine',ticketId:modal.ticketId,lineId:modal.lineId,quantity:Number(data.get('quantity')),
+    price:Number(data.get('linePrice')),castIds:data.getAll('castIds'),reason:preview ? 'プレビュー' : data.get('reason'),
+    ...(changeService && {serviceExcluded})};
+}
+
+function updateOrderServicePreview() {
+  const output = dialog.querySelector('#order-service-preview');
+  if (!output) return;
+  const form = output.closest('form');
+  if (modal.type === 'order' && !form.elements.orderServiceExcluded
+    && !modal.orderItems.some(({serviceExcluded}) => serviceExcluded === true)) {
+    output.textContent = '';
+    return;
+  }
+  try {
+    const command = modal.type === 'order'
+      ? {type:'order',ticketId:modal.ticketId,items:orderItemsFromForm(form,true)}
+      : editTicketLineCommand(form,true);
+    const next = apply(state,command,Date.now(),{role:currentRole(),profileId:currentProfileId()});
+    const {service,total} = quote(next,modal.ticketId);
+    output.innerHTML = `<p class="field-help">伝票見込額 <strong>${yen(total)}</strong>（うちサービス料 ${yen(service)}）</p>`;
+  } catch {
+    output.innerHTML = '<p class="field-help">数量・担当・在庫などの明細を確認すると、伝票見込額を表示します。</p>';
+  }
 }
 
 function refreshOrderSelection() {
@@ -2595,6 +2656,7 @@ function refreshOrderSelection() {
   }
   dialog.querySelector('#order-selection').innerHTML = renderProductDetails();
   dialog.querySelector('#order-cart').innerHTML = renderOrderCart();
+  updateOrderServicePreview();
 }
 
 function renderBillingSettings(tab) {
@@ -2642,7 +2704,10 @@ function renderCalculationSettings() {
     ${label('サービス料の計算基準',choices('serviceBase',{afterDiscount:'値引き後の小計',beforeDiscount:'値引き前の小計'}))}
     ${label('サービス料の端数',choices('serviceRounding',rounding))}
     ${label('消費税の端数',choices('taxRounding',rounding))}
-    </div><p class="field-help">保存後に新しく登録する来店に適用します。税込価格に切り替えると、登録済みのメニュー単価を税込として扱います。</p>`;
+    </div><p class="field-help">計算設定は新しく登録する来店に適用します。税込価格に切り替えると、登録済みのメニュー単価を税込として扱います。</p>
+    <label class="billing-switch"><span>注文明細ごとのサービス料除外を許可する</span>
+      <input type="checkbox" role="switch" name="allowOrderServiceExclusion"${settings.allowOrderServiceExclusion ? ' checked' : ''}></label>
+    <p class="field-help">管理者が理由を入力して、新規注文や会計前の明細でサービス料を除外できます。</p>`;
 }
 
 function renderPayment(entry,index) {
@@ -2926,6 +2991,19 @@ function updatePractice(action) {
 function clickAction(target) {
   const {action,id} = target.dataset;
   if (!permittedAction(action)) return;
+  if (['customer-anniversary-add','customer-anniversary-remove'].includes(action)
+    && ['customer-new','customer-edit'].includes(modal?.type) && permittedAction('customer-edit')) {
+    if (action === 'customer-anniversary-remove') {
+      target.closest('[data-anniversary-row]')?.remove();
+      dialog.querySelector('[data-action=customer-anniversary-add]')?.focus();
+    } else {
+      const rows = dialog.querySelector('[data-anniversary-rows]');
+      if (rows.children.length >= customerAnniversaryLimit) { showError('記念日は10件まで登録できます。'); return; }
+      rows.insertAdjacentHTML('beforeend',customerUI.renderAnniversaryRow({},customerUIApi()));
+      rows.lastElementChild.querySelector('input').focus();
+    }
+    return;
+  }
   if (action.startsWith('practice-')) { updatePractice(action); return; }
   if (action.startsWith('cloud-')) { void cloudAction(action, target); return; }
   if (action === 'audit-log') {
@@ -3244,7 +3322,7 @@ function clickAction(target) {
     if (action === 'payroll-remove-rule') rules.splice(Number(id),1);
     else if (rules.length < 20) rules.push({});
     const group = form.querySelector('[data-payroll-rules]');
-    group.innerHTML = payrollUI.renderPayrollTemplateRows(rules,{escape,icon,variables:getPayrollVariables(state)});
+    group.innerHTML = payrollUI.renderPayrollTemplateRows(rules,{escape,icon,state,variables:getPayrollVariables(state)});
     (action === 'payroll-add-rule' ? group.lastElementChild?.querySelector('input') : form.querySelector('[data-action=payroll-add-rule]'))?.focus();
     return;
   }
@@ -3419,16 +3497,18 @@ function clickAction(target) {
     return;
   }
   if (['demo','open','seat','close','record-cash'].includes(action)) {openDialog(action); return;}
-  if (['demo-start','demo-live','demo-cash','demo-reports','demo-billing','demo-payroll','demo-labor'].includes(action)) {
+  if (['demo-start','demo-live','demo-cash','demo-reports','demo-analytics','demo-billing','demo-payroll','demo-labor','demo-customer-notices'].includes(action)) {
     const fromOpening = action === 'demo-start';
     const cashSample = action === 'demo-cash';
     const reportSample = action === 'demo-reports';
+    const analyticsSample = action === 'demo-analytics';
     const billingSample = action === 'demo-billing';
     const payrollSample = action === 'demo-payroll';
     const laborSample = action === 'demo-labor';
-    let sample = laborSample ? createLaborDemo() : payrollSample ? createPayrollDemo() : billingSample ? createBillingDemo() : reportSample ? createPeriodReportDemo()
+    const customerNoticeSample = action === 'demo-customer-notices';
+    let sample = analyticsSample ? createVisitAnalyticsDemo() : customerNoticeSample ? createCustomerNoticeDemo() : laborSample ? createLaborDemo() : payrollSample ? createPayrollDemo() : billingSample ? createBillingDemo() : reportSample ? createPeriodReportDemo()
       : cashSample ? createCashDemo() : createPhaseTwoDemo(fromOpening ? 'closed' : 'live');
-    if (cashSample || reportSample || billingSample || payrollSample || laborSample) demoRole = 'admin';
+    if (cashSample || reportSample || analyticsSample || billingSample || payrollSample || laborSample || customerNoticeSample) demoRole = 'admin';
     if (fromOpening) {
       sample.tables = structuredClone(state.tables);
       sample.layoutAreas = getLayoutAreas(state);
@@ -3446,20 +3526,21 @@ function clickAction(target) {
     }
     saveState(sample);
     announcedAutoExtensions.clear();
-    selected = fromOpening || cashSample || reportSample ? null : 'a1';
+    selected = fromOpening || cashSample || reportSample || analyticsSample ? null : 'a1';
     area=null; filter='all'; showHiddenStock=false; mobileDetails=false;
     reportDate = ''; commissionCast = ''; customersQuery = ''; customerFilters = {};
-    analyticsRange = {}; payrollMonth = ''; payrollCastId = '';
+    analyticsRange = analyticsSample ? {start:getReportDates(sample)[0],end:sample.day.date} : {};
+    payrollMonth = ''; payrollCastId = '';
     teamRange = {}; teamRole = 'all'; shiftDate = ''; shiftMode = 'week';
     laborRange = laborSample ? {start:getStaffLabor(sample).attendance[0].date,end:sample.day.date} : {};
     reportInterval = reportSample ? {mode:'range',start:getReportDates(sample)[0],end:sample.day.date} : {mode:'day'};
     reportExportError = '';
     if (!fromOpening) setFloorView('list',getLayoutAreas(state)[0]);
-    go(laborSample ? 'labor' : payrollSample ? 'payroll' : reportSample ? 'reports' : cashSample ? 'cash' : 'floor');
+    go(analyticsSample ? 'analytics' : customerNoticeSample ? 'customers' : laborSample ? 'labor' : payrollSample ? 'payroll' : reportSample ? 'reports' : cashSample ? 'cash' : 'floor');
     if (fromOpening) openDialog('open');
     else {
       dialog.close();
-      toast(laborSample ? '役職別の勤怠と人件費のサンプルを読み込みました。' : payrollSample ? '給与と日払いのサンプルを読み込みました。' : billingSample ? 'A-01は約30秒後に自動延長。A-02の自動延長はオフです。'
+      toast(analyticsSample ? '滞在・指名分析のサンプルを読み込みました。' : customerNoticeSample ? '顧客のお知らせのサンプルを読み込みました。' : laborSample ? '役職別の勤怠と人件費のサンプルを読み込みました。' : payrollSample ? '給与と日払いのサンプルを読み込みました。' : billingSample ? 'A-01は約30秒後に自動延長。A-02の自動延長はオフです。'
         : reportSample ? '期間集計のサンプルを読み込みました。'
         : cashSample ? '入出金と日報のサンプルを読み込みました。' : '営業中のサンプルを読み込みました。');
     }
@@ -3813,19 +3894,13 @@ function submitDialog(form) {
       break;
     }
     case 'order': {
-      const items = [...modal.orderItems];
-      if (modal.product) {
-        const line = currentOrderLine(form);
-        if (modal.editingOrderIndex !== undefined) items[modal.editingOrderIndex] = line;
-        else items.push(line);
-      }
+      const items = orderItemsFromForm(form);
       if (!items.length || items.length > 100) throw new Error('1〜100件の明細を注文リストに追加してください。');
       commit({type:'order',ticketId:id,items},'注文を確定しました。在庫と歩合見込を更新しました。');
       break;
     }
     case 'edit-ticket-line':
-      commit({type:'editTicketLine',ticketId:id,lineId:modal.lineId,quantity:numeric('quantity'),price:numeric('linePrice'),
-        castIds:data.getAll('castIds'),reason:value('reason')},'注文明細を訂正しました。');
+      commit(editTicketLineCommand(form),'注文明細を訂正しました。');
       break;
     case 'cancel-ticket-extension':
       commit({type:'cancelTicketExtension',ticketId:id,lineId:modal.lineId,reason:value('reason')},'延長を取り消しました。');
@@ -3864,7 +3939,8 @@ function submitDialog(form) {
       break;
     case 'calculation-settings':
       commit({type:'saveCalculationSettings',settings:{serviceRateBps:Math.round(numeric('serviceRate')*100),priceMode:value('priceMode'),
-        serviceBase:value('serviceBase'),serviceRounding:value('serviceRounding'),taxRounding:value('taxRounding')}},'計算設定を保存しました。');
+        serviceBase:value('serviceBase'),serviceRounding:value('serviceRounding'),taxRounding:value('taxRounding'),
+        allowOrderServiceExclusion:data.has('allowOrderServiceExclusion')}},'計算設定を保存しました。');
       break;
     case 'discount':
       commit({type:'discount',ticketId:id,mode:value('discountMode'),value:numeric('discountValue'),
@@ -4135,6 +4211,14 @@ app.addEventListener('change',(event)=> {
   }
 });
 dialog.addEventListener('change', (event) => {
+  if (event.target.name === 'orderServiceExcluded') {
+    const reason = dialog.querySelector('#order-service-reason');
+    if (reason) {
+      reason.hidden = !event.target.checked;
+      reason.querySelector('textarea').required = event.target.checked;
+    }
+    updateOrderServicePreview();
+  }
   if (modal?.type === 'cloud-groups' && event.target.name === 'group-select') {
     modal.selectedGroupId = event.target.value;
     paintDialog();
@@ -4185,7 +4269,7 @@ dialog.addEventListener('change', (event) => {
     const index = [...group.querySelectorAll('[name=payrollRuleBasis]')].indexOf(event.target);
     const rules = payrollUI.readPayrollTemplateRows(dialog.querySelector('form'));
     rules[index].value = null;
-    group.innerHTML = payrollUI.renderPayrollTemplateRows(rules,{escape,icon,variables:getPayrollVariables(state)});
+    group.innerHTML = payrollUI.renderPayrollTemplateRows(rules,{escape,icon,state,variables:getPayrollVariables(state)});
     group.querySelectorAll('[name=payrollRuleBasis]')[index]?.focus();
   }
   if (event.target.name === 'autoTableId' && modal?.type === 'table-auto-extension') {
@@ -4323,6 +4407,8 @@ dialog.addEventListener('input',(event)=> {
   if (!event.isComposing) updateCompanionSearch(event);
   updateGuideSearch(event);
   if (modal?.type === 'settled-ticket-contents') updateSettledContentsPreview(event.target.form);
+  if (['order','edit-ticket-line'].includes(modal?.type)
+    && ['quantity','linePrice','castIds'].includes(event.target.name)) updateOrderServicePreview();
   if (['extend','extend-overdue'].includes(modal?.type) && event.target.name === 'extensionPlanQuantity') updateExtensionMixPreview();
   if (modal?.type === 'accounting-settings' && event.target.name === 'csvValue') {
     event.target.closest('label').querySelector('[data-accounting-preview]').textContent = '例 ' + accountingCsvPreview(event.target.value);

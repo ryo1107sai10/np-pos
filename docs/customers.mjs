@@ -5,6 +5,7 @@ const editors = new Set(['admin', 'manager']);
 const datePattern = /^\d{4}-\d{2}-\d{2}$/;
 export const customerWeekdays = ['月', '火', '水', '木', '金', '土', '日'];
 export const customerPhotoMax = 12_000;
+export const customerAnniversaryLimit = 10;
 
 export function isCustomerPhoto(value) {
   return value === undefined || value === '' || (typeof value === 'string' && value.length <= customerPhotoMax
@@ -27,13 +28,56 @@ function profileText(value, max, label, required = false) {
   return text;
 }
 
+function isCalendarDate(value) {
+  if (typeof value !== 'string' || !datePattern.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
 function calendarDate(value, label) {
   const text = profileText(value, 10, label);
-  if (!text) return '';
-  const parsed = new Date(`${text}T00:00:00Z`);
-  check(datePattern.test(text) && Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === text,
-    `${label}を確認してください。`);
+  check(!text || isCalendarDate(text), `${label}を確認してください。`);
   return text;
+}
+
+function anniversaryKey({monthDay,label}) {
+  return `${monthDay}:${label}`;
+}
+
+export function isCustomerAnniversaries(value) {
+  return value === undefined || (Array.isArray(value) && value.length <= customerAnniversaryLimit
+    && value.every((entry) => record(entry) && typeof entry.monthDay === 'string' && isCalendarDate(`2000-${entry.monthDay}`)
+      && typeof entry.label === 'string' && entry.label.length <= 50 && entry.label.trim() === entry.label && entry.label.length > 0)
+    && new Set(value.map(anniversaryKey)).size === value.length);
+}
+
+export function getCustomerNotices(state, today) {
+  if (!isCalendarDate(today)) return [];
+  const day = 86_400_000;
+  const start = Date.parse(today);
+  const through = new Date(start + 7 * day).toISOString().slice(0,10);
+  const years = new Set([today.slice(0,4),through.slice(0,4)]);
+  const notices = [];
+  for (const customer of state.customers ?? []) {
+    if (customer.restricted) continue;
+    const add = (kind, label, date) => notices.push({customerId:customer.id, customerName:customer.name,
+      kind, label, date, daysUntil:(Date.parse(date) - start) / day});
+    const annual = (kind, label, monthDay) => {
+      for (const year of years) {
+        const date = `${year}-${monthDay}`;
+        if (date >= today && date <= through && isCalendarDate(date)) add(kind,label,date);
+      }
+    };
+    if (isCalendarDate(customer.birthday)) annual('birthday','誕生日',customer.birthday.slice(5));
+    for (const {label,monthDay} of customer.anniversaries ?? []) annual('anniversary',label,monthDay);
+    for (const bottle of customer.bottleKeeps ?? []) {
+      if (bottle.quantity > 0 && isCalendarDate(bottle.expiresAt) && bottle.expiresAt <= through) {
+        add('bottle',bottle.name,bottle.expiresAt);
+      }
+    }
+  }
+  return notices.sort((a,b) => Number(a.daysUntil < 0) - Number(b.daysUntil < 0)
+    || Math.abs(a.daysUntil) - Math.abs(b.daysUntil) || a.customerName.localeCompare(b.customerName,'ja'));
 }
 
 function bottleRecords(value) {
@@ -207,10 +251,12 @@ function customerInput(state, incoming, previous) {
   check(Array.isArray(tags) && tags.length <= 15, 'タグは15件以内で登録できます。');
   const cleanedTags = [...new Set(tags.map((tag) => profileText(tag, 27, 'タグ', true).replace(/^#+/, '')))].filter(Boolean);
   check(isCustomerPhoto(fields.photo), '顧客写真を確認してください。');
+  check(isCustomerAnniversaries(fields.anniversaries), '記念日は日付と50字以内の名前を、重複なしで10件まで登録できます。');
   return { name: profileText(fields.name, 60, '顧客名', true), kana: profileText(fields.kana, 60, 'ふりがな'), phone,
     birthday: calendarDate(fields.birthday, '誕生日'), castId, memo: profileText(fields.memo, 400, 'メモ'),
     flagged: fields.flagged === true, creditEnabled: fields.creditEnabled === true, creditLimit,
-    bottleKeeps: bottleRecords(fields.bottleKeeps), ...(email && {email}), ...(receiptRecipient && {receiptRecipient}),
+    bottleKeeps: bottleRecords(fields.bottleKeeps), ...(fields.anniversaries?.length && {anniversaries:fields.anniversaries.map(({monthDay,label})=>({monthDay,label}))}),
+    ...(email && {email}), ...(receiptRecipient && {receiptRecipient}),
     ...(daysOff.length && {daysOff}), ...(cleanedTags.length && {tags:cleanedTags}), ...(fields.photo && {photo:fields.photo}) };
 }
 
@@ -392,6 +438,10 @@ export function applyCustomerCommand(state, action, actor, now, allocateId) {
   firstVisit(target, source.firstVisitDate);
   target.bottleKeeps = [...(target.bottleKeeps ?? []), ...(source.bottleKeeps ?? [])];
   check(target.bottleKeeps.length <= 30, '統合後のボトルキープが30件を超えます。');
+  const anniversaries = [...new Map([...(target.anniversaries ?? []), ...(source.anniversaries ?? [])]
+    .map((entry) => [anniversaryKey(entry),entry])).values()];
+  check(anniversaries.length <= customerAnniversaryLimit, '統合後の記念日が10件を超えます。');
+  if (anniversaries.length) target.anniversaries = anniversaries;
   for (const key of ['email','receiptRecipient','photo']) if (!target[key] && source[key]) target[key] = source[key];
   const tags = [...new Set([...(target.tags ?? []), ...(source.tags ?? [])])];
   check(tags.length <= 15, '統合後のタグが15件を超えます。');

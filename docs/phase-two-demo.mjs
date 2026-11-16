@@ -1,4 +1,5 @@
 import { apply, createDemo, quote, summary } from './engine.mjs';
+import { getCalculationSettings } from './calculation-settings.mjs';
 
 const demoAdmin = { id: 'demo-admin', label: 'デモの店舗管理者', role: 'admin' };
 const demoCustomer = {name:'山本 花子', kana:'やまもと はなこ',
@@ -24,6 +25,17 @@ export function createPhaseTwoDemo(mode = 'live', now = Date.now()) {
   step({ type:'recoverReceivable', receivableId:state.receivables[0].id, amount:4_000,
     method:'bank', date:state.day.date }, now - 5 * 60_000);
   return state;
+}
+
+export function createCustomerNoticeDemo(now = Date.now()) {
+  let state = createPhaseTwoDemo('live', now);
+  const date = (offset) => new Date(Date.parse(state.day.date) + offset * 86_400_000).toISOString().slice(0,10);
+  const [birthday, anniversary] = state.customers;
+  state = apply(state, {type:'saveCustomer',customerId:birthday.id,customer:{birthday:`2000-${date(0).slice(5)}`,
+    bottleKeeps:[{name:'サンプルウイスキー',quantity:0.7,unit:'本',expiresAt:date(5)}]}}, now, demoAdmin);
+  return apply(state, {type:'saveCustomer',customerId:anniversary.id,customer:{
+    anniversaries:[{label:'初回来店記念日',monthDay:date(2).slice(5)}],
+    bottleKeeps:[{name:'サンプル焼酎',quantity:0.4,unit:'本',expiresAt:date(-1)}]}}, now, demoAdmin);
 }
 
 export function createCashDemo(now = Date.now()) {
@@ -92,7 +104,10 @@ export function createBillingDemo(now = Date.now()) {
   sample = step(sample,{type:'setTableAutoExtension',tableId:'a2',enabled:false},now - 72 * minute);
   const seatedAt = now - 60 * minute + 30_000;
   sample = step(sample,{type:'seat',tableIds:['a1'],guests:2,setId:'set60'},seatedAt);
-  return step(sample,{type:'seat',tableIds:['a2'],guests:1,setId:'set60'},seatedAt);
+  sample = step(sample,{type:'seat',tableIds:['a2'],guests:1,setId:'set60'},seatedAt);
+  return step(sample,{type:'saveCalculationSettings',settings:{
+    ...getCalculationSettings(sample),allowOrderServiceExclusion:true,
+  }},now);
 }
 
 export function createPayrollDemo(now = Date.now()) {
@@ -114,6 +129,11 @@ export function createPayrollDemo(now = Date.now()) {
   }
   step({type:'saveShift',castId,date,startMinute:1200,endMinute:1500,status:'confirmed'});
   step({type:'saveShift',castId:'cast2',date,startMinute:1260,endMinute:1560,status:'requested'});
+  step({type:'savePayrollTemplate',name:'実績連動サンプル',rules:[
+    {label:'個人売上の5％',kind:'allowance',basis:'formula',left:'personalSales',operator:'*',right:'number',rightValue:0.05},
+    {label:'勤務日手当',kind:'allowance',basis:'formula',left:'workdays',operator:'*',right:'number',rightValue:200},
+    {label:'本指名の件数手当',kind:'allowance',basis:'formula',left:'menu:quantity:nomination',operator:'*',right:'number',rightValue:100},
+  ]});
   return state;
 }
 
@@ -131,6 +151,35 @@ export function createLaborDemo(now = Date.now()) {
       step({type:'saveStaffAttendance',personId,date,clockInAt,clockOutAt:clockInAt + (5+index) * 60 * 60_000,
         breakMinutes:30,reason:'勤怠・人件費サンプル'});
     }
+  }
+  return state;
+}
+
+export function createVisitAnalyticsDemo(now = Date.now()) {
+  const minute = 60_000;
+  let state = createDemo('closed',now);
+  const date = state.day.date;
+  const prior = new Date(Date.parse(date) - 86_400_000).toISOString().slice(0,10);
+  const step = (command,at) => { state = apply(state,command,at,demoAdmin); };
+  const sampleDays = [
+    {date:prior,start:Date.parse(`${prior}T20:00:00+09:00`),stays:[55,35],close:true},
+    {date,start:now - 175 * minute,stays:[75,45,null],close:false},
+  ];
+  for (const day of sampleDays) {
+    let at = day.start;
+    step({type:'open',date:day.date,openingCash:20_000},at);
+    for (const [index,stay] of day.stays.entries()) {
+      at += 5 * minute;
+      step({type:'seat',tableIds:[`a${index + 1}`],guests:index === 0 ? 2 : 1,setId:'set60'},at);
+      const {id:ticketId} = state.tickets.at(-1);
+      const item = index === 0 ? {menuId:'nomination',quantity:1,castIds:['cast1']}
+        : {menuId:'highball',quantity:1,castIds:[]};
+      step({type:'order',ticketId,items:[item]},at + 4 * minute);
+      step({type:'settle',ticketId,payments:[{method:'cash',amount:quote(state,ticketId).remaining}]},at + 25 * minute);
+      at += (stay ?? 25) * minute;
+      if (stay !== null) step({type:'depart',ticketId},at);
+    }
+    if (day.close) step({type:'close',actualCash:summary(state).expectedCash},at + 10 * minute);
   }
   return state;
 }

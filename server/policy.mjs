@@ -2,7 +2,7 @@ import { exportStoreConfiguration, maxOverdueExtensionCount, parseStoreConfigura
 import { isAutoExtensionPauseSource, isValidAutoExtensionSettings, isValidVisitAutoExtensionPause } from '../docs/auto-extension.mjs';
 import { canWaivePaymentFee, depositGrossAmount, normalizeCardFeeSettings } from '../docs/card-fee.mjs';
 import { getMonthlyReportSales } from '../docs/report-period.mjs';
-import { customerWeekdays, isAssignedCustomer, isCustomerPhoto } from '../docs/customers.mjs';
+import { customerWeekdays, isAssignedCustomer, isCustomerAnniversaries, isCustomerPhoto } from '../docs/customers.mjs';
 import { getRecoveryRows, isValidCashMovement } from '../docs/cash-ledger.mjs';
 import { getCashCountTotal, getCashPaymentAmount, isRegisterCashAmount } from '../docs/register-cash.mjs';
 import { isValidPrintDocument, normalizePrintSettings } from '../docs/print-domain.mjs';
@@ -12,7 +12,7 @@ import { validateShiftsSnapshot } from '../docs/shifts.mjs';
 import { isValidInitialSetSchedule } from '../docs/set-schedule.mjs';
 import { getDailyPayByDate, isDailyPayCommand, isPayrollCommand, isPayrollMonth, normalizeAttendanceSnapshot, normalizePayrollSnapshot } from '../docs/payroll.mjs';
 import { getCastWorkspace, isCastSelfCommand, listCastAttendance, validateCastAttendanceSnapshot } from '../docs/cast-self.mjs';
-import { isValidCalculationSettings, normalizeCalculationSettings, roundCalculationRate } from '../docs/calculation-settings.mjs';
+import { canExcludeOrderService, isValidCalculationSettings, normalizeCalculationSettings, roundCalculationRate } from '../docs/calculation-settings.mjs';
 import { normalizeAttendanceItems } from '../docs/payroll-records.mjs';
 import { normalizeRolePolicy, roleAllowsCommand, roleGroupAllowed } from '../docs/role-policy.mjs';
 import { isPersonalSalesAmount, isPersonalSalesDiscountMode, isValidPersonalSalesHistory } from '../docs/personal-sales.mjs';
@@ -157,13 +157,17 @@ export function verifyCommand(role, command, state, profileId) {
     400, 'invalid-command', '伝票と人数変更の内容を確認してください。');
   }
   if (command.type === 'editTicketLine' || command.type === 'cancelTicketExtension') {
-    const {ticketId,lineId,quantity,castIds,price} = command;
+    const {ticketId,lineId,quantity,castIds,price,serviceExcluded} = command;
     const validLine = [ticketId,lineId].every((id) => typeof id === 'string' && id.length > 0 && id.length <= 128);
     const validEdit = Number.isInteger(quantity) && quantity > 0 && quantity <= 100 && (price === undefined || validYen(price))
+      && (serviceExcluded === undefined || typeof serviceExcluded === 'boolean')
       && (castIds === undefined || (Array.isArray(castIds) && castIds.length <= 100
         && castIds.every((id) => typeof id === 'string' && id.length > 0 && id.length <= 128)));
     requireCondition(validLine && (command.type === 'cancelTicketExtension' || validEdit),
       400,'invalid-command','訂正する明細を確認してください。');
+    if (command.type === 'editTicketLine' && serviceExcluded !== undefined) {
+      requireCondition(canExcludeOrderService(state,role),403,'forbidden','サービス料の除外には店舗設定と管理者権限が必要です。');
+    }
   }
   if (command.type === 'extendOverdue' || (command.type === 'extend' && command.plans !== undefined)) {
     const {ticketId, menuId, plans, expectedCount, expectedTotal} = command;
@@ -188,8 +192,14 @@ export function verifyCommand(role, command, state, profileId) {
       && ['add','remove'].includes(mode),400,'invalid-command','登録済みの同席者を選択してください。');
   }
   if (command.type === 'order') {
-    requireCondition(Array.isArray(command.items) && command.items.length <= 100 && command.items.every(isRecord),
+    requireCondition(Array.isArray(command.items) && command.items.length > 0 && command.items.length <= 100
+      && command.items.every((item) => isRecord(item) && (item.serviceExcluded === undefined || typeof item.serviceExcluded === 'boolean')),
       400, 'invalid-command', '注文内容を確認してください。');
+    for (const item of command.items.filter(({serviceExcluded}) => serviceExcluded)) {
+      requireCondition(canExcludeOrderService(state,role),403,'forbidden','サービス料の除外には店舗設定と管理者権限が必要です。');
+      requireCondition(typeof item.serviceExclusionReason === 'string' && item.serviceExclusionReason.trim().length > 0
+        && item.serviceExclusionReason.trim().length <= 120,400,'reason-required','サービス料の除外理由を120文字以内で入力してください。');
+    }
   }
   if (command.type === 'setTableAutoExtension') {
     requireCondition(typeof command.tableId === 'string' && command.tableId.length > 0 && command.tableId.length <= 100
@@ -566,6 +576,7 @@ function validTicket(ticket) {
       && (line.hideReceiptLine === undefined || (typeof line.hideReceiptLine === 'boolean' && (!line.hideReceiptLine || line.price === 0)))
       && Number.isInteger(line.quantity) && line.quantity > 0
       && nonnegative(line.price) && nonnegative(line.total) && nonnegative(line.taxRate)
+      && (line.serviceExcluded === undefined || (typeof line.serviceExcluded === 'boolean' && (!line.serviceExcluded || line.serviceEligible === true)))
       && (line.autoExtension === undefined || typeof line.autoExtension === 'boolean')
       && Array.isArray(line.castIds) && Array.isArray(line.stockUses)
       && (line.castIds.length === 0 || isRecord(line.commission)))
@@ -612,6 +623,7 @@ function validCustomer(customer) {
     && optionalText(customer.kana, 60) && optionalText(customer.phone, 32) && optionalText(customer.memo, 400)
     && optionalText(customer.castId, 100) && optionalDate(customer.birthday) && optionalDate(customer.firstVisitDate)
     && optionalText(customer.email, 254) && optionalText(customer.receiptRecipient, 80) && isCustomerPhoto(customer.photo)
+    && isCustomerAnniversaries(customer.anniversaries)
     && (customer.daysOff === undefined || (Array.isArray(customer.daysOff) && customer.daysOff.every((day) => customerWeekdays.includes(day))
       && new Set(customer.daysOff).size === customer.daysOff.length))
     && (customer.tags === undefined || (Array.isArray(customer.tags) && customer.tags.length <= 15

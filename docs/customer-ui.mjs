@@ -1,4 +1,4 @@
-import { customerPhotoMax, customerWeekdays, findCustomer, getCustomerDetail, getCustomerDirectory,
+import { customerAnniversaryLimit, customerPhotoMax, customerWeekdays, findCustomer, getCustomerDetail, getCustomerDirectory, getCustomerNotices,
   isCustomerPhoto, listUnlinkedVisits, searchCustomers } from './customers.mjs';
 
 const appointment = new Intl.DateTimeFormat('ja-JP', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'Asia/Tokyo' });
@@ -93,10 +93,28 @@ function filtersView(state, filter, {escape}) {
     </div><button class="btn btn-quiet" type="button" data-action="customer-reset-filters">条件をクリア</button></details>`;
 }
 
+export function renderCustomerNotices(state, api) {
+  return canView(api) ? customerNotices(getCustomerNotices(state, api.businessDate), api) : '';
+}
+
+function customerNotices(notices, api) {
+  if (!notices.length) return '<p class="field-help">該当するお知らせはありません。</p>';
+  const {escape} = api;
+  const rows = (entries) => compactHistory(entries.map(({customerId,customerName,kind,label,date,daysUntil}) => {
+    const timing = daysUntil < 0 ? '期限切れ' : daysUntil === 0 ? '今日' : `${daysUntil}日後`;
+    return `<li><div><strong>${escape(customerName)}</strong><small>${escape(kind === 'bottle' ? `ボトル期限 ／ ${label}` : label)}</small>
+      <small>${escape(date)} ／ ${timing}</small></div>${action(api, '詳細', 'customer-detail', customerId, 'chevron-right')}</li>`;
+  }).join(''));
+  const remaining = notices.slice(6);
+  return rows(notices.slice(0,6)) + (remaining.length
+    ? `<details class="np-directory-notice-more"><summary>ほか ${remaining.length} 件</summary>${rows(remaining)}</details>` : '');
+}
+
 export function renderCustomers(state, api) {
   if (!canView(api)) return denied(api);
   const {escape, icon, yen, query = '', filter = {}} = api;
   const customers = getCustomerDirectory(state, query, filter, api.businessDate);
+  const notices = getCustomerNotices(state, api.businessDate);
   const rows = customers.map(({customer,lastVisit,visits,totalSales,bottleExpiry,lapsed}) => `<li><button class="np-directory-row np-customer-row" type="button" data-action="customer-detail" data-id="${escape(customer.id)}">
     ${avatar(customer.photo, api)}
     <span class="np-directory-row-name"><strong>${escape(customer.name)}</strong>${customer.kana ? `<small>${escape(customer.kana)}</small>` : ''}
@@ -112,6 +130,8 @@ export function renderCustomers(state, api) {
   return `<div class="np-directory"><div class="np-directory-actions np-directory-page-actions">
     ${api.role === 'admin' ? action(api, 'CSV一括登録', 'customer-import', '', 'plus') : ''}
     ${api.canEdit !== false ? action(api, '顧客を登録', 'customer-new', '', 'plus', true) : ''}</div>
+    <details class="np-directory-panel np-directory-notice-more"${notices.length ? ' open' : ''}>
+    <summary>誕生日・記念日・ボトル期限${notices.length ? `（${notices.length}件）` : ''}</summary>${customerNotices(notices,api)}</details>
     ${panel('顧客一覧', `<div class="np-directory-toolbar">${field('顧客を検索', `<input type="search" name="customerSearch" value="${escape(query)}" placeholder="表示名・ふりがな・電話番号・タグ" autocomplete="off" maxlength="100">`)}</div>
     ${filtersView(state, filter, api)}
     ${rows ? `<ul class="np-directory-list">${rows}</ul>` : empty(api, 'users', query || Object.values(filter).some(Boolean)
@@ -126,6 +146,7 @@ export function renderCustomerDetail(state, id, api) {
   const nominationRows = nominations.map((entry) => `<li><div><strong>${escape(entry.castName || '—')}</strong><small>${dateAndTime(entry.date, entry.at, api)}${entry.name ? ` ／ ${escape(entry.name)}` : ''}</small></div></li>`).join('');
   const bottles = (customer.bottleKeeps ?? []).map((bottle) => `<li><div><strong>${escape(bottle.name)}</strong><small>残り ${escape(bottle.quantity)} ${escape(bottle.unit || '')}${bottle.expiresAt ? ` ／ 期限 ${escape(bottle.expiresAt)}` : ''}</small></div>
     ${bottle.photo && isCustomerPhoto(bottle.photo) ? `<img class="np-bottle-thumbnail" src="${escape(bottle.photo)}" alt="${escape(bottle.name)}の記録写真" loading="lazy">` : ''}</li>`).join('');
+  const anniversaries = (customer.anniversaries ?? []).map(({monthDay,label}) => `<li><div><strong>${escape(label)}</strong><small>${Number(monthDay.slice(0,2))}月${Number(monthDay.slice(3))}日</small></div></li>`).join('');
   return `<div class="np-directory np-directory-detail"><div class="np-directory-profile">${avatar(customer.photo, api, 22)}
     <div><strong>${escape(customer.name)}</strong>${customer.kana ? `<small>${escape(customer.kana)}</small>` : ''}</div>
     ${customer.flagged ? '<span class="np-directory-badge np-ar-status-overdue">要注意</span>' : ''}</div>
@@ -138,6 +159,7 @@ export function renderCustomerDetail(state, id, api) {
     ${customer.daysOff?.length ? `<div><dt>お休み</dt><dd>${escape(customer.daysOff.join('・'))}曜日</dd></div>` : ''}
     ${customer.tags?.length ? `<div><dt>タグ</dt><dd>${customer.tags.map((tag) => escape(`#${tag}`)).join(' ')}</dd></div>` : ''}
     ${customer.memo ? `<div class="np-directory-note"><dt>メモ</dt><dd>${escape(customer.memo)}</dd></div>` : ''}</dl>
+    ${anniversaries ? panel('記念日', compactHistory(anniversaries)) : ''}
     ${panel('来店履歴', compactHistory(visitRows) || empty(api, 'calendar', '来店履歴はありません'), `${visits.length}件`)}
     ${panel('指名履歴', compactHistory(nominationRows) || empty(api, 'user', '指名履歴はありません'), `${nominations.length}件`)}
     ${panel('キープボトル', compactHistory(bottles) || empty(api, 'box', 'キープ中のボトルはありません'))}</div>`;
@@ -167,7 +189,23 @@ export function renderCustomerForm(state, id, api) {
       `<label><input name="daysOff" type="checkbox" value="${day}"${customer.daysOff?.includes(day) ? ' checked' : ''}>${day}</label>`).join('')}</div></fieldset>
     ${photoInput('写真・名刺（任意）','profilePhoto',customer.photo,escape)}
     <div class="np-directory-checks"><label><input name="flagged" type="checkbox" value="1"${customer.flagged ? ' checked' : ''}>要注意として表示</label>
-    </div>${field('メモ（任意）', `<textarea name="memo" rows="3" maxlength="400">${value('memo')}</textarea>`)}${bottleFields(customer, api)}</div>`;
+    </div>${field('メモ（任意）', `<textarea name="memo" rows="3" maxlength="400">${value('memo')}</textarea>`)}
+    <fieldset class="np-directory-bottle"><legend>毎年の記念日（任意）</legend><div data-anniversary-rows>
+    ${(customer.anniversaries ?? []).map((entry) => renderAnniversaryRow(entry,api)).join('')}</div>
+    ${action(api,'記念日を追加','customer-anniversary-add','','plus')}<p class="field-help">${customerAnniversaryLimit}件まで登録できます。</p></fieldset>
+    ${bottleFields(customer, api)}</div>`;
+}
+
+export function renderAnniversaryRow({monthDay = '', label = ''}, api) {
+  const select = (name, optionLabel, length, value) => `<select name="${name}" required><option value="">${optionLabel}</option>${Array.from({length}, (_, index) => {
+    const option = String(index + 1).padStart(2,'0');
+    return `<option value="${option}"${option === value ? ' selected' : ''}>${index + 1}</option>`;
+  }).join('')}</select>`;
+  return `<div class="form-grid np-anniversary-row" data-anniversary-row>
+    ${field('記念日の名前', `<input name="anniversaryLabel" required maxlength="50" value="${api.escape(label)}" placeholder="初回来店記念日">`)}
+    ${field('月', select('anniversaryMonth','選択',12,monthDay.slice(0,2)))}
+    ${field('日', select('anniversaryDay','選択',31,monthDay.slice(3)))}
+    ${action(api,'外す','customer-anniversary-remove','','minus')}</div>`;
 }
 
 function photoInput(title, name, photo, escape) {
@@ -197,6 +235,9 @@ export function readCustomerForm(form, data) {
   customer.flagged = data.has('flagged');
   customer.daysOff = data.getAll('daysOff');
   customer.tags = String(data.get('tags') ?? '').split(/[,、，]/u).map((tag) => tag.trim()).filter(Boolean);
+  const months = data.getAll('anniversaryMonth');
+  const days = data.getAll('anniversaryDay');
+  customer.anniversaries = data.getAll('anniversaryLabel').map((label,index) => ({label:label.trim(),monthDay:`${months[index]}-${days[index]}`}));
   const photoValue = (field) => field?.closest('.np-directory-photo')?.querySelector('[data-photo-remove]')?.checked ? '' : field?.value ?? '';
   customer.photo = photoValue(form.querySelector('[name=profilePhoto]'));
   const names = data.getAll('bottleName');
