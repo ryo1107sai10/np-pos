@@ -705,9 +705,14 @@ function paintDialog(layoutFileInput) {
   const q = ticket ? quote(state,id) : null;
   const headline = ticket ? `<div class="modal-context">${icon('table',16)}<strong>${escape(titles(ticket))}</strong><span>${ticket.guests}名${ticket.customer ? ` · ${escape(ticket.customer)}` : ''}</span></div>` : '';
   switch (modal.type) {
-    case 'cloud':
+    case 'cloud': {
+      const sections = new Map([...dialog.querySelectorAll('[data-cloud-section]')].map((section) => [section.dataset.cloudSection, section.open]));
       present('店舗・アカウント', renderCloudPanel(cloudModel(), {escape, icon}), null, { style: 'cloud-dialog' });
+      for (const section of dialog.querySelectorAll('[data-cloud-section]')) {
+        if (sections.has(section.dataset.cloudSection)) section.open = sections.get(section.dataset.cloudSection);
+      }
       return;
+    }
     case 'cloud-migration': {
       const snapshot = modal.snapshot;
       const details = {

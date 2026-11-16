@@ -78,7 +78,7 @@ function loginPanel(cloud, api) {
   ${unavailable ? `<p class="np-cloud-message" role="status">この公開先ではクラウド店舗を利用できません。デモは引き続きお試しいただけます。</p>` : `<section class="np-cloud-card np-cloud-sign-in" aria-labelledby="cloud-login-heading">
     <h3 id="cloud-login-heading">サインイン</h3>
     ${google ? `<div class="np-cloud-google">${button('Googleでサインイン', 'cloud-google', api, { glyph: 'user', tone: 'primary', disabled: busy })}</div>` : ''}
-    ${passwords ? (google ? `<details><summary>メールアドレスでサインイン</summary>${emailFields}</details>` : emailFields) : ''}
+    ${passwords ? (google ? `<details data-cloud-section="email"><summary>メールアドレスでサインイン</summary>${emailFields}</details>` : emailFields) : ''}
   </section>`}
   <div class="np-cloud-buttons">${button('サインインなしで試す', 'cloud-demo', api, { glyph: 'arrow-left', tone: 'quiet' })}</div>`;
 }
@@ -96,7 +96,7 @@ function storeChooser(cloud, api) {
         <small>${roleName(store.role)}${store.hasState === false ? ' · 初期設定待ち' : ''}</small></span>
         ${current ? '<span class="np-cloud-role">利用中</span>' : icon('chevron-right', 14)}</button></li>`;
     }).join('')}</ul>` : '<p class="np-cloud-copy">所属する店舗はありません。招待を受けたメールアドレスでサインインすると店舗が表示されます。</p>'}
-    <details class="np-cloud-create"><summary>店舗を作成</summary><div class="np-cloud-detail-body">
+    <details class="np-cloud-create" data-cloud-section="create"><summary>店舗を作成</summary><div class="np-cloud-detail-body">
       <div class="np-cloud-form-row">${field('店舗名','cloud-store-name','text',`autocomplete="organization" maxlength="80"${busy ? ' disabled' : ''}`)}${button('作成する','cloud-create-store',api,{ glyph:'plus', disabled:busy })}</div>
     </div></details>
   </section>`;
@@ -138,7 +138,7 @@ function membersPanel(cloud, api) {
     ${invites.length ? `<div><h4 class="np-cloud-subheading">招待中</h4><ul class="np-cloud-people">${invites.map((invite) => `<li class="np-cloud-person">
       <span class="np-cloud-identity"><strong>${escape(invite.email)}</strong><small>${roleName(invite.role)}</small></span>
       ${button('招待を取り消す', 'cloud-invite-revoke', api, { id: invite.id, tone: 'quiet', disabled: cloud.busy })}</li>`).join('')}</ul></div>` : ''}
-    <details class="np-cloud-create"><summary>メンバーを招待</summary>
+    <details class="np-cloud-create" data-cloud-section="invite"><summary>メンバーを招待</summary>
       <div class="np-cloud-detail-body">
         <div class="np-cloud-invite-form">${field('メールアドレス', 'cloud-invite-email', 'email', `autocomplete="off" maxlength="254"${cloud.busy ? ' disabled' : ''}`)}
           <label class="field"><span>権限</span><select name="cloud-invite-role"${cloud.busy ? ' disabled' : ''}>${roleOptions()}</select></label></div>
