@@ -321,12 +321,22 @@ function layoutNameKey(name) {
   return name.normalize('NFKC').toLowerCase();
 }
 
+export function removeLayoutArea(areas, tables, area) {
+  const target = typeof area === 'string' ? layoutNameKey(area.trim()) : '';
+  const isTarget = (name) => typeof name === 'string' && layoutNameKey(name.trim()) === target;
+  assert(target && areas.some(isTarget), '指定されたエリアが見つかりません。');
+  assert(!tables.some((table) => isTarget(table.area)),
+    '卓があるエリアは削除できません。先に卓を移動するか削除してください。');
+  return areas.filter((name) => !isTarget(name));
+}
+
 function doSaveLayout(state, { areas, tables }) {
   const legacySave = areas === undefined;
   assert(Array.isArray(tables) && (!legacySave || tables.length === state.tables.length),
     'すべての卓の配置を指定してください。');
   const areaList = legacySave ? getLayoutAreas(state) : areas;
-  assert(Array.isArray(areaList) && areaList.length > 0, 'エリアを1つ以上指定してください。');
+  assert(Array.isArray(areaList) && (areaList.length > 0 || tables.length === 0),
+    '卓が残っている間は、エリアを1つ以上指定してください。');
   const areasByKey = new Map();
   for (const entry of areaList) {
     const area = layoutName(entry, 'エリア名');

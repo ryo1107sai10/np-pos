@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createDemo, apply, quote, summary, getTicketForTable, tableStatus, businessDate,
-  getLayoutTables, getLayoutAreas, getTableLabel, layoutGrid } from '../docs/engine.mjs';
+  getLayoutTables, getLayoutAreas, getTableLabel, layoutGrid, removeLayoutArea } from '../docs/engine.mjs';
 
 const now = Date.parse('2026-11-16T14:41:00Z');
 const minutes = (count) => count * 60_000;
@@ -269,4 +269,47 @@ test('layout names are bounded and normalized for uniqueness within each area', 
   const japaneseName = 'カ\u3099ーデン';
   const next = saveConfiguration(state, { tables: rename('a1', japaneseName) });
   assert.equal(getTableLabel(next, 'a1'), 'ガーデン');
+});
+
+test('an area cannot be removed while it contains any table, even when the table is available', () => {
+  const state = createDemo('closed', now);
+  assert.equal(tableStatus(state, 'a1', now), 'available');
+  const areas = getLayoutAreas(state);
+  const tables = getLayoutTables(state);
+  assert.throws(() => removeLayoutArea(areas, tables, 'フロアA'), /卓があるエリアは削除できません/);
+  assert.throws(() => removeLayoutArea(areas, [{ ...tables[0], area: ' フロアＡ ' }], 'フロアA'), /卓がある/);
+  assert.deepEqual(areas, getLayoutAreas(state));
+  assert.deepEqual(tables, getLayoutTables(state));
+});
+
+test('an empty area is removed from the draft without mutating the input or changing existing tables', () => {
+  const state = createDemo('closed', now);
+  const areas = [...getLayoutAreas(state), 'テラス'];
+  const tables = getLayoutTables(state);
+  const remaining = removeLayoutArea(areas, tables, 'テラス');
+  assert.deepEqual(remaining, getLayoutAreas(state));
+  assert.equal(areas.at(-1), 'テラス');
+  assert.throws(() => removeLayoutArea(areas, tables, '未登録'), /見つかりません/);
+  const saved = saveConfiguration(state, { areas: remaining, tables });
+  assert.deepEqual(getLayoutTables(saved), tables);
+});
+
+test('saving a stale list rejects any table that still references a removed area', () => {
+  const state = createDemo('closed', now);
+  const areas = getLayoutAreas(state).filter((area) => area !== 'フロアA');
+  assert.throws(() => saveConfiguration(state, { areas }), /A-01のエリアを確認/);
+  assert.throws(() => saveConfiguration(state, { areas: [] }), /1つ以上/);
+  assert.equal(getLayoutAreas(state)[0], 'フロアA');
+});
+
+test('the last empty area can be removed and saved, then a new area and table can be added', () => {
+  let state = saveConfiguration(createDemo('closed', now), { areas: ['予備'], tables: [] });
+  const areas = removeLayoutArea(getLayoutAreas(state), getLayoutTables(state), '予備');
+  state = saveConfiguration(state, { areas, tables: [] });
+  state = JSON.parse(JSON.stringify(state));
+  assert.deepEqual(getLayoutAreas(state), []);
+  assert.deepEqual(getLayoutTables(state), []);
+  state = saveConfiguration(state, { areas: ['テラス'], tables: [newTable] });
+  assert.deepEqual(getLayoutAreas(state), ['テラス']);
+  assert.equal(getTableLabel(state, newTable.id), '新卓');
 });

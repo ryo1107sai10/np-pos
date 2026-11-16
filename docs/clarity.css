@@ -236,3 +236,26 @@ body {
 .seat .seat-name, .seat .seat-area { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .layout-stage .layout-tile .seat-name { display: block; }
 .detail-title h3, .choice strong, .choice small { min-width: 0; overflow-wrap: anywhere; }
+
+@media (max-width: 610px) {
+  .workspace { padding-left: max(12px, env(safe-area-inset-left)); padding-right: max(12px, env(safe-area-inset-right)); }
+  .nav-link span { font-size: 10px; }
+  .demo-button { min-width: 44px; min-height: 44px; }
+  .side-bottom { width: 44px; }
+  .seating-plan-toolbar { display: grid; grid-template-columns: minmax(0, 1fr); align-items: stretch; gap: 4px; }
+  .seating-plan-toolbar .seg { width: 100%; }
+  .seating-plan-toolbar .seg button { flex: 1; justify-content: center; }
+  .seating-plan-toolbar .layout-areas { width: 100%; }
+  .area-filter select, .seating-toolbar .seg button { min-height: 44px; }
+  .seat .pill { font-size: 10px; }
+  .detail.mobile-visible .detail-head { position: sticky; top: 0; z-index: 1; }
+  .detail-mobile-close, .modal-head .icon-btn { width: 44px; height: 44px; }
+  .detail.mobile-visible .line-remove { width: 44px; height: 44px; }
+  .modal .field > input, .modal .field > select { font-size: 16px; }
+  .modal-foot button { min-height: 44px; }
+}
+
+.hall-plan-hint { display: none; }
+@media (max-width: 475px) {
+  .hall-plan-hint { display: flex; align-items: center; gap: 6px; margin: 0 4px 8px; color: var(--muted); font-size: 11px; }
+}

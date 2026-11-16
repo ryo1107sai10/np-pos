@@ -62,10 +62,10 @@ function loadFloorView() {
   try {
     const preference = JSON.parse(localStorage.getItem(floorViewStorageKey));
     if (preference?.view === 'plan') {
-      return { view: 'plan', area: areas.includes(preference.area) ? preference.area : areas[0] };
+      return { view: 'plan', area: areas.includes(preference.area) ? preference.area : (areas[0] ?? null) };
     }
   } catch { /* The list is available when storage is blocked. */ }
-  return { view: 'list', area: areas[0] };
+  return { view: 'list', area: areas[0] ?? null };
 }
 
 function setFloorView(view, nextArea = planArea) {
@@ -92,7 +92,8 @@ function syncFloorSelection() {
   if (area !== null && !areas.includes(area)) area = null;
   if (!areas.includes(planArea)) {
     const selectedTable = state.tables.find((table) => table.id === selected);
-    setFloorView(floorView, selectedTable?.area ?? areas[0]);
+    const fallback = selectedTable?.area ?? areas[0] ?? null;
+    if (planArea !== fallback) setFloorView(floorView, fallback);
   }
   if (floorView === 'plan') selectVisibleTicket();
   else if (selected && !state.tables.some((table) => table.id === selected)) selected = null;
@@ -201,14 +202,19 @@ function renderFloor() {
   const viewSwitch = `<div class="floor-view-switch" role="group" aria-label="ホールの表示形式">
     <button type="button" data-action="floor-view" data-id="list" aria-pressed="${!showingPlan}">一覧</button>
     <button type="button" data-action="floor-view" data-id="plan" aria-pressed="${showingPlan}">レイアウト</button></div>`;
-  const areaPicker = showingPlan ? layoutAreaTabs(planArea, 'layout-view-area', escape, areas)
+  const areaPicker = areas.length === 0 ? '' : showingPlan ? layoutAreaTabs(planArea, 'layout-view-area', escape, areas)
     : `<label class="area-filter" title="エリア">${icon('filter', 16)}<select id="area-filter" aria-label="エリアで絞り込む"><option value="">全エリア</option>${areas.map((name) => `<option value="${escape(name)}" ${area === name ? 'selected' : ''}>${escape(name)}</option>`).join('')}</select></label>`;
-  const floorContent = showingPlan ? floorLayoutStage(visible, planArea, { renderSeat: renderTable, escape })
-    : `<div class="table-grid">${visible.length ? visible.map(renderTable).join('') : `<p class="empty-grid">${state.tables.length ? '該当する卓はありません。' : '「レイアウト編集」から卓を追加できます。'}</p>`}</div>`;
+  const emptyFloor = areas.length === 0 ? '「レイアウト編集」からフロア・エリアを追加できます。'
+    : state.tables.length === 0 ? '「レイアウト編集」から卓を追加できます。' : '該当する卓はありません。';
+  const emptyState = `<p class="empty-grid">${emptyFloor}</p>`;
+  const planHint = visible.length ? `<p class="hall-plan-hint">${icon('move', 14)}図面を左右にスワイプできます</p>` : '';
+  const floorContent = areas.length === 0 ? emptyState
+    : showingPlan ? planHint + floorLayoutStage(visible, planArea, { renderSeat: renderTable, escape })
+    : `<div class="table-grid">${visible.length ? visible.map(renderTable).join('') : emptyState}</div>`;
   return `${!isOpen ? `<div class="notice"><span>${icon('info',17)}開店すると、空席から来店を登録できます。</span></div>` : ''}${renderMetrics()}
     <div class="floor-layout">
       <section class="floor" aria-labelledby="floor-title"><div class="floor-heading"><h2 id="floor-title">${icon('grid',17)}${showingPlan ? '店内レイアウト' : '座席一覧'}</h2><div class="floor-heading-actions">${viewSwitch}${button('レイアウト編集', 'edit-layout', { glyph: 'move' })}</div></div>
-      <div class="seating-toolbar glass${showingPlan ? ' seating-plan-toolbar' : ''}"><div class="seg" role="group" aria-label="卓の状態で絞り込む">${[['all','すべて'],['used','使用中'],['available','空席'],['urgent','要対応']].map(([key,text])=>`<button type="button" data-action="filter" data-id="${key}" aria-pressed="${key===filter}">${text}<small>${counts[key]}</small></button>`).join('')}</div>${areaPicker}</div>
+      ${areas.length ? `<div class="seating-toolbar glass${showingPlan ? ' seating-plan-toolbar' : ''}"><div class="seg" role="group" aria-label="卓の状態で絞り込む">${[['all','すべて'],['used','使用中'],['available','空席'],['urgent','要対応']].map(([key,text])=>`<button type="button" data-action="filter" data-id="${key}" aria-pressed="${key===filter}">${text}<small>${counts[key]}</small></button>`).join('')}</div>${areaPicker}</div>` : ''}
       ${floorContent}</section>
       ${mobileDetails ? `<button type="button" class="detail-shade" data-action="hide-detail" aria-hidden="true" tabindex="-1"></button>` : ''}${renderDetail()}
     </div>`;
@@ -492,6 +498,7 @@ function clickAction(target) {
     return;
   }
   if (action === 'layout-view-area') {
+    if (!getLayoutAreas(state).includes(id)) return;
     setFloorView('plan', id);
     selectVisibleTicket();
     render({preserveFocus:true});

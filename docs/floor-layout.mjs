@@ -1,4 +1,4 @@
-import { getLayoutAreas, getLayoutTables, getTicketForTable, layoutGrid } from './engine.mjs';
+import { getLayoutAreas, getLayoutTables, getTicketForTable, layoutGrid, removeLayoutArea } from './engine.mjs';
 import { icon } from './icons.mjs';
 
 const { columns, rows, tableWidth, tableHeight } = layoutGrid;
@@ -33,14 +33,14 @@ export function newLayoutDraft(state, preferredArea, preferredId) {
   const tables = getLayoutTables(state);
   const areas = getLayoutAreas(state);
   const selected = tables.find((table) => table.id === preferredId && (preferredArea == null || table.area === preferredArea));
-  const area = selected?.area ?? (areas.includes(preferredArea) ? preferredArea : areas[0]);
+  const area = selected?.area ?? (areas.includes(preferredArea) ? preferredArea : areas[0]) ?? null;
   const locks = new Map();
   for (const table of tables) {
     const ticket = getTicketForTable(state, table.id);
     if (ticket) locks.set(table.id, ticket.status === 'paid' ? '退店待ち' : '使用中');
   }
   return { tables, areas, area, locks, selectedId: selected?.id ?? tables.find((table) => table.area === area)?.id ?? null,
-    drag: null, areaEditor: null, pendingDeleteId: null };
+    drag: null, areaEditor: null, pendingDeleteId: null, pendingAreaDelete: null };
 }
 
 function selectedTable(layout) {
@@ -70,27 +70,42 @@ function inspector(layout, escape) {
 
 function areaToolbar(layout, escape) {
   const editor = layout.areaEditor;
+  const hasArea = layout.areas.includes(layout.area);
+  const tableCount = hasArea ? layout.tables.filter((table) => table.area === layout.area).length : 0;
+  const pending = layout.pendingAreaDelete;
+  const target = hasArea ? escape(layout.area) : '';
   return `<div class="layout-toolbar">${layoutAreaTabs(layout.area, 'layout-editor-area', escape, layout.areas)}
     <div class="layout-toolbar-actions">
-      <button type="button" class="btn" data-action="layout-editor-rename-area">${icon('edit', 14)}エリア名を変更</button>
+      <button type="button" class="btn" data-action="layout-editor-rename-area"${hasArea ? '' : ' disabled'}>${icon('edit', 14)}エリア名を変更</button>
       <button type="button" class="btn" data-action="layout-editor-add-area">${icon('plus', 14)}フロア・エリアを追加</button>
-      <button type="button" class="btn btn-secondary" data-action="layout-editor-add-table">${icon('table', 14)}卓を追加</button>
+      <button type="button" class="btn btn-secondary" data-action="layout-editor-add-table"${hasArea ? '' : ' disabled'}>${icon('table', 14)}卓を追加</button>
+      <button type="button" class="btn btn-danger" data-action="layout-editor-delete-area" data-id="${target}"${!hasArea || tableCount ? ' disabled' : ''}${tableCount ? ' aria-describedby="layout-area-delete-reason"' : ''}>${icon('x', 14)}エリアを削除</button>
     </div></div>
+    ${tableCount ? `<p class="layout-area-delete-reason" id="layout-area-delete-reason">このエリアには${tableCount}卓あります。エリアを削除するには、すべての卓を別のエリアへ移動するか、卓を削除してください。</p>` : ''}
     ${editor ? `<div class="layout-area-editor"><label class="field"><span>${editor.original ? 'エリアの新しい名前' : '新しいエリア名'}</span>
       <input type="text" name="layout-area-name" maxlength="${nameLimit}" value="${escape(editor.value)}" autocomplete="off"></label>
       <div class="layout-editor-actions"><button type="button" class="btn" data-action="layout-editor-cancel-area">戻る</button>
-      <button type="button" class="btn btn-secondary" data-action="layout-editor-apply-area">${editor.original ? '名前を変更' : '追加を確定'}</button></div></div>` : ''}`;
+      <button type="button" class="btn btn-secondary" data-action="layout-editor-apply-area">${editor.original ? '名前を変更' : '追加を確定'}</button></div></div>` : ''}
+    ${pending ? `<div class="layout-area-confirm" role="group" aria-labelledby="layout-area-confirm-copy">
+      <p id="layout-area-confirm-copy"><strong>「${escape(pending)}」を削除しますか？</strong><span>レイアウトを保存すると反映されます。</span></p>
+      <div class="layout-editor-actions"><button type="button" class="btn" data-action="layout-editor-cancel-area-delete">戻る</button>
+      <button type="button" class="btn btn-danger" data-action="layout-editor-confirm-area-delete" data-id="${escape(pending)}">エリアの削除を確定</button></div></div>` : ''}`;
 }
 
 function editorStage(layout, escape) {
-  return floorLayoutStage(layout.tables, layout.area, { editing: true, selectedId: layout.selectedId, escape, locks: layout.locks });
+  if (layout.area === null) return `<div class="layout-no-areas"><span aria-hidden="true">${icon('grid', 23)}</span><strong>フロア・エリアがありません</strong><p>「フロア・エリアを追加」から配置を始められます。</p></div>`;
+  const hint = layout.tables.some((table) => table.area === layout.area)
+    ? `<p class="layout-pan-hint">${icon('move', 14)}図面の余白を左右にスワイプ</p>` : '';
+  return hint + floorLayoutStage(layout.tables, layout.area, {
+    editing: true, selectedId: layout.selectedId, escape, locks: layout.locks,
+  });
 }
 
 export function renderLayoutEditor(layout, escape) {
   return `<div class="layout-editor"><div class="layout-editor-head"><p class="form-copy">卓をドラッグするか、矢印キーと座標入力で移動します。編集内容はレイアウトを保存すると反映されます。</p></div>
     <div class="layout-controls" id="layout-editor-areas">${areaToolbar(layout, escape)}</div>
-    <div class="layout-editor-main"><div id="layout-editor-stage">${editorStage(layout, escape)}</div>
-    <section class="layout-inspector" aria-label="選択した卓の設定" id="layout-editor-inspector">${inspector(layout, escape)}</section></div>
+    <div class="layout-editor-main${layout.area === null ? ' is-area-empty' : ''}"><div id="layout-editor-stage">${editorStage(layout, escape)}</div>
+    <section class="layout-inspector" aria-label="選択した卓の設定" id="layout-editor-inspector"${layout.area === null ? ' hidden' : ''}>${layout.area === null ? '' : inspector(layout, escape)}</section></div>
     <p class="layout-msg" role="status" id="layout-msg" hidden></p></div>`;
 }
 
@@ -120,8 +135,13 @@ function refreshEditor(dialog, layout, escape, focusId) {
   const activeTabScroll = dialog.querySelector('.layout-areas')?.scrollLeft ?? 0;
   dialog.querySelector('#layout-editor-stage').innerHTML = editorStage(layout, escape);
   dialog.querySelector('#layout-editor-areas').innerHTML = areaToolbar(layout, escape);
-  dialog.querySelector('#layout-editor-inspector').innerHTML = inspector(layout, escape);
-  dialog.querySelector('.layout-stage-scroll').scrollLeft = scrollLeft;
+  const inspectorPane = dialog.querySelector('#layout-editor-inspector');
+  const empty = layout.area === null;
+  inspectorPane.hidden = empty;
+  inspectorPane.innerHTML = empty ? '' : inspector(layout, escape);
+  dialog.querySelector('.layout-editor-main').classList.toggle('is-area-empty', empty);
+  const currentScroll = dialog.querySelector('.layout-stage-scroll');
+  if (currentScroll) currentScroll.scrollLeft = scrollLeft;
   dialog.querySelector('.layout-areas').scrollLeft = activeTabScroll;
   if (focusId) matchTile(dialog, focusId)?.focus({ preventScroll: true });
 }
@@ -199,11 +219,17 @@ function commitAreaFields(dialog, layout) {
   layout.area = name;
   if (selectedTable(layout)?.area !== name) layout.selectedId = layout.tables.find((table) => table.area === name)?.id ?? null;
   layout.pendingDeleteId = null;
+  layout.pendingAreaDelete = null;
   layout.areaEditor = null;
   return { ok: true, changed: name !== editor.original };
 }
 
 export function commitLayoutFields(dialog, layout, escape) {
+  if (layout.pendingAreaDelete) {
+    showLayoutMessage(dialog, 'エリアの削除を確定するか、戻ってから保存してください。', true);
+    dialog.querySelector('[data-action="layout-editor-confirm-area-delete"]')?.focus();
+    return { ok: false };
+  }
   if (layout.pendingDeleteId) {
     showLayoutMessage(dialog, '卓の削除を確定するか、戻ってから保存してください。', true);
     dialog.querySelector('[data-action="layout-editor-confirm-delete"]')?.focus();
@@ -254,9 +280,47 @@ function focusAreaTab(dialog, area) {
   [...dialog.querySelectorAll('[data-action="layout-editor-area"]')].find((button) => button.dataset.id === area)?.focus();
 }
 
+function updateAreaDeletion(dialog, layout, target, escape) {
+  const { action, id } = target.dataset;
+  if (action === 'layout-editor-delete-area') {
+    if (id !== layout.area || !layout.areas.includes(id) || layout.tables.some((table) => table.area === id)) return;
+    layout.pendingAreaDelete = id;
+    refreshEditor(dialog, layout, escape);
+    dialog.querySelector('[data-action="layout-editor-cancel-area-delete"]')?.focus();
+    return;
+  }
+  if (action === 'layout-editor-cancel-area-delete') {
+    layout.pendingAreaDelete = null;
+    refreshEditor(dialog, layout, escape);
+    dialog.querySelector('[data-action="layout-editor-delete-area"]')?.focus();
+    return;
+  }
+  if (id !== layout.pendingAreaDelete) return;
+  const position = layout.areas.indexOf(id);
+  try {
+    layout.areas = removeLayoutArea(layout.areas, layout.tables, id);
+  } catch (error) {
+    showLayoutMessage(dialog, error.message, true);
+    return;
+  }
+  layout.area = layout.areas[position] ?? layout.areas[position - 1] ?? null;
+  layout.selectedId = layout.tables.find((table) => table.area === layout.area)?.id ?? null;
+  layout.pendingAreaDelete = null;
+  layout.pendingDeleteId = null;
+  if (layout.areaEditor?.original === id) layout.areaEditor = null;
+  refreshEditor(dialog, layout, escape);
+  if (layout.area === null) dialog.querySelector('[data-action="layout-editor-add-area"]')?.focus();
+  else focusAreaTab(dialog, layout.area);
+  showLayoutMessage(dialog, `「${id}」の削除を選択しました。保存すると反映されます。`);
+}
+
 export function handleLayoutEditorAction(dialog, layout, target, escape) {
   if (layout.drag?.moved) return;
   const { action, id } = target.dataset;
+  if (['layout-editor-delete-area', 'layout-editor-cancel-area-delete', 'layout-editor-confirm-area-delete'].includes(action)) {
+    updateAreaDeletion(dialog, layout, target, escape);
+    return;
+  }
   if (action === 'layout-editor-cancel-area') {
     const entry = layout.areaEditor;
     layout.areaEditor = null;
@@ -291,6 +355,7 @@ export function handleLayoutEditorAction(dialog, layout, target, escape) {
     layout.area = id;
     layout.selectedId = (chosen?.area === id ? chosen.id : layout.tables.find((table) => table.area === id)?.id) ?? null;
     layout.pendingDeleteId = null;
+    if (layout.pendingAreaDelete !== id) layout.pendingAreaDelete = null;
     refreshEditor(dialog, layout, escape);
     focusAreaTab(dialog, id);
   } else if (action === 'layout-editor-apply') {
@@ -304,8 +369,9 @@ export function handleLayoutEditorAction(dialog, layout, target, escape) {
     refreshEditor(dialog, layout, escape);
     dialog.querySelector('[data-action="layout-editor-cancel-delete"]')?.focus();
   } else if (action === 'layout-editor-add-table') {
-    addTable(dialog, layout, escape);
+    if (layout.area !== null) addTable(dialog, layout, escape);
   } else if (action === 'layout-editor-add-area' || action === 'layout-editor-rename-area') {
+    if (action === 'layout-editor-rename-area' && layout.area === null) return;
     const original = action === 'layout-editor-rename-area' ? layout.area : null;
     layout.areaEditor = { original, value: original ?? '' };
     refreshEditor(dialog, layout, escape);
