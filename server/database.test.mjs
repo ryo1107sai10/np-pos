@@ -514,3 +514,93 @@ test('browser printing migration validates issuance sequence and replaces local 
   assert.equal(staffView.actor, undefined);
   assert.equal(staffView.recipient, undefined);
 });
+
+test('cloud reconciles automatic extensions before a quote can be settled, once across concurrent readers', async (t) => {
+  const db = database();
+  const tenant = await store(db);
+  await inviteMember(db, owner, tenant, helper.email, 'staff');
+  await listStores(db, helper);
+
+  const minute = 60_000;
+  let now = Date.parse('2026-11-16T20:00:00+09:00');
+  t.mock.method(Date, 'now', () => now);
+  const settings = {type:'saveAutoExtensionSettings',enabled:true,menuId:'extend30'};
+  await command(db, owner, tenant, 0, 'auto-opening-test', {type:'open',openingCash:0});
+  await assert.rejects(command(db, helper, tenant, 1, 'denied-auto-settings', settings), {code:'forbidden'});
+  await command(db, owner, tenant, 1, 'owned-auto-settings', settings);
+  const seated = await command(db, helper, tenant, 2, 'seated-auto-on-floor', {
+    type:'seat',tableIds:['a1'],setId:'set60',guests:1,
+  });
+  const [ticket] = seated.state.tickets;
+  const baseDue = quote(seated.state,ticket.id).remaining;
+  assert.equal(ticket.endsAt,now + 60 * minute);
+
+  now = ticket.endsAt;
+  assert.deepEqual(await readState(db, helper, tenant, 3), {unchanged:true,role:'staff',revision:3});
+  const [ownerRead, staffRead] = await Promise.all([readState(db, owner, tenant), readState(db, helper, tenant)]);
+  for (const view of [ownerRead,staffRead]) {
+    assert.equal(view.revision,4);
+    assert.equal(view.state.tickets[0].lines.filter((line) => line.autoExtension).length,1);
+    assert.equal(view.state.tickets[0].endsAt,ticket.endsAt + 30 * minute);
+  }
+  const noop = await command(db, helper, tenant, 4, 'noop-auto-reconcile', {type:'syncAutoExtensions'});
+  assert.equal(noop.revision,4);
+
+  now = ownerRead.state.tickets[0].endsAt;
+  const staleDue = quote(ownerRead.state,ticket.id).remaining;
+  assert(staleDue > baseDue);
+  const payment = (amount) => ({type:'settle',ticketId:ticket.id,payments:[{method:'cash',amount}]});
+  await assert.rejects(command(db, helper, tenant, 4, 'settle-at-auto-boundary', payment(staleDue)),
+    {code:'auto-extension-updated', status:409});
+  const extended = await readState(db, helper, tenant);
+  assert.equal(extended.revision,5);
+  assert.equal(extended.state.tickets[0].status,'open');
+  assert.equal(extended.state.tickets[0].lines.filter((line)=>line.autoExtension).length,2);
+  const paid = await command(db, helper, tenant, 5, 'settle-fresh-auto-quote', payment(quote(extended.state,ticket.id).remaining));
+  assert.equal(paid.state.tickets[0].status,'paid');
+  const events = (await listAudit(db, owner, tenant)).events;
+  assert.equal(events.filter((event)=>event.action==='syncAutoExtensions').length,2);
+  assert(events.some((event)=>event.action==='saveAutoExtensionSettings'));
+  assert.equal(events.find((event)=>event.action==='syncAutoExtensions').after.tickets[0].orders[0].quantity,1);
+});
+
+test('cloud honors card surcharge settings only for owners and freezes exact card receipts', async () => {
+  const db = database();
+  const tenant = await store(db);
+  await inviteMember(db, owner, tenant, helper.email, 'staff');
+  await listStores(db, helper);
+  await command(db, owner, tenant, 0, 'card-opening-test', {type:'open',openingCash:0});
+  const settings = {type:'saveCardFeeSettings',settings:{enabled:true,rateBps:1000}};
+  await assert.rejects(command(db, helper, tenant, 1, 'card-settings-forbidden', settings), {code:'forbidden'});
+  const configured = await command(db, owner, tenant, 1, 'card-settings-allowed', settings);
+  assert.deepEqual(configured.state.cardFeeSettings,settings.settings);
+  const seated = await command(db, helper, tenant, 2, 'seated-for-card-fee', {
+    type:'seat',tableIds:['a1'],setId:'set60',guests:1,
+  });
+  const action = {type:'settle',ticketId:seated.state.tickets[0].id,payments:[
+    {method:'cash',amount:2000},{method:'card',amount:4600},
+  ]};
+  await assert.rejects(command(db, helper, tenant, 3, 'invalid-card-fee-type', {...action,expectedCardFee:'460'}),
+    {code:'invalid-command'});
+  await assert.rejects(command(db, helper, tenant, 3, 'incorrect-card-fee-preview', {...action,expectedCardFee:0}),
+    {code:'rejected-command'});
+  const paid = await command(db, helper, tenant, 3, 'accepted-card-fee-preview', {...action,expectedCardFee:460});
+  assert.equal(paid.state.tickets[0].settlement.total,7060);
+  assert.equal(paid.state.tickets[0].settlement.cardFee,460);
+  assert.equal(paid.state.tickets[0].payments.find(({method}) => method === 'card').amount,5060);
+  assert.equal(paid.state.floorMonthSales,7060);
+  const full = await readState(db, owner, tenant);
+  assert.equal(summary(full.state).payments.cash,2000);
+  assert.equal(summary(full.state).payments.card,5060);
+  const events = (await listAudit(db, owner, tenant)).events;
+  assert.equal(events.find((event)=>event.action==='settle').after.cardFee,460);
+  assert(events.some((event)=>event.action==='saveCardFeeSettings'));
+
+  const migratedTenant = await store(db);
+  const invalid = structuredClone(full.state);
+  invalid.tickets[0].settlement.cardFee = 500;
+  await assert.rejects(migrateState(db, owner, migratedTenant, {operationId:'invalid-fee-migration',snapshot:invalid}),
+    {code:'invalid-snapshot'});
+  const migrated = await migrateState(db, owner, migratedTenant, {operationId:'correct-fee-migration',snapshot:full.state});
+  assert.equal(migrated.state.tickets[0].settlement.cardFee,460);
+});

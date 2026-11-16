@@ -1,3 +1,5 @@
+import { getAutoExtensionSettings } from './auto-extension.mjs';
+import { getCardFeeSettings } from './card-fee.mjs';
 import { getStoreSettings } from './store-settings.mjs';
 import { getReceivableBalance } from './receivables.mjs';
 import { cashMovementCategories, cashMovementKinds } from './cash-ledger.mjs';
@@ -87,6 +89,10 @@ function ticketValues(ticket) {
   };
   if (ticket.settlement) {
     result.total = ticket.settlement.total;
+    if (ticket.settlement.cardFee) {
+      const {cardFee, cardFeeTax, cardFeeRateBps} = ticket.settlement;
+      Object.assign(result,{cardFee,cardFeeTax,cardFeeRateBps});
+    }
     result.commission = (ticket.settlement.commission ?? []).map(({ castId, amount, points }) => ({ castId, amount, points }));
   }
   return result;
@@ -201,6 +207,28 @@ export function buildOperationAudit(before, after, action, at, actor) {
         before: { managerDiscountRateBps: previous }, after: { managerDiscountRateBps: current },
         reason: 'マネージャーの値引き上限を更新',
       };
+    }
+  } else if (action.type === 'saveAutoExtensionSettings' || action.type === 'saveCardFeeSettings') {
+    const auto = action.type === 'saveAutoExtensionSettings';
+    const settings = auto ? getAutoExtensionSettings : getCardFeeSettings;
+    const previous = settings(before);
+    const current = settings(after);
+    const label = auto ? '自動延長設定' : 'カード会計加算設定';
+    if (!sameValue(previous,current)) {
+      details = { target:target('settings',null,label), before:previous, after:current, reason:`${label}を更新` };
+    }
+  } else if (action.type === 'syncAutoExtensions') {
+    const previousById = new Map(before.tickets.map((ticket) => [ticket.id,ticket]));
+    const changed = after.tickets.flatMap((ticket) => {
+      const previous = previousById.get(ticket.id);
+      if (!previous || previous.endsAt === ticket.endsAt) return [];
+      const orders = ticket.lines.slice(previous.lines.length).filter((line) => line.autoExtension).map((line) =>
+        ({name:line.name, amount:line.total, quantity:line.quantity}));
+      return [{id:ticket.id, number:ticket.number, beforeEnd:previous.endsAt, afterEnd:ticket.endsAt, orders}];
+    });
+    if (changed.length) {
+      details = { target:target('day',after.day.date,'自動延長'), before:null,
+        after:{tickets:changed}, reason:'自動延長の期限に到達' };
     }
   } else if (action.type === 'savePrintSettings') {
     const previous = getPrintSettings(before);

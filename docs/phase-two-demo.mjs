@@ -80,3 +80,13 @@ export function createPeriodReportDemo(now = Date.now()) {
   }
   return state;
 }
+
+export function createBillingDemo(now = Date.now()) {
+  const minute = 60_000;
+  const step = (state,command,at) => apply(state,command,at,demoAdmin);
+  let sample = createDemo('closed',now);
+  sample = step(sample,{type:'open',date:sample.day.date,openingCash:20_000},now - 75 * minute);
+  sample = step(sample,{type:'saveAutoExtensionSettings',enabled:true,menuId:'extend30'},now - 74 * minute);
+  sample = step(sample,{type:'saveCardFeeSettings',settings:{enabled:true,rateBps:500}},now - 73 * minute);
+  return step(sample,{type:'seat',tableIds:['a1'],guests:2,setId:'set60'},now - 60 * minute + 30_000);
+}

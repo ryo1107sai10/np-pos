@@ -1,11 +1,13 @@
 import { exportStoreConfiguration, parseStoreConfiguration, quote, summary } from '../docs/engine.mjs';
+import { isValidAutoExtensionSettings } from '../docs/auto-extension.mjs';
+import { normalizeCardFeeSettings } from '../docs/card-fee.mjs';
 import { getMonthlyReportSales } from '../docs/report-period.mjs';
 import { isAssignedCustomer } from '../docs/customers.mjs';
 import { getRecoveryRows, isValidCashMovement } from '../docs/cash-ledger.mjs';
 import { isValidPrintDocument, normalizePrintSettings } from '../docs/print-domain.mjs';
 
 export const roles = new Set(['admin', 'manager', 'staff', 'cast', 'trainee']);
-const staffCommands = ['seat', 'move', 'order', 'extend', 'deposit', 'settle', 'depart', 'serve', 'issuePrintDocument'];
+const staffCommands = ['seat', 'move', 'order', 'extend', 'deposit', 'settle', 'depart', 'serve', 'issuePrintDocument', 'syncAutoExtensions'];
 const managerCommands = [...staffCommands, 'open', 'close', 'discount', 'stockAdjust', 'cancelDeposit', 'cancelLine', 'void',
   'saveCustomer', 'recoverReceivable', 'recordCashMovement'];
 const roleCommands = {
@@ -13,7 +15,8 @@ const roleCommands = {
   manager: new Set(managerCommands),
   admin: new Set([...managerCommands, 'saveLayout', 'importLayout', 'saveStoreSettings', 'importStoreConfiguration',
     'approveDiscount', 'rejectDiscount', 'saveControls', 'cancelSettlement', 'reopenTicket',
-    'mergeCustomers', 'linkCustomer', 'importCustomers', 'savePrintSettings']),
+    'mergeCustomers', 'linkCustomer', 'importCustomers', 'savePrintSettings',
+    'saveAutoExtensionSettings', 'saveCardFeeSettings']),
 };
 const reasonCommands = new Set(['discount', 'cancelSettlement', 'reopenTicket', 'cancelLine', 'recordCashMovement']);
 const paymentMethods = new Set(['cash', 'card', 'qr']);
@@ -54,6 +57,8 @@ export function verifyCommand(role, command) {
   if (command.type === 'settle') {
     requireCondition(Array.isArray(command.payments) && command.payments.length <= 10 && command.payments.every(isRecord),
       400, 'invalid-command', '支払内容を確認してください。');
+    requireCondition(command.expectedCardFee === undefined || (Number.isSafeInteger(command.expectedCardFee) && command.expectedCardFee >= 0),
+      400, 'invalid-command', 'カード会計加算額を確認してください。');
     requireCondition(role !== 'staff' || command.payments.every(({ method }) => method !== 'receivable'),
       403, 'forbidden', '売掛での会計には管理者またはマネージャーの権限が必要です。');
   }
@@ -175,22 +180,50 @@ function nonnegative(value) {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0;
 }
 
-function validPayments(records, allowReceivable = false) {
+function validYen(value) {
+  return Number.isSafeInteger(value) && value >= 0;
+}
+
+function validFeeRate(value) {
+  return Number.isSafeInteger(value) && value >= 0 && value <= 10_000;
+}
+
+function validCardPayment(row) {
+  const withFee = ['baseAmount', 'cardFee', 'cardFeeRateBps'].some((key) => row[key] !== undefined);
+  return !withFee || (row.method === 'card' && validYen(row.baseAmount) && validYen(row.cardFee) && row.cardFee > 0
+    && row.cardFee <= row.baseAmount && validFeeRate(row.cardFeeRateBps) && row.cardFeeRateBps > 0
+    && row.amount === row.baseAmount + row.cardFee);
+}
+
+function validPayments(records, isSettlement = false) {
   return uniqueRecords(records) && records.every((row) =>
-    (paymentMethods.has(row.method) || (allowReceivable && row.method === 'receivable')) && nonnegative(row.amount));
+    (paymentMethods.has(row.method) || (isSettlement && row.method === 'receivable')) && nonnegative(row.amount)
+    && validCardPayment(row) && (isSettlement || row.cardFee === undefined));
+}
+
+function validCardSettlement(ticket) {
+  const settlement = ticket.settlement;
+  const allocatedFees = ticket.payments.reduce((total, payment) => total + (payment.cardFee ?? 0), 0);
+  if (settlement?.cardFee === undefined) return allocatedFees === 0;
+  const {cardFee, cardFeeTax, cardFeeRateBps, baseTotal} = settlement;
+  return validYen(cardFee) && cardFee > 0 && cardFee === allocatedFees && validYen(cardFeeTax) && cardFeeTax <= cardFee
+    && validFeeRate(cardFeeRateBps) && validYen(baseTotal) && baseTotal + cardFee === settlement.total
+    && ticket.payments.every((payment) => payment.cardFee === undefined || payment.cardFeeRateBps === cardFeeRateBps);
 }
 
 function validTicket(ticket) {
   return ticketStatuses.has(ticket.status) && Array.isArray(ticket.tableIds)
-    && (ticket.settlementRevision === undefined || (Number.isSafeInteger(ticket.settlementRevision) && ticket.settlementRevision >= 0))
+    && (ticket.settlementRevision === undefined || validYen(ticket.settlementRevision))
+    && (ticket.autoExtensionResumedAt === undefined || validYen(ticket.autoExtensionResumedAt))
     && uniqueRecords(ticket.lines) && ticket.lines.every((line) =>
       typeof line.name === 'string' && typeof line.menuId === 'string'
       && Number.isInteger(line.quantity) && line.quantity > 0
       && nonnegative(line.price) && nonnegative(line.total) && nonnegative(line.taxRate)
+      && (line.autoExtension === undefined || typeof line.autoExtension === 'boolean')
       && Array.isArray(line.castIds) && Array.isArray(line.stockUses)
       && (line.castIds.length === 0 || isRecord(line.commission)))
     && validPayments(ticket.deposits) && validPayments(ticket.payments, true)
-    && nonnegative(ticket.discount) && nonnegative(ticket.serviceRate)
+    && nonnegative(ticket.discount) && nonnegative(ticket.serviceRate) && validCardSettlement(ticket)
     && (ticket.settlement == null || (isRecord(ticket.settlement) && nonnegative(ticket.settlement.total)
       && Array.isArray(ticket.settlement.commission) && Array.isArray(ticket.settlement.taxBreakdown)));
 }
@@ -310,6 +343,7 @@ export function validateSnapshot(state) {
     && (state.cancelledSettlements === undefined || (uniqueRecords(state.cancelledSettlements)
       && state.cancelledSettlements.every(validCancelledSettlement)))
     && validControls(state.controls)
+    && (state.autoExtensionSettings === undefined || isValidAutoExtensionSettings(state.autoExtensionSettings))
     && Number.isSafeInteger(state.nextId) && state.nextId > 0
     && Number.isSafeInteger(state.nextTicket) && state.nextTicket > 0
     && state.tickets.every(validTicket)
@@ -329,7 +363,9 @@ export function validateSnapshot(state) {
   400, 'invalid-snapshot', message);
 
   let normalizedPrintSettings;
+  let normalizedCardFeeSettings;
   try {
+    if (state.cardFeeSettings !== undefined) normalizedCardFeeSettings = normalizeCardFeeSettings(state.cardFeeSettings);
     if (state.printSettings !== undefined) normalizedPrintSettings = normalizePrintSettings(state.printSettings);
     parseStoreConfiguration(JSON.stringify(exportStoreConfiguration(state)));
     for (const ticket of state.tickets) quote(state, ticket.id);
@@ -353,6 +389,7 @@ export function validateSnapshot(state) {
     movement.actor = { id: 'imported-browser', label: (label.startsWith(source) ? label : source + label).slice(0, 320), role };
   }
   if (normalizedPrintSettings !== undefined) migrated.printSettings = normalizedPrintSettings;
+  if (normalizedCardFeeSettings !== undefined) migrated.cardFeeSettings = normalizedCardFeeSettings;
   if (migrated.printDocuments) {
     migrated.printDocuments = migrated.printDocuments.map((document) => {
       const {recipient, purpose, actor} = document;

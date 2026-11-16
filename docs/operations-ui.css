@@ -43,3 +43,57 @@
 .cash-close-breakdown dd { margin: 0; white-space: nowrap; font-weight: 650; font-variant-numeric: tabular-nums; }
 .cash-dialog .field-help { margin: 0; }
 .cash-dialog .result-bar { padding-inline: 11px; }
+
+.billing-tabs { display: flex; flex-wrap: wrap; width: fit-content; max-width: 100%; }
+.billing-tabs button { min-height: 42px; }
+.billing-switch {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  min-height: 54px;
+  padding: 8px 12px;
+  border: 1px solid #dfe4ef;
+  border-radius: 11px;
+  background: #fbfbff;
+  color: #35436a;
+  font-weight: 650;
+  cursor: pointer;
+}
+.billing-switch input {
+  appearance: none;
+  flex: none;
+  width: 44px;
+  height: 25px;
+  margin: 0;
+  padding: 2px;
+  border: 1px solid #8090aa;
+  border-radius: 20px;
+  background: #e2e6f0;
+  cursor: pointer;
+}
+.billing-switch input::before {
+  content: '';
+  display: block;
+  width: 19px;
+  height: 19px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px #40507055;
+}
+.billing-switch input:checked { background: #5a4da1; border-color: #5a4da1; }
+.billing-switch input:checked::before { transform: translateX(18px); }
+.billing-switch input:disabled { opacity: .6; cursor: default; }
+.billing-switch input:focus-visible { outline: 2px solid #5345a0; outline-offset: 3px; }
+.billing-dialog .field-help { margin: 0; }
+.card-fee-preview:not([hidden]) {
+  padding: 9px 12px;
+  border: 1px solid #d9d7f0;
+  border-radius: 10px;
+  background: #f7f6ff;
+  color: #414173;
+  font-size: 13px;
+}
+.card-fee-preview dl { display: grid; gap: 5px; margin: 0; }
+.card-fee-preview dl > div { display: flex; justify-content: space-between; gap: 8px; }
+.card-fee-preview dd { margin: 0; white-space: nowrap; font-weight: 700; font-variant-numeric: tabular-nums; }

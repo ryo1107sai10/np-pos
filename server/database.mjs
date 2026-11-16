@@ -1,4 +1,5 @@
 import { apply, createDemo } from '../docs/engine.mjs';
+import { getNextAutoExtensionAt } from '../docs/auto-extension.mjs';
 import { ApiError, canOperate, projectState, requireCondition, roles, validateSnapshot, verifyCommand } from './policy.mjs';
 
 const chunkLength = 200_000;
@@ -155,8 +156,27 @@ function visibleSnapshot(result, actorUid) {
   return { state: projectState(state, result.role, actorUid), revision: result.revision, role: result.role };
 }
 
+function autoExtensionDue(state, now) {
+  const deadline = state ? getNextAutoExtensionAt(state) : null;
+  return deadline != null && deadline <= now;
+}
+
+function saveAutoExtensionSync(db, actor, storeId, current, now) {
+  return saveOperation(db, actor, storeId, {
+    operationId: crypto.randomUUID(), operation: 'command', value: {type:'syncAutoExtensions'},
+    expectedRevision: current.revision,
+  }, current, now);
+}
+
+async function readVisibleState(db, actor, storeId) {
+  return visibleSnapshot(await snapshot(db, actor, storeId), actor.uid);
+}
+
 export async function readState(db, actor, storeId, since) {
-  return visibleSnapshot(await snapshot(db, actor, storeId, since), actor.uid);
+  const current = await snapshot(db, actor, storeId, since);
+  const now = Date.now();
+  if (autoExtensionDue(current.state, now)) return saveAutoExtensionSync(db, actor, storeId, current, now);
+  return visibleSnapshot(current, actor.uid);
 }
 
 export async function listAudit(db, actor, storeId, { before = null, limit = 50 } = {}) {
@@ -210,19 +230,23 @@ function matchingOperation(record, actor, fingerprint) {
 const currentOperation = `EXISTS (SELECT 1 FROM np_operations o JOIN np_stores s ON s.id = o.store_id
   WHERE o.store_id = ? AND o.operation_id = ? AND o.actor_uid = ? AND o.revision = ? AND s.revision = ?)`;
 
-async function saveOperation(db, actor, storeId, command) {
+async function saveOperation(db, actor, storeId, command, observed, observedAt) {
   const { operationId, operation, value, expectedRevision = 0 } = command;
   requireCondition(typeof operationId === 'string' && /^[a-zA-Z0-9_-]{16,100}$/.test(operationId),
     400, 'invalid-operation-id', '操作番号が無効です。');
   requireCondition(Number.isSafeInteger(expectedRevision) && expectedRevision >= 0,
     400, 'invalid-revision', '保存番号が無効です。');
-  const current = await snapshot(db, actor, storeId);
+  const current = observed ?? await snapshot(db, actor, storeId);
   if (operation === 'migrate') adminRequired(current);
   else verifyCommand(current.role, value);
   const fingerprint = await getFingerprint(operation, value);
   if (matchingOperation(await operationLog(db, storeId, operationId), actor, fingerprint)) {
-    return readState(db, actor, storeId);
+    return readVisibleState(db, actor, storeId);
   }
+  const syncExtensions = operation === 'command' && value.type === 'syncAutoExtensions';
+  const now = observedAt ?? Date.now();
+  const due = operation === 'command' && autoExtensionDue(current.state, now);
+  if (syncExtensions && (!due || current.revision !== expectedRevision)) return visibleSnapshot(current, actor.uid);
   const checkRevision = (revision, role) => {
     requireCondition(role === current.role, 403, 'forbidden', '操作の権限が変更されました。');
     if (operation === 'migrate') {
@@ -233,7 +257,10 @@ async function saveOperation(db, actor, storeId, command) {
     }
   };
   checkRevision(current.revision, current.role);
-  const now = Date.now();
+  if (due && !syncExtensions) {
+    await saveAutoExtensionSync(db, actor, storeId, current, now);
+    throw new ApiError(409, 'auto-extension-updated', '自動延長で伝票が更新されました。伝票を開き直して金額を確認してください。');
+  }
   const operator = { id: actor.uid, label: actor.email, role: current.role };
   let next;
   let event;
@@ -285,12 +312,14 @@ async function saveOperation(db, actor, storeId, command) {
     revision, storeId, ...conditionArgs));
   const results = await db.batch(statements);
   if (!results[0]?.meta?.changes) {
-    if (matchingOperation(await operationLog(db, storeId, operationId), actor, fingerprint)) return readState(db, actor, storeId);
+    if (matchingOperation(await operationLog(db, storeId, operationId), actor, fingerprint) || syncExtensions) {
+      return readVisibleState(db, actor, storeId);
+    }
     const fresh = memberRequired(await findMembership(db, actor, storeId));
     checkRevision(fresh.revision, fresh.role);
     throw new ApiError(409, 'revision-conflict', '更新が重なりました。最新の内容を確認してください。');
   }
-  return readState(db, actor, storeId);
+  return readVisibleState(db, actor, storeId);
 }
 
 export function applyCommand(db, actor, storeId, { operationId, command, expectedRevision }) {

@@ -220,3 +220,31 @@ test('a completed network response cannot restore store data after logout', asyn
   assert.equal(client.snapshot.state, null);
   assert.equal(client.snapshot.pending, 0);
 });
+
+test('an automatic deadline requests a full snapshot and a changed checkout is released without rebasing', async (t) => {
+  const now = Date.now();
+  const initial = {
+    day: {status:'open'},
+    autoExtensionSettings: {enabled:true,menuId:'extend30',effectiveAt:now-60_000},
+    menu: [{id:'extend30',category:'延長',duration:30}],
+    tickets: [{id:'tab',status:'open',endsAt:now-5_000}],
+  };
+  const updated = {...initial,tickets:[{...initial.tickets[0],endsAt:now+30*60_000}]};
+  const {client,calls,setRevision} = service(t,{
+    command(_payload, storage) {
+      storage.setRevision(2,updated);
+      return failure('auto-extension-updated',409);
+    },
+  });
+  setRevision(1,initial);
+  await client.start();
+  await client.enterStore('shop');
+  await client.retrySync();
+  assert.equal(calls.at(-1).query.has('since'),false);
+  await assert.rejects(client.submit({type:'settle',ticketId:'tab',payments:[]},1),{code:'auto-extension-updated'});
+  assert.equal(client.snapshot.pending,0);
+  assert.equal(client.snapshot.conflict,'');
+  await client.retrySync();
+  assert.equal(client.snapshot.revision,2);
+  assert.equal(calls.filter(({path})=>path.endsWith('/commands')).length,1);
+});

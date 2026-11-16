@@ -1,3 +1,5 @@
+import { getNextAutoExtensionAt } from './auto-extension.mjs';
+
 const authSDK = 'https://www.gstatic.com/firebasejs/13.3.0/';
 const offlineCommands = new Set(['open', 'seat', 'order', 'extend', 'move', 'settle', 'depart', 'serve']);
 const conflictMessage = '別の端末でデータが更新されました。最新の内容を確認し、操作をやり直してください。';
@@ -246,7 +248,9 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
   async function refreshStore(scope = activeScope) {
     assertScope(scope);
     const serial = ++scope.sequence;
-    const since = current.revision === null || current.restricted || !current.state ? '' : `?since=${current.revision}`;
+    const deadline = current.state?.day ? getNextAutoExtensionAt(current.state) : null;
+    const autoDue = deadline != null && deadline <= Date.now();
+    const since = current.revision === null || current.restricted || !current.state || autoDue ? '' : `?since=${current.revision}`;
     const result = await request(`${storePath(scope)}/state${since}`);
     if (acceptState(scope, result, serial)) return refreshStore(scope);
     return currentStoreResult();
@@ -337,6 +341,12 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
       return currentStoreResult();
     } catch (error) {
       if (scope !== activeScope) throw error;
+      if (error.status === 409 && error.code === 'auto-extension-updated') {
+        pendingOperation = undefined;
+        patch({ pending: 0, status: 'synced', conflict: '', error: '' });
+        void refreshStore(scope).catch(() => {});
+        throw error;
+      }
       if (error.status === 409 && error.code === 'revision-conflict') {
         patch({ status: 'conflict', conflict: conflictMessage, error: '' });
         void refreshStore(scope).catch(() => {});

@@ -63,7 +63,8 @@ function chargeDetails(totals, api) {
   const rows = [['小計（税抜）', totals.subtotal]];
   if (totals.discount) rows.push(['値引き', -totals.discount]);
   if (totals.service) rows.push(['サービス料', totals.service]);
-  rows.push(['消費税', totals.tax]);
+  rows.push([totals.cardFee ? '消費税（加算前）' : '消費税', totals.tax - (totals.cardFeeTax ?? 0)]);
+  if (totals.cardFee) rows.push(['カード会計加算（税込）',totals.cardFee]);
   return moneyRows(rows,api);
 }
 

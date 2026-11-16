@@ -1,3 +1,4 @@
+import { addCardFeeTax, getCardFee, getCardFeeSettings, normalizeCardFeeSettings } from './card-fee.mjs';
 import { getStoreSettings, normalizeStoreSettings, replaceStoreSettings } from './store-settings.mjs';
 import { buildOperationAudit } from './operational-audit.mjs';
 import { applyCustomerCommand, customerForSeat, findCustomer, isAssignedCustomer } from './customers.mjs';
@@ -5,6 +6,7 @@ import { getCustomerReceivableBalance, getReceivableBalance, getReceivableRecove
   receivableCollectionMethods } from './receivables.mjs';
 import { createCashMovement, getCashMovements, getDailyRecoveryRows, totalCashMovements } from './cash-ledger.mjs';
 import { applyPrintCommand } from './print-domain.mjs';
+import { saveAutoExtensionSettings, syncAutomaticExtensions } from './auto-extension.mjs';
 
 const movementScale = 1_000_000;
 const pointsScale = 1_000;
@@ -289,14 +291,22 @@ function calculateQuote(ticket) {
     });
   });
 
-  const taxBreakdown = [...groupedTax].sort(([first], [second]) => second - first)
+  const itemTaxBreakdown = [...groupedTax].sort(([first], [second]) => second - first)
     .map(([rate, base]) => ({ rate, base, tax: exactRate(base, rate) }));
-  const tax = taxBreakdown.reduce((total, group) => total + group.tax, 0);
-  const total = subtotal - discount + service + tax;
+  const itemTax = itemTaxBreakdown.reduce((total, group) => total + group.tax, 0);
+  const baseTotal = subtotal - discount + service + itemTax;
+  const feePayment = ticket.payments.find(({method, cardFee}) => method === 'card' && cardFee > 0);
+  const cardFee = ticket.payments.filter(({method}) => method === 'card')
+    .reduce((total, payment) => total + (payment.cardFee ?? 0), 0);
+  const {breakdown:taxBreakdown, feeTax:cardFeeTax} = cardFee > 0
+    ? addCardFeeTax(itemTaxBreakdown,cardFee) : {breakdown:itemTaxBreakdown,feeTax:0};
+  const tax = itemTax + cardFeeTax;
+  const total = baseTotal + cardFee;
   const deposit = totalOf(ticket.deposits);
   const receivable = totalOf(ticket.payments.filter(({ method }) => method === 'receivable'));
   const paid = totalOf(ticket.payments) - receivable;
   return { subtotal, discount, service, tax, total, deposit, paid, ...(receivable > 0 ? { receivable } : {}),
+    ...(cardFee > 0 ? {cardFee,cardFeeTax,baseTotal,cardFeeRateBps:feePayment.cardFeeRateBps} : {}),
     remaining: Math.max(0, total - deposit - paid - receivable),
     commission: outputCommission(commission), commissionDetails, taxBreakdown };
 }
@@ -359,6 +369,21 @@ function addLine(state, ticket, menu, quantity, castIds, now, { includeHistorica
   }
   ticket.lines.push(line);
   return line;
+}
+
+function extendTicket(state, ticket, menu, now, automatic = false) {
+  const surcharge = state.menu.find((entry) => entry.id === 'nominationExtra' && entry.enabled !== false);
+  const relatedCast = [...new Set(ticket.lines.filter((line) => line.category === '指名'
+    && (automatic ? line.createdAt <= now && (line.cancelledAt === null || line.cancelledAt > now) : line.cancelledAt === null))
+    .flatMap((line) => line.castIds))];
+  const added = [addLine(state, ticket, menu, ticket.guests, [], now)];
+  if (surcharge && relatedCast.length) {
+    added.push(addLine(state, ticket, surcharge, relatedCast.length, relatedCast, now, {includeHistoricalCast:true}));
+  }
+  if (automatic) {
+    for (const line of added) line.autoExtension = true;
+  }
+  ticket.endsAt += menu.duration * minute;
 }
 
 function currentDay(state) {
@@ -551,6 +576,7 @@ function reopenTicket(state, ticket, action, now, actor) {
   ticket.tableIds = tableIds;
   ticket.status = 'open';
   ticket.departedAt = null;
+  ticket.autoExtensionResumedAt = now;
 }
 
 function doStockAdjust(state, action, now) {
@@ -772,6 +798,14 @@ export function apply(state, action, now = Date.now(), actor = demoActor) {
 
 function reduce(state, action, now, actor) {
   const next = structuredClone(state);
+  if (action.type === 'saveAutoExtensionSettings') {
+    saveAutoExtensionSettings(next, action, now, actor);
+    return next;
+  }
+  if (action.type === 'syncAutoExtensions') {
+    syncAutomaticExtensions(next, now, actor, extendTicket);
+    return next;
+  }
   if (action.type === 'savePrintSettings' || action.type === 'issuePrintDocument') {
     applyPrintCommand(next, action, actor, now, () => createId(next, 'print'));
     return next;
@@ -785,6 +819,11 @@ function reduce(state, action, now, actor) {
     const limit = action.managerDiscountRateBps;
     assert(Number.isInteger(limit) && limit >= 0 && limit <= 10_000, '値引き上限を0から100%の範囲で入力してください。');
     next.controls = { ...next.controls, managerDiscountRateBps: limit };
+    return next;
+  }
+  if (action.type === 'saveCardFeeSettings') {
+    assert(actor.role === 'admin', 'カード会計の加算設定は店舗管理者が変更できます。');
+    next.cardFeeSettings = normalizeCardFeeSettings(action.settings);
     return next;
   }
   if (action.type === 'saveLayout') {
@@ -871,14 +910,7 @@ function reduce(state, action, now, actor) {
       const menu = next.menu.find((entry) => entry.category === '延長' && entry.enabled !== false && Number.isInteger(entry.duration)
         && (action.menuId === undefined ? entry.duration === Number(action.minutes) : entry.id === action.menuId));
       assert(menu, '延長時間を選択してください。');
-      const surcharge = next.menu.find((entry) => entry.id === 'nominationExtra' && entry.enabled !== false);
-      const relatedCast = [...new Set(ticket.lines.filter((line) => line.category === '指名' && line.cancelledAt === null)
-        .flatMap((line) => line.castIds))];
-      addLine(next, ticket, menu, ticket.guests, [], now);
-      if (surcharge && relatedCast.length) {
-        addLine(next, ticket, surcharge, relatedCast.length, relatedCast, now, { includeHistoricalCast: true });
-      }
-      ticket.endsAt += menu.duration * minute;
+      extendTicket(next, ticket, menu, now);
       break;
     }
     case 'deposit': {
@@ -912,10 +944,19 @@ function reduce(state, action, now, actor) {
         money(payment.amount, `${methodLabel[payment.method]}の支払額`, false);
       }
       assert(totalOf(action.payments) === due, '支払額の合計を未収額と一致させてください。');
+      const cardFee = getCardFee(next,action.payments);
+      if (cardFee > 0 || action.expectedCardFee !== undefined) {
+        assert(action.expectedCardFee === cardFee, 'カード加算額が更新されています。会計画面を開き直して金額を確認してください。');
+      }
       const creditAmount = totalOf(action.payments.filter(({ method }) => method === 'receivable'));
       if (creditAmount > 0) issueReceivable(next, ticket, action, creditAmount, now, actor);
-      ticket.payments = action.payments.map((entry) => ({ id: createId(next, 'payment'), method: entry.method,
-        amount: entry.amount, at: now }));
+      const feeAllocations = allocate(cardFee,action.payments.map(({method, amount}) => method === 'card' ? amount : 0));
+      const {rateBps:cardFeeRateBps} = getCardFeeSettings(next);
+      ticket.payments = action.payments.map(({method, amount},index) => {
+        const fee = feeAllocations[index];
+        return {id:createId(next,'payment'),method,amount:amount + fee,at:now,
+          ...(fee ? {baseAmount:amount,cardFee:fee,cardFeeRateBps} : {})};
+      });
       ticket.settlement = quote(next, ticket.id);
       ticket.status = 'paid';
       ticket.settledAt = now;

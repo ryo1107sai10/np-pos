@@ -580,7 +580,7 @@
 @media (max-width: 610px) {
   .floor-heading { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
   .floor-heading-main { justify-content: space-between; }
-  .floor-heading-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .floor-heading-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .floor-heading-actions .btn { min-width: 0; padding-inline: 5px; gap: 4px; font-size: 11px; white-space: normal; }
   .floor-heading-actions .btn .icon { flex: none; width: 13px; height: 13px; }
   .floor-heading-actions, .layout-editor-actions { gap: 5px; }

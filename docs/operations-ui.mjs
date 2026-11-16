@@ -3,7 +3,7 @@ const timestamp = new Intl.DateTimeFormat('ja-JP', {
   hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
 });
 const japaneseNumber = new Intl.NumberFormat('ja-JP', { maximumFractionDigits: 6 });
-const moneyFields = new Set(['amount', 'total', 'subtotal', 'discount', 'price', 'value', 'cost', 'balance', 'creditLimit', 'balanceBefore', 'expectedCash', 'actualCash', 'discrepancy']);
+const moneyFields = new Set(['amount', 'total', 'subtotal', 'discount', 'price', 'value', 'cost', 'balance', 'creditLimit', 'balanceBefore', 'expectedCash', 'actualCash', 'discrepancy', 'cardFee']);
 const roles = { admin: '店舗管理者', manager: 'マネージャー', staff: 'スタッフ' };
 
 const auditLabels = {
@@ -15,6 +15,8 @@ const auditLabels = {
   importCustomers: '顧客の一括登録', recoverReceivable: '売掛の回収',
   recordCashMovement: '入出金の記録', close: '閉店・レジ締め',
   savePrintSettings: '印刷設定の変更', issuePrintDocument: '伝票・領収書の発行',
+  saveAutoExtensionSettings: '自動延長設定の変更', syncAutoExtensions: '自動延長',
+  saveCardFeeSettings: 'カード会計加算設定の変更',
   importLayout: '卓レイアウトの読み込み', saveControls: '運用設定の変更', migrate: '営業データの移行',
 };
 
@@ -29,6 +31,7 @@ const valueLabels = {
   expectedCash: 'レジ理論残高', actualCash: 'レジ実残高', discrepancy: 'レジ差額',
   issueNumber: '発行回数', width: '用紙幅（mm）', storeName: '印字する店名', address: '住所', phone: '電話番号',
   registrationNumber: '登録番号', showItems: '明細を印字', autoReceipt: '会計時のレシート自動印刷',
+  enabled: '有効', menuId: '延長プラン', rateBps: '加算率', cardFee: 'カード会計加算',
   method: '決済方法', reason: '理由', points: 'ポイント', cost: '原価', value: '評価額',
   request: '承認申請', approved: '承認', rejected: '却下', pending: '承認待ち', paid: '会計済み',
   cancelled: '取消済み', departed: '退店済み', open: '利用中', cash: '現金', card: 'カード', qr: 'QR決済', bank: '振込', receivable: '売掛',
@@ -58,7 +61,7 @@ export function renderDiscountForm({ticket, subtotal, limit, role, reasonCodes},
 
 function readableValue(value, key) {
   if (value == null) return value;
-  if (key === 'managerDiscountRateBps') return `${value / 100}%`;
+  if (key === 'managerDiscountRateBps' || key === 'rateBps') return `${value / 100}%`;
   if (typeof value === 'number' && moneyFields.has(key)) return `¥${japaneseNumber.format(value)}`;
   if (typeof value === 'string') return valueLabels[value] ?? value;
   if (Array.isArray(value)) return value.map((entry) => readableValue(entry));
