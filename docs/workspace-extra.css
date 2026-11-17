@@ -84,6 +84,11 @@
   .np-print-a4 tr { break-inside: avoid; }
   .np-print-a4 .analytics-chart li i { print-color-adjust: exact; }
   .np-print-a4 .payroll-print-total { font-size: 1.35rem; }
+  .np-print-a4 .report-print { display: block; }
+  .np-print-a4 .report-print > * + * { margin-block-start: 9px; }
+  .np-print-a4 .report-print .lr-panel { overflow: visible; }
+  .np-print-a4 .report-print .lr-panel-head { break-after: avoid; }
+  .np-print-a4 .report-print :is(th,td) { overflow-wrap: anywhere; }
 }
 .payroll-rule-layout { display: grid; grid-template-columns: repeat(var(--payroll-columns, 1), minmax(0, 1fr)); gap: .45rem; }
 .payroll-rule-layout .lr-money-list > div { display: grid; }

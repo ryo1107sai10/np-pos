@@ -41,8 +41,15 @@ export function createCustomerNoticeDemo(now = Date.now()) {
 export function createCashDemo(now = Date.now()) {
   const minute = 60_000;
   let state = createDemo('closed', now);
+  const latestDate = state.day.date;
+  const previousDate = new Date(Date.parse(latestDate) - 86_400_000).toISOString().slice(0,10);
+  const previousOpening = Date.parse(`${previousDate}T19:00:00+09:00`);
+  state = apply(state,{type:'open',date:previousDate,openingCash:20_000},previousOpening,demoAdmin);
+  state = apply(state,{type:'recordCashMovement',kind:'expense',category:'transport',amount:700,reason:'備品受け取りの交通費'},
+    previousOpening + 30 * minute,demoAdmin);
+  state = apply(state,{type:'close',actualCash:19_300},previousOpening + 180 * minute,demoAdmin);
   const step = (command, minutesAgo) => { state = apply(state, command, now - minutesAgo * minute, demoAdmin); };
-  step({type:'open',date:state.day.date,openingCash:20_000},100);
+  step({type:'open',date:latestDate,openingCash:20_000},100);
   step({type:'saveCustomer',customer:demoCustomer},85);
   step({type:'seat',tableIds:['a3'],guests:2,setId:'set60',customerId:state.customers[0].id},80);
   const ticketId = state.tickets[0].id;

@@ -167,7 +167,7 @@ test('period commission reports add preserved daily totals and export open and c
   assert.match(buildCommissionCsv(model,'summary'),/2026-11-16,2026-11-17,凛,3000,600,300,2/);
   assert.doesNotMatch(csv,/本指名|結衣/);
   assert.equal(getCommissionReport(state,{mode:'month',month:'2026-11'}).period.days.length,2);
-  const print = report('commission',state,{commissionPeriod:filters,commissionCast:'cast2',print:true});
-  assert.match(print,/営業日 2026-11-16 〜 2026-11-17 · 凛/);
+  const print = report('commission',state,{commissionPeriod:filters,commissionCast:'cast2',print:true,storeName:'銀座店'});
+  assert.match(print,/銀座店 ／ 営業日 2026-11-16 〜 2026-11-17 ／ 凛/);
   assert.doesNotMatch(print,/<button|本指名/);
 });

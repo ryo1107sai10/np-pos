@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { getCashMovements, getDailyRecoveryRows, isValidCashMovement } from '../docs/cash-ledger.mjs';
-import { apply, createDemo, quote, summary } from '../docs/engine.mjs';
+import { buildCashMovementCsv, getCashReport } from '../docs/cash-report.mjs';
+import { apply, createDemo, quote, summary, yen } from '../docs/engine.mjs';
+import { renderCashReportPrint, renderReport } from '../docs/reports.mjs';
 
 const today = '2026-11-16';
 const tomorrow = '2026-11-17';
@@ -129,4 +131,44 @@ test('cancelling an advance updates the drawer without affecting settled revenue
   assert.equal(totals.sales, 0);
   assert.equal(totals.cashMovements.length, 1);
   assert.deepEqual(totals.depositsReceived, {cash:0,card:0,qr:0});
+});
+
+test('cash period detail uses business days, keeps voided rows out of totals, and shares screen, CSV and print data', () => {
+  const afterMidnight = Date.parse('2026-11-17T00:09:00+09:00');
+  let state = step(open(),record,manager);
+  state = step(state,{type:'recordCashMovement',kind:'expense',category:'purchase',amount:800,
+    reason:'備品を現金で購入',destination:'仕入店'},manager,afterMidnight);
+  const {id:movementId} = state.cashMovements[1];
+  state = step(state,{type:'voidCashMovement',movementId,correctionReason:'誤入力'},owner,afterMidnight + 60_000);
+  state = step(state,{type:'close',actualCash:25_000},manager,afterMidnight + 120_000);
+  state = step(state,{type:'open',date:tomorrow,openingCash:10_000},owner,at + 86_400_000);
+  state = step(state,{type:'recordCashMovement',kind:'withdrawal',category:'bank',amount:1_000,reason:'銀行へ移動'},owner,at + 86_400_000);
+
+  const filters = {mode:'range',start:today,end:tomorrow};
+  const report = getCashReport(state,filters);
+  const {period,ledger} = report;
+  assert.equal(period.totals.cashIn,5_000);
+  assert.equal(period.totals.cashOut,1_000);
+  assert.equal(period.totals.expenses,0);
+  assert.equal(period.days[0].closed.actualCash,25_000);
+  assert.deepEqual(ledger.map(({date,postedAmount,voided}) => [date,postedAmount,voided]),[[tomorrow,-1000,false],[today,0,true],[today,5000,false]]);
+  assert.equal(ledger[1].timestamp,'2026-11-17 00:09:00');
+  const csv = buildCashMovementCsv(report,'テスト店');
+  assert.match(csv,/2026-11-16,テスト店,2026-11-17 00:09:00,経費,仕入れ,-800,0,取消済み,備品を現金で購入,仕入店,マネージャー,,2026-11-17 00:10:00,誤入力/);
+  const api = {escape:String,icon:() => '',yen,storeName:'テスト店',cashReportInterval:filters};
+  const view = renderReport('cash',state,api);
+  assert.match(view,/任意期間|営業日別の入出金・レジ照合/);
+  assert.match(view,/2026-11-16の入出金を表示/);
+  assert.match(view,/取消済み ／ 誤入力/);
+  assert.doesNotMatch(view,/data-action="record-cash"/);
+  const day = renderReport('cash',state,{...api,cashReportInterval:{mode:'day'}});
+  assert.match(day,/data-action="record-cash"/);
+  assert.doesNotMatch(day,/備品を現金で購入/);
+  const print = renderCashReportPrint(report,api);
+  assert.match(print,/入出金明細[\s\S]*テスト店[\s\S]*営業日別の入出金・レジ照合[\s\S]*備品を現金で購入/);
+  assert.doesNotMatch(print,/data-action|<button/);
+  const invalid = renderReport('cash',state,{...api,cashReportInterval:{...filters,start:tomorrow,end:today}});
+  assert.match(invalid,/開始日と終了日/);
+  assert.match(invalid,/data-id="csv" disabled/);
+  assert.equal(getCashReport(state,{mode:'month',month:'2026-11'}).ledger.length,3);
 });

@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { renderAnalytics } from '../docs/analytics.mjs';
+import { buildCashMovementCsv, getCashReport } from '../docs/cash-report.mjs';
 import { renderCustomerDetail, renderCustomerForm, renderCustomers } from '../docs/customer-ui.mjs';
 import { apply, createDemo, quote, summary, yen } from '../docs/engine.mjs';
 import { renderAuditLog } from '../docs/operations-ui.mjs';
 import { paymentCorrectionModel, readPaymentCorrection, renderPaymentCorrection } from '../docs/payment-correction-ui.mjs';
 import { getPrintSettings } from '../docs/print-domain.mjs';
 import { renderPrintPreview } from '../docs/print-ui.mjs';
-import { renderReport } from '../docs/reports.mjs';
+import { renderCashReportPrint, renderReport } from '../docs/reports.mjs';
 import { buildTicketHistoryCsv, getTicketHistory, renderTicketHistory } from '../docs/ticket-history.mjs';
 
 const date = '2026-11-16';
@@ -43,10 +44,12 @@ test('archived credit is omitted from presentation and remains accounted for in 
   assert.match(cash, /その他の入金[\s\S]*¥4,000/);
 
   const dateRange = {start:date, end:date};
+  const cashReport = getCashReport(state,{mode:'range',...dateRange});
   const audit = renderAuditLog({ entries:state.auditLog }, api);
   assert.match(audit, /会計確定/);
   const screens = [
-    invoice, receipt, cash, audit, renderReport('reports', state, api),
+    invoice, receipt, cash, audit, renderReport('reports', state, api), renderCashReportPrint(cashReport,{...api,storeName:'テスト店'}),
+    buildCashMovementCsv(cashReport,'テスト店'),
     renderCustomers(state, api), renderCustomerDetail(state, customerId, api), renderCustomerForm(state, customerId, api),
     renderAnalytics('analytics', state, {...api, range:dateRange}), renderTicketHistory(state, api),
     buildTicketHistoryCsv(getTicketHistory(state, dateRange, api)),

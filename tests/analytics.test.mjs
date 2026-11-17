@@ -3,6 +3,7 @@ import test from 'node:test';
 import { buildAnalyticsCsv, getAnalytics, renderAnalytics } from '../docs/analytics.mjs';
 import { apply, createDemo, quote, summary } from '../docs/engine.mjs';
 import { createVisitAnalyticsDemo } from '../docs/phase-two-demo.mjs';
+import { buildTeamPerformanceCsv, renderTeamPerformance } from '../docs/team-performance.mjs';
 
 const date = '2026-11-17';
 const before = '2026-11-16';
@@ -43,6 +44,21 @@ function csvRows(state,interval) {
   const [header,...rows] = buildAnalyticsCsv('analytics',state,interval).slice(1).trim().split('\r\n').map((row) => row.split(','));
   return rows.map((row) => Object.fromEntries(header.map((column,index) => [column,row[index] ?? ''])));
 }
+
+test('the staff performance print uses the selected business dates and role', () => {
+  const {state,nominated,other,nominatedSales} = liveVisits();
+  state.tickets.find(({id})=>id === nominated).settledBy = {id:'manager',label:'佐伯',role:'manager'};
+  state.tickets.find(({id})=>id === other).settledBy = {id:'staff',label:'望月',role:'staff'};
+  const options = {...api,range,role:'manager',storeName:'検証店舗'};
+  const screen = renderTeamPerformance(state,options);
+  const print = renderTeamPerformance(state,{...options,print:true});
+  assert.match(screen,/data-action="team-performance-print">印刷/);
+  assert.match(print,/<h1>スタッフ成績<\/h1>[\s\S]*検証店舗 ／ 営業日 2026-11-17 ／ マネージャー/);
+  assert.match(print,new RegExp(`佐伯[\\s\\S]*¥${nominatedSales}`));
+  assert.doesNotMatch(print,/望月|<button|<select/);
+  assert.match(buildTeamPerformanceCsv(state,range,'manager'),new RegExp(`佐伯,マネージャー,1,${nominatedSales}`));
+  assert.equal(renderTeamPerformance(state,{...options,print:true,range:{start:date,end:before}}),'');
+});
 
 test('confirmed visit analytics use actual departure and compare nomination groups, not active or cancelled charges', () => {
   const {state,nominated,other,pending,nominatedSales,otherSales,pendingSales} = liveVisits();

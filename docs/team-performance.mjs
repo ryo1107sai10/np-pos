@@ -3,6 +3,7 @@ import { quote } from './engine.mjs';
 import { getReportPeriod } from './report-period.mjs';
 
 const roles = {manager:'マネージャー', staff:'スタッフ'};
+const allRoles = 'マネージャー・スタッフ';
 
 export function getTeamPerformance(state, range = {}, role = 'all') {
   const start = range.start ?? `${state.day.date.slice(0,7)}-01`;
@@ -45,17 +46,21 @@ export function buildTeamPerformanceCsv(state, range, role) {
     ...(unattributed ? [[start,end,'確定者の記録なし','',unattributed,'']] : [])]);
 }
 
-export function renderTeamPerformance(state, { range, role='all', escape, icon, yen }) {
+export function renderTeamPerformance(state, {range,role = 'all',escape,icon,yen,print = false,storeName}) {
   const {start,end,period,rows,unattributed,tickets,sales} = getTeamPerformance(state,range,role);
   const hasData = period.valid && period.days.length > 0;
-  const controls = `<section class="lr-period-tools" aria-label="集計条件と出力"><div class="lr-period-controls"><div class="lr-period-dates">
+  if (print && !hasData) return '';
+  const controls = print ? `<header class="workspace-print-heading"><h1>スタッフ成績</h1>
+    <p>${storeName ? `${escape(storeName)} ／ ` : ''}営業日 ${escape(start)}${start === end ? '' : ` 〜 ${escape(end)}`} ／ ${roles[role] ?? allRoles}</p></header>`
+    : `<section class="lr-period-tools" aria-label="集計条件と出力"><div class="lr-period-controls"><div class="lr-period-dates">
     <label class="lr-period-field"><span>開始日</span><input type="date" data-team-start value="${escape(start)}"></label>
     <label class="lr-period-field"><span>終了日</span><input type="date" data-team-end value="${escape(end)}"></label>
-    <label class="lr-period-field field"><span>役割</span><select data-team-role><option value="all">マネージャー・スタッフ</option>${Object.entries(roles).map(([id,label]) => `<option value="${id}"${id===role?' selected':''}>${label}</option>`).join('')}</select></label>
-    </div></div><div class="lr-period-exports"><button type="button" class="btn btn-secondary" data-action="team-performance-csv"${hasData?'':' disabled'}>${icon('download',16)}CSV出力</button></div></section>`;
+    <label class="lr-period-field field"><span>役割</span><select data-team-role><option value="all">${allRoles}</option>${Object.entries(roles).map(([id,label]) => `<option value="${id}"${id===role?' selected':''}>${label}</option>`).join('')}</select></label>
+    </div></div><div class="lr-period-exports"><button type="button" class="btn btn-secondary" data-action="team-performance-csv"${hasData?'':' disabled'}>${icon('download',16)}CSV出力</button>
+      <button type="button" class="btn" data-action="team-performance-print"${hasData?'':' disabled'}>${icon('printer',16)}印刷</button></div></section>`;
   if (!hasData) return `<div class="lr-view">${controls}<p class="notice" role="status">${escape(period.error || 'この期間の営業データはありません。')}</p></div>`;
   const metrics = [['確定者数',`${rows.length}名`],['確定件数',`${tickets}件`],['税込会計額',yen(sales)],['確定者の記録なし',`${unattributed}件`]];
-  return `<div class="lr-view analytics-view">${controls}
+  return `<div class="lr-view analytics-view${print ? ' report-print' : ''}">${controls}
     <div class="analytics-metrics">${metrics.map(([label,value]) => `<div class="lr-panel"><span>${label}</span><strong>${value}</strong></div>`).join('')}</div>
     <section class="lr-panel"><div class="lr-panel-head"><h2>確定者別の会計実績</h2></div>
     ${rows.length ? `<div class="analytics-table" tabindex="0"><table><thead><tr><th scope="col">会計確定者</th><th scope="col">役割</th><th scope="col">件数</th><th scope="col">税込会計額</th></tr></thead><tbody>

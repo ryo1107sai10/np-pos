@@ -458,6 +458,16 @@
 .lr-cash-in { color: var(--lr-teal); border-color: #d2ebe1; background: #e9f8f2; }
 .lr-cash-out { color: #8c541e; border-color: #efdcc4; background: #fff6e9; }
 
+@media print {
+  .np-print-a4 .lr-cash-print { display: block; }
+  .lr-cash-print > * + * { margin-top: 3mm; }
+  .lr-cash-print :is(.lr-panel,.lr-scroll) { overflow: visible; }
+  .lr-cash-print .lr-panel-head { padding: 2mm 3mm; min-height: 0; break-after: avoid; }
+  .lr-cash-print .lr-table :is(th,td) { padding: 1.5mm 2mm; font-size: 9pt; }
+  .lr-cash-print .lr-cash-print-table td:last-child { white-space: normal; overflow-wrap: anywhere; }
+  .lr-cash-period-print-table :is(th,td):not(:first-child) { text-align: right; }
+}
+
 @media (max-width: 680px) {
   .lr-stats-daily { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .lr-register-values > div { padding: 11px 10px; }
@@ -603,4 +613,26 @@
   .lr-period-freee { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .lr-period-freee > span { grid-column: 1 / -1; }
   .lr-period-freee .btn { justify-content: center; padding-inline: 6px; }
+}
+
+@media print {
+  .np-print-a4 .np-daily-report-print .lr-view { display: block; }
+  .np-daily-report-print .lr-view > * + * { margin-top: 3mm; }
+  .np-daily-report-print :is(.lr-panel,.lr-scroll) { overflow: visible; }
+  .np-daily-report-print :is(header,.lr-stats,.lr-split,.lr-register,.lr-tender-table) { break-inside: avoid; }
+  .np-daily-report-print :is(.lr-stats,.lr-split) { gap: 2.5mm; }
+  .np-daily-report-print .lr-stat { min-height: auto; padding: 2mm 3mm; gap: 1mm; box-shadow: none; }
+  .np-daily-report-print .lr-stat-icon { display: none; }
+  .np-daily-report-print .lr-stat-label { padding: 0; }
+  .np-daily-report-print .lr-stat strong { font-size: 16pt; }
+  .np-daily-report-print .lr-panel-head { padding: 2mm 3mm; min-height: 0; break-after: avoid; }
+  .np-daily-report-print .lr-cash-count summary { display: block; }
+  .np-daily-report-print .lr-report-note, .np-daily-report-print .lr-money-list div { padding: 2mm 3mm; }
+  .np-daily-report-print .lr-table { display: table; font-size: 9pt; }
+  .np-daily-report-print .lr-table thead { display: table-header-group; position: static; width: auto; height: auto; clip-path: none; }
+  .np-daily-report-print .lr-table tbody { display: table-row-group; }
+  .np-daily-report-print .lr-table tr { display: table-row; }
+  .np-daily-report-print .lr-table :is(th,td) { padding: 1.5mm 3mm; }
+  .np-daily-report-print .lr-period-table td:not(:first-child) { text-align: right; }
+  .np-daily-report-print .lr-payment-table td:nth-child(2) { white-space: normal; overflow-wrap: anywhere; }
 }

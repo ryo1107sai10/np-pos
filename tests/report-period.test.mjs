@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {apply, createDemo, quote, summary} from '../docs/engine.mjs';
 import {getMonthlyReportSales, getReportDates, getReportDay, getReportPeriod, isReportDate} from '../docs/report-period.mjs';
+import {renderDailyReportPrint, renderReport} from '../docs/reports.mjs';
 
 const januaryDate = '2024-01-31';
 const februaryDate = '2024-02-01';
@@ -21,7 +22,7 @@ function monthBoundaryFixture() {
   ]});
   state = run(state, {type:'depart', ticketId});
   state = run(state, {type:'recordCashMovement', kind:'expense', amount:500, category:'purchase', reason:'仕入れ'});
-  state = close(state);
+  state = run(state, {type:'close', actualCash:summary(state).expectedCash, cashDenominations:{10000:2, 500:1}});
   state = run(state, {type:'open', date:februaryDate, openingCash:30_000});
   const {id:receivableId} = state.receivables[0];
   state = run(state, {type:'recoverReceivable', receivableId, method:'cash', amount:4_000, date:februaryDate});
@@ -150,4 +151,35 @@ test('the floor monthly figure matches the period report across archived and cur
   assert.equal(getMonthlyReportSales(state, '2024-01'),
     getReportPeriod(state, {mode:'month', month:'2024-01'}).totals.sales);
   assert.equal(getMonthlyReportSales(state, '2024-01'), 13_200);
+});
+
+test('A4 daily reports preserve selected dates and totals without controls or receivables details', () => {
+  const state = monthBoundaryFixture();
+  const api = {yen:(amount) => `¥${amount.toLocaleString('en-US')}`, icon:()=>'', quote, summary,
+    escape:(value) => String(value).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'), storeName:'<&店舗>'};
+  const print = (filters) => renderDailyReportPrint(state,getReportPeriod(state,filters),api);
+  const onScreen = (date) => renderReport('reports',state,{...api,reportDate:date});
+
+  const january = print({mode:'day',date:januaryDate});
+  assert.match(january, /<h1>日報<\/h1>[\s\S]*&lt;&amp;店舗&gt;[\s\S]*日別 ／ 営業日 2024-01-31/);
+  assert.match(january, /確定売上[\s\S]*¥13,200/);
+  assert.match(january, /レジ照合[\s\S]*理論残高[\s\S]*¥20,500/);
+  assert.match(january, /class="lr-cash-count" open[\s\S]*金種別の内訳[\s\S]*¥10,000[\s\S]*2枚/);
+  assert.match(january, /会計履歴[\s\S]*A-01/);
+  assert.doesNotMatch(january, /<button|data-action|締め履歴|2024-02-|売掛|集計サンプル/);
+  assert.match(onScreen(januaryDate), /data-id="print">A4で印刷/);
+  assert.match(onScreen('2024-01-01'), /data-id="print" disabled>A4で印刷/);
+
+  const february = print({mode:'month',month:'2024-02'});
+  assert.match(february, /月別 ／ 営業日 2024-02-01 〜 2024-02-29/);
+  assert.match(february, /営業日別の明細[\s\S]*2024-02-29[\s\S]*2024-02-01/);
+  assert.match(february, /¥800/);
+  assert.doesNotMatch(february, /<button|data-action|2024-01-31|集計サンプル|¥4,000|¥2,000/);
+
+  const range = print({mode:'range',start:januaryDate,end:februaryDate});
+  assert.match(range, /任意期間 ／ 営業日 2024-01-31 〜 2024-02-01/);
+  assert.match(range, /営業日別の明細[\s\S]*2024-02-01[\s\S]*2024-01-31/);
+  assert.match(range, /¥1,300/);
+  assert.doesNotMatch(range,/2024-02-29/);
+  assert.equal(print({mode:'range',start:februaryDate,end:januaryDate}),'');
 });

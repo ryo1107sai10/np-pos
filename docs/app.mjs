@@ -2,7 +2,7 @@ import { apply, businessDate, createDemo, discountReasonCodes, exportStoreConfig
 import { icon } from './icons.mjs';
 import { orderTaxOverrideRates, previewSettledContents } from './engine.mjs';
 import { readSettledContents, renderSettledContents } from './settled-edit-ui.mjs';
-import { renderReport } from './reports.mjs';
+import { renderCashReportPrint, renderDailyReportPrint, renderReport } from './reports.mjs';
 import { buildCommissionCsv, getCommissionReport } from './commission-report.mjs';
 import { getAutoExtensionNotices, getAutoExtensionPlans, getAutoExtensionSettings, getAutomaticExtensionPlan,
   getNextAutoExtensionAt, getTableAutoExtensionEnabled, getTicketAutoExtensionAt, isVisitAutoExtensionPaused } from './auto-extension.mjs';
@@ -32,6 +32,7 @@ import { customerAnniversaryLimit, findCustomer, findSettledCustomerTicket, getR
 import { ticketHasReceivable } from './receivables.mjs';
 import { cashMovementCategories, cashMovementKinds, editableCashMovement, getCashMovement } from './cash-ledger.mjs';
 import { cashAccountOptions, readCashAccounts, renderCashAccountRow, renderCashAccounts, vaultBalance } from './cash-accounts.mjs';
+import { buildCashMovementCsv, getCashReport } from './cash-report.mjs';
 import { purchaseCancellationBlocker } from './inventory-operations.mjs';
 import { findPrintableTicket, getPrintAutoKind, getPrintDocuments, getPrintSettings, getPrintTenderReceived } from './print-domain.mjs';
 import { printDocumentTitles, renderExtensionQuote, renderPrintOptions, renderPrintPreview, renderPrintSettings, renderPrintTest } from './print-ui.mjs';
@@ -108,7 +109,7 @@ const ownerActions = new Set(['store-settings', 'stock-settings', 'edit-layout',
   'accounting-settings', 'accounting-add-column', 'accounting-remove-column','correct-register-count','role-policy',
   'cash-accounts','cash-account-add','cash-account-remove-new','settled-ticket-companions','demo-backup','demo-backup-download']);
 const managerActions = new Set(['open', 'close', 'stock-adjust', 'stocktake', 'stock-cancel-purchase', 'discount', 'cancel-line', 'cancel-deposit', 'customer-detail', 'customer-new', 'customer-edit', 'customer-visit',
-  'record-cash', 'report-mode', 'report-day', 'report-export', 'ticket-end', 'ticket-set-time', 'ticket-guests',
+  'record-cash', 'report-mode', 'report-day', 'report-export', 'cash-export', 'ticket-end', 'ticket-set-time', 'ticket-guests',
   'edit-ticket-line', 'cancel-ticket-extension', 'ops-notices','edit-cash-movement','void-cash-movement','edit-deposit','personal-sales-adjustment']);
 const cloudLabels = { admin: '店舗管理者', manager: 'マネージャー', staff: 'スタッフ', cast: 'キャスト', trainee: '体入' };
 let demoProfileId;
@@ -132,6 +133,7 @@ let filter = 'all';
 let showHiddenStock = false;
 let reportDate = '';
 let reportInterval = {mode:'day'};
+let cashReportInterval = {mode:'day'};
 let analyticsRange = {};
 let payrollMonth = '';
 let payrollCastId = '';
@@ -562,8 +564,8 @@ function refreshWorkspaceMenu() {
 
 function renderTop() {
   const isOpen = state.day.status === 'open';
-  const dailyView = page === 'cash' || (page === 'reports' && reportInterval.mode === 'day');
-  const activeReport = dailyView && (!reportDate || reportDate === state.day.date);
+  const activeReport = page === 'cash' ? cashReportInterval.mode === 'day' && (!cashReportInterval.date || cashReportInterval.date === state.day.date)
+    : page === 'reports' && reportInterval.mode === 'day' && (!reportDate || reportDate === state.day.date);
   const date = prettyDate.format(new Date(`${state.day.date}T12:00:00+09:00`));
   return `<div class="workspace-top"><div class="workspace-top-leading">${renderWorkspaceMenuTrigger()}<div class="open-meta"><span class="workspace-store">${icon('store',15)}<span class="store-label">${escape(cloudState.store?.name ?? '銀座店')}</span><span class="mobile-wordmark"><img src="np-pos.svg" width="20" height="20" alt="">NP POS</span></span><span class="meta-sep"></span>${icon('calendar',16)}<span>${date} 営業日</span></div></div><div class="workspace-time"><span class="live ${isOpen ? '' : 'closed'}"><span class="dot"></span>${isOpen ? '営業中' : '営業時間外'}</span><span class="meta-sep"></span><time id="workspace-time">${dateTime.format(Date.now())}</time><span>JST</span></div></div>
     <header class="page-head"><div><h1>${pages[page].title}</h1><p>${pages[page].help}</p></div><div class="actions">
@@ -924,7 +926,7 @@ function render({ preserveFocus = false } = {}) {
       canCorrectRegister:currentRole() === 'admin',canAuditRegister:permittedAction('audit-log'),canRecordCash:permittedAction('record-cash'),
       canEditCash:(item) => permittedAction('edit-cash-movement') && Boolean(editableCashMovement(state,item.id))
         && (currentRole() === 'admin' || (state.day.date === item.date && state.day.status === 'open')),
-      reportDate,commissionCast,commissionPeriod,reportInterval:currentReportInterval(),reportExportError,stockSearch,stockBarcodeExact,stockLowOnly,stockHistoryId});
+      reportDate,commissionCast,commissionPeriod,reportInterval:currentReportInterval(),cashReportInterval,reportExportError,stockSearch,stockBarcodeExact,stockLowOnly,stockHistoryId});
     if (currentRole() === 'admin' && (page === 'analytics' || page === 'reports')) {
       const filters = page === 'analytics' ? analyticsRange : getReportPeriod(state,currentReportInterval());
       if (page === 'analytics' || filters.valid) view += renderLaborHighlights(state,filters,{escape,icon,yen});
@@ -1061,7 +1063,7 @@ function cloudUpdated(next) {
     if (dialog.open && modal?.type !== 'cloud') dialog.close();
     pendingStorage = false;
     selected = null; mobileDetails = false; area = null; filter = 'all'; reportDate = ''; commissionCast = '';
-    reportInterval = {mode:'day'}; commissionPeriod = {mode:'day'}; reportExportError = '';
+    reportInterval = {mode:'day'}; cashReportInterval = {mode:'day'}; commissionPeriod = {mode:'day'}; reportExportError = '';
     analyticsRange = {}; payrollMonth = ''; payrollCastId = '';
     laborRange = {};
     const view = next.store ? {view: 'list', area: null} : loadFloorView();
@@ -1690,6 +1692,7 @@ async function restoreDemoBackup(active) {
     mobileDetails = false;
     reportDate = '';
     reportInterval = {mode:'day'};
+    cashReportInterval = {mode:'day'};
     pendingStorage = false;
     dialog.close();
     syncFloorSelection();
@@ -1712,11 +1715,15 @@ function currentReportInterval() {
 }
 
 function exportReport(kind) {
-  if (page !== 'reports' || !['report','register','daily','tickets','custom-daily','custom-tickets'].includes(kind)) return;
+  if (page !== 'reports' || !canOpenPage('reports') || !['report','register','daily','tickets','custom-daily','custom-tickets','print'].includes(kind)) return;
   const period = getReportPeriod(state,currentReportInterval());
   if (!period.valid || !period.days.length) return;
   if (kind === 'register' && !period.days.some(({closed}) => closed)) return;
   const storeName = cloudState.store?.name ?? '銀座店';
+  if (kind === 'print') {
+    printWorkspace(renderDailyReportPrint(state,period,{yen,escape,icon,quote,storeName}));
+    return;
+  }
   const suffix = period.start === period.end ? period.start : `${period.start}_${period.end}`;
   let csv;
   let encoding = 'utf-8';
@@ -3369,6 +3376,7 @@ function resetPracticeView() {
   filter = 'all';
   reportDate = '';
   reportInterval = {mode:'day'};
+  cashReportInterval = {mode:'day'};
   pendingStorage = false;
   syncFloorSelection();
 }
@@ -3703,17 +3711,32 @@ function clickAction(target) {
     return;
   }
   if (action === 'navigate') { if (dialog.open) dialog.close(); mobileDetails = false; go(id); return; }
-  if (action === 'report-mode' && page === 'reports' && ['day','month','range'].includes(id)) {
-    reportInterval.mode = id;
+  if (action === 'report-mode' && ['reports','cash'].includes(page) && ['day','month','range'].includes(id)) {
+    const interval = page === 'cash' ? cashReportInterval : reportInterval;
+    interval.mode = id;
     reportExportError = '';
     render({preserveFocus:true});
     return;
   }
-  if (action === 'report-day' && page === 'reports' && getReportDates(state).includes(id)) {
-    reportDate = id === state.day.date ? '' : id;
-    reportInterval.mode = 'day';
+  if (action === 'report-day' && ['reports','cash'].includes(page) && getReportDates(state).includes(id)) {
+    const date = id === state.day.date ? '' : id;
+    if (page === 'cash') cashReportInterval = {...cashReportInterval,mode:'day',date};
+    else { reportDate = date; reportInterval.mode = 'day'; }
     reportExportError = '';
-    go('reports');
+    go(page);
+    return;
+  }
+  if (action === 'cash-export' && page === 'cash' && canOpenPage(page)) {
+    const report = getCashReport(state,cashReportInterval);
+    if (!report.period.valid || !report.period.days.length) return;
+    const storeName = cloudState.store?.name ?? '銀座店';
+    if (id === 'print') printWorkspace(renderCashReportPrint(report,{escape,icon,yen,storeName}));
+    else if (id === 'csv' && report.ledger.length) {
+      const {start,end} = report.period;
+      const date = start === end ? start : `${start}_${end}`;
+      downloadFile(`np-pos-cash-movements-${date}.csv`,buildCashMovementCsv(report,storeName),'text/csv;charset=utf-8');
+      toast('入出金明細CSVを書き出しました。');
+    }
     return;
   }
   if (action === 'report-export') { exportReport(id); return; }
@@ -3731,13 +3754,21 @@ function clickAction(target) {
     if (csv) downloadFile(`np-pos-staff-${teamRange.end || state.day.date}.csv`,csv,'text/csv;charset=utf-8');
     return;
   }
+  if (action === 'team-performance-print' && page === 'team-performance' && canOpenPage(page)) {
+    const html = renderTeamPerformance(state,{escape,yen,range:teamRange,role:teamRole,print:true,storeName:cloudState.store?.name ?? '銀座店'});
+    if (html) printWorkspace(html);
+    return;
+  }
   if (action === 'labor-open') {
     laborRange = {start:target.dataset.start,end:target.dataset.end};
     go('labor');
     return;
   }
   if (action.startsWith('labor-') && page === 'labor') {
-    if (action === 'labor-export' && ['summary','daily'].includes(id)) {
+    if (action === 'labor-print' && canOpenPage(page)) {
+      const html = renderLaborReport(state,laborRange,{escape,yen,print:true,storeName:cloudState.store?.name ?? '銀座店'});
+      if (html) printWorkspace(html);
+    } else if (action === 'labor-export' && ['summary','daily'].includes(id)) {
       const report = getLaborReport(state,laborRange);
       const csv = buildLaborCsv(report,id);
       if (csv) downloadFile(`np-pos-${id === 'daily' ? 'attendance' : 'labor'}-${report.start}-${report.end}.csv`,csv,'text/csv;charset=utf-8');
@@ -3879,7 +3910,8 @@ function clickAction(target) {
     if (action === 'commission-export') {
       const result = getCommissionReport(state,commissionPeriod,commissionCast);
       if (!result.period.valid || !result.period.days.length) return;
-      if (id === 'print') printWorkspace(renderReport('commission',state,{escape,icon,yen,commissionCast,commissionPeriod,print:true}));
+      if (id === 'print') printWorkspace(renderReport('commission',state,{escape,icon,yen,commissionCast,commissionPeriod,print:true,
+        storeName:cloudState.store?.name ?? '銀座店'}));
       else if (['summary','details'].includes(id)) {
         const csv = buildCommissionCsv(result,id);
         downloadFile(`np-pos-commission-${id}-${result.period.start}_${result.period.end}.csv`,csv,'text/csv;charset=utf-8');
@@ -4000,7 +4032,7 @@ function clickAction(target) {
     announcedVisitEnds.clear();
     selected = fromOpening || cashSample || reportSample || analyticsSample ? null : 'a1';
     area=null; filter='all'; showHiddenStock=false; mobileDetails=false;
-    reportDate = ''; commissionCast = ''; commissionPeriod = {mode:'day'}; customersQuery = ''; customerFilters = {};
+    reportDate = ''; cashReportInterval = {mode:'day'}; commissionCast = ''; commissionPeriod = {mode:'day'}; customersQuery = ''; customerFilters = {};
     analyticsRange = analyticsSample ? {start:getReportDates(sample)[0],end:sample.day.date} : {};
     payrollMonth = ''; payrollCastId = '';
     teamRange = {}; teamRole = 'all'; shiftDate = ''; shiftMode = 'week';
@@ -4681,9 +4713,10 @@ app.addEventListener('change',(event)=> {
   }
   const intervalFields = [['month','[data-report-month]'],['start','[data-report-start]'],['end','[data-report-end]']];
   const interval = intervalFields.find(([,selector]) => event.target.matches(selector));
-  if (interval && page === 'reports') {
+  if (interval && ['reports','cash'].includes(page)) {
     const [key,selector] = interval;
-    reportInterval[key] = event.target.value;
+    const selectedInterval = page === 'cash' ? cashReportInterval : reportInterval;
+    selectedInterval[key] = event.target.value;
     reportExportError = '';
     render();
     app.querySelector(selector)?.focus({preventScroll:true});
@@ -4697,7 +4730,8 @@ app.addEventListener('change',(event)=> {
     return;
   }
   if (event.target.matches('[data-report-date]')) {
-    reportDate = event.target.value;
+    if (page === 'cash') cashReportInterval.date = event.target.value;
+    else reportDate = event.target.value;
     reportExportError = '';
     render();
     app.querySelector('[data-report-date]')?.focus({ preventScroll: true });

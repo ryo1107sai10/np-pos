@@ -1,12 +1,12 @@
-import { cashMovementCategories, cashMovementKinds, getCashMovement } from './cash-ledger.mjs';
+import { getCashMovement } from './cash-ledger.mjs';
 import { cashAccounts, vaultBalance } from './cash-accounts.mjs';
+import { getCashReport } from './cash-report.mjs';
 import { cashDenominations } from './register-cash.mjs';
 import { businessDate, getTicketTableLabels } from './engine.mjs';
 import { getCommissionReport } from './commission-report.mjs';
 import { operationBusinessDate, registerCutoff } from './register-config.mjs';
 import { getInventoryCostSummary, purchaseCancellationBlocker } from './inventory-operations.mjs';
 import { getReportPeriod } from './report-period.mjs';
-import { getDailyPayTotals } from './payroll.mjs';
 import { barcodeScannerAvailable } from './barcode-scanner.mjs';
 
 const formatDay = new Intl.DateTimeFormat('ja-JP', {
@@ -95,15 +95,6 @@ function commissionOverview(api, earned, pending) {
   </section>`;
 }
 
-function reportPeriod(state, {reportDate}) {
-  const closed = state.closedDays.find((entry) => entry.date === reportDate)
-    ?? state.closedDays.find((entry) => entry.date === state.day.date);
-  const date = closed?.date ?? state.day.date;
-  const tickets = closed?.ticketSnapshots ?? (date === state.day.date ? state.tickets : []);
-  return { date, closed, state: { ...state, tickets },
-    legacy: Boolean(closed && date !== state.day.date && !closed.ticketSnapshots && closed.tickets) };
-}
-
 function dayPicker(state, date, {escape, icon}, commission = false) {
   const past = state.closedDays.filter((entry) => entry.date !== state.day.date);
   return `<div class="lr-day-picker"><label for="report-day">${icon('calendar', 17)}営業日</label>
@@ -144,7 +135,9 @@ function renderCommission(state, api) {
   const {period,roster,earned,pending,details,selected,selectedName,includesOpenDay,hasMissingDetails} = report;
   const {start,end} = period;
   const periodLabel = start === end ? escape(start) : `${escape(start)} 〜 ${escape(end)}`;
-  const controls = print ? `<h1>歩合・成績</h1><p>営業日 ${periodLabel}${selectedName ? ` · ${escape(selectedName)}` : ''}</p>` : commissionControls(state,filters,report,api);
+  const controls = print ? `<header class="workspace-print-heading"><h1>歩合・成績</h1>
+    <p>${api.storeName ? `${escape(api.storeName)} ／ ` : ''}営業日 ${periodLabel}${selectedName ? ` ／ ${escape(selectedName)}` : ''}</p></header>`
+    : commissionControls(state,filters,report,api);
   if (!period.valid || !period.days.length) return `<div class="lr-view">${controls}<p class="notice" role="status">${escape(period.error || 'この期間の営業データはありません。')}</p></div>`;
   const castRows = roster.filter(({id}) => !print || !selected || id === selected).map(({id,name,final = {},estimate = {}}) => {
     const castLabel = print ? escape(name) : `<button type="button" class="lr-person lr-link lr-cast-filter" data-action="commission-cast" data-id="${escape(id)}"
@@ -163,18 +156,18 @@ function renderCommission(state, api) {
       .map(({date,ticket,entry,at,name}) => `<tr><td>${print ? escape(ticket.number ?? ticket.id) : set.pending ? ticketLink(ticket, api) : receiptLink(ticket, date, api)}</td>
         <td><strong>${escape(entry.name)}</strong>${entry.adjustmentReason ? `<span class="lr-row-note">${escape(entry.adjustmentReason)}</span>` : ''}</td><td>${escape(name)}</td>
         <td class="lr-muted">${period.mode === 'day' ? '' : `${escape(date)} `}${timeLabel(at)}</td>
-        <td class="lr-numeric"><span class="lr-mobile-label" aria-hidden="true">個人売上</span>${yen(entry.sales)}</td>
-        <td class="lr-numeric"><span class="lr-mobile-label" aria-hidden="true">歩合</span><strong class="${set.pending ? 'lr-estimate' : 'lr-positive'}">${yen(entry.amount)}</strong>
+        <td class="lr-numeric">${print ? '' : '<span class="lr-mobile-label" aria-hidden="true">個人売上</span>'}${yen(entry.sales)}</td>
+        <td class="lr-numeric">${print ? '' : '<span class="lr-mobile-label" aria-hidden="true">歩合</span>'}<strong class="${set.pending ? 'lr-estimate' : 'lr-positive'}">${yen(entry.amount)}</strong>
         <span class="lr-unit"> · ${number.format(entry.points)} pt</span></td></tr>`);
     return panel(set.name, rows.length ? table(api, ['伝票', '注文明細', 'キャスト', period.mode !== 'day' ? '営業日・時刻' : set.pending ? '注文時刻' : '会計時刻', '個人売上', '歩合'],
-      rows, 'lr-payment-table lr-commission-detail') : empty(api, 'ticket', '該当する明細はありません',
+      rows, print ? '' : 'lr-payment-table lr-commission-detail') : empty(api, 'ticket', '該当する明細はありません',
       set.empty), panelCount(rows.length, '件'));
   }).join('');
   const selectedControl = !print && selected ? `<div class="lr-commission-filter"><strong>${escape(selectedName)}の明細</strong>
     <button type="button" class="btn btn-secondary" data-action="commission-cast" data-id="">すべてのキャスト</button></div>` : '';
   const overview = !print ? commissionOverview(api,earned,pending) : selected ? ''
     : `<p>確定歩合 ${yen(total(earned,'amount'))} · 見込み歩合 ${yen(total(pending,'amount'))}</p>`;
-  return `<div class="lr-view lr-commission">${controls}${!print && period.mode !== 'day' ? `<p class="lr-period-caption">${periodLabel}</p>` : ''}${overview}
+  return `<div class="lr-view lr-commission${print ? ' report-print' : ''}">${controls}${!print && period.mode !== 'day' ? `<p class="lr-period-caption">${periodLabel}</p>` : ''}${overview}
     ${hasMissingDetails ? '<p class="notice">会計明細が保存されていない営業日を含みます。保存済み歩合はキャスト別成績で確認できます。</p>' : ''}
     ${panel('キャスト別成績', castRows.length
       ? table(api, ['キャスト', '個人売上', '確定歩合', '見込み歩合', '確定ポイント'], castRows, 'lr-commission-roster')
@@ -295,7 +288,7 @@ function describeClosing(period, current, api) {
       <div><dt>実残高</dt><dd>${close?.actualCash == null ? '—' : yen(asNumber(close.actualCash))}</dd></div>
       <div${discrepancy ? ' class="lr-variance"' : ''}><dt>差額</dt><dd>${variance}</dd></div>
     </dl>${close?.reason ? `<p class="lr-report-note"><strong>差額理由</strong> ${escape(close.reason)}</p>` : ''}
-    ${countDetails ? `<details class="lr-cash-count"><summary>金種別の内訳</summary>${countRows
+    ${countDetails ? `<details class="lr-cash-count"${api.print ? ' open' : ''}><summary>金種別の内訳</summary>${countRows
       ? `<dl class="lr-money-list">${countRows}</dl>` : '<p>現金なし</p>'}</details>` : ''}
     ${close && (api.canCorrectRegister || api.canAuditRegister) ? `<div class="ops-actions">
       ${api.canCorrectRegister ? `<button type="button" class="btn" data-action="correct-register-count" data-id="${escape(close.date)}">実残高を訂正</button>` : ''}
@@ -327,24 +320,21 @@ function tenderBreakdown(current, api, multiple = false) {
   return panel('支払方法別の入金', `${breakdown}${applied}<p class="lr-report-note">${combinedOnly ? note : '前受金は、決済加算がある場合は加算を含む受取額で集計します。'}</p>`);
 }
 
-function cashLedgerHistory(current, api) {
+function cashLedgerHistory(ledger, api, showBusinessDate) {
   const {escape, icon, yen} = api;
-  const ledger = [...(current.cashMovements ?? [])].sort((left, right) => (right.at ?? 0) - (left.at ?? 0));
-  const rows = ledger.map((item) => {
+  const rows = ledger.map(({date,item,categoryLabel,typeLabel,timestamp,signedAmount,voided}) => {
     const {kind, actor} = item;
     const inflow = kind === 'deposit';
-    const title = cashMovementCategories[kind]?.[item.category] ?? 'その他';
-    const type = cashMovementKinds[kind] ?? '入出金';
-    const when = item.at != null && Number.isFinite(item.at) && Number.isFinite(new Date(item.at).valueOf())
+    const when = timestamp
       ? `<time datetime="${new Date(item.at).toISOString()}">${movementTime.format(item.at)}</time>` : '<span>当日合計</span>';
     return `<li class="lr-cash-entry">
       <div class="lr-cash-entry-label"><span class="lr-day-icon ${inflow ? 'lr-cash-in' : 'lr-cash-out'}" aria-hidden="true">${icon(inflow ? 'plus' : 'minus', 16)}</span>
-        <div><strong>${escape(title)}</strong><small>${escape(type)} · ${when}</small></div></div>
-      <strong class="lr-cash-entry-amount ${inflow ? 'lr-positive' : ''}">${signedYen(inflow ? item.amount : -item.amount,yen,true)}</strong>
+        <div><strong>${escape(categoryLabel)}</strong><small>${escape(typeLabel)} · ${when}${showBusinessDate ? ` · 営業日 ${escape(date)}` : ''}</small></div></div>
+      <strong class="lr-cash-entry-amount ${inflow && !voided ? 'lr-positive' : ''}">${signedYen(signedAmount,yen,true)}</strong>
       <div class="lr-cash-entry-extra">${item.reason ? `<p>${escape(item.reason)}</p>` : ''}
         <small>${[item.destination ? `相手先 ${item.destination}` : '', actor?.label ? `担当 ${actor.label}` : ''].filter(Boolean).map(escape).join(' · ')}</small>
         ${item.stockPurchaseId ? '<p>在庫の入庫と同時に記録</p>' : ''}
-        ${item.voidedAt != null ? `<p>取消済み ／ ${escape(item.voidReason)}</p>` : ''}
+        ${voided ? `<p>取消済み ／ ${escape(item.voidReason)}</p>` : ''}
         ${api.canEditCash?.(item) ? `<div class="ops-actions"><button type="button" class="btn" data-action="edit-cash-movement" data-id="${escape(item.id)}">訂正</button>
           <button type="button" class="btn" data-action="void-cash-movement" data-id="${escape(item.id)}">入出金を取消</button></div>` : ''}</div>
     </li>`;
@@ -364,27 +354,81 @@ function cashTotals(current, api) {
   ], api));
 }
 
-function renderCash(state, api, period, current) {
-  const {icon,escape,yen} = api;
-  const canRecord = api.canRecordCash !== false && period.date === state.day.date && state.day.status === 'open' && !period.closed;
+function cashReportDays(period, api, print = false) {
+  const {escape, icon, yen} = api;
+  const headings = ['営業日','入金','その他の出金','経費','日払い（現金）','理論残高','実残高','差額'];
+  const rows = period.days.slice().reverse().map(({date,current,closed}) => {
+    const dailyCash = asNumber(current.dailyPayTotals?.cash);
+    const amounts = [current.cashIn,current.cashOut - current.expenses - dailyCash,current.expenses,dailyCash,
+      current.expectedCash,closed?.actualCash,closed?.discrepancy];
+    const day = `<time datetime="${escape(date)}">${escape(date)}</time>`;
+    return `<tr><td>${print ? day : `<button type="button" class="lr-link" data-action="report-day" data-id="${escape(date)}"
+      aria-label="${escape(date)}の入出金を表示">${day}${icon('chevron-right',14)}</button>`}</td>
+      ${amounts.map((value,index) => `<td class="lr-numeric"><span class="lr-mobile-label" aria-hidden="true">${headings[index + 1]}</span>
+        <strong>${value == null ? '—' : signedYen(value,yen,index === 6)}</strong></td>`).join('')}</tr>`;
+  });
+  return panel('営業日別の入出金・レジ照合',table(api,headings,rows,print ? 'lr-cash-period-print-table' : 'lr-period-table'),panelCount(rows.length,'営業日'));
+}
+
+function renderCashControls(state, report, api, canRecord) {
+  const {icon,escape} = api;
+  const {period,interval,ledger} = report;
+  return `<section class="lr-period-tools" aria-label="入出金の期間と出力">
+    <div class="lr-period-controls"><div class="lr-period-modes" role="group" aria-label="集計単位">
+      ${reportModes.map(([id,label]) => `<button type="button" data-action="report-mode" data-id="${id}"
+        aria-pressed="${period.mode === id}">${label}</button>`).join('')}
+    </div>${reportDateFields(state,interval,period,api)}</div>
+    <div class="lr-period-exports"><div class="lr-period-freee" role="group" aria-label="入出金の出力">
+      <button type="button" class="btn btn-secondary" data-action="cash-export" data-id="csv"${ledger.length ? '' : ' disabled'}>${icon('download',16)}入出金明細CSV</button>
+      <button type="button" class="btn btn-secondary" data-action="cash-export" data-id="print"${period.days.length ? '' : ' disabled'}>${icon('printer',16)}A4で印刷</button>
+    </div>${canRecord ? `<button type="button" class="btn btn-primary" data-action="record-cash">${icon('plus',16)}入出金を記録</button>` : ''}</div>
+    ${period.valid ? '' : `<p class="lr-period-note lr-period-error" role="status">${escape(period.error)}</p>`}
+  </section>`;
+}
+
+function renderCash(state, api) {
+  const {escape,yen} = api;
+  const report = getCashReport(state,api.cashReportInterval ?? {date:api.reportDate});
+  const {period,ledger} = report;
+  const day = period.mode === 'day' ? period.days[0] : null;
+  const canRecord = api.canRecordCash !== false && day?.date === state.day.date && state.day.status === 'open' && !day.closed;
+  const controls = renderCashControls(state,report,api,canRecord);
+  if (!period.days.length) return `<div class="lr-view">${controls}${period.valid ? panel('入出金の集計',
+    empty(api,'wallet','この期間の営業データはありません','別の月または期間を選択してください。')) : ''}</div>`;
+
+  if (!day) return `<div class="lr-view">${controls}
+    <p class="lr-period-caption"><time datetime="${escape(period.start)}">${escape(period.start)}</time> 〜
+      <time datetime="${escape(period.end)}">${escape(period.end)}</time></p>
+    ${cashTotals(period.totals,api)}${cashReportDays(period,api)}${cashLedgerHistory(ledger,api,true)}</div>`;
+
   const vaults = cashAccounts(state,'vault');
   const vaultPanel = vaults.length ? panel('金庫の現在残高',
     `<dl class="lr-money-list">${vaults.map((vault)=>`<div><dt>${escape(vault.name)}${vault.enabled ? '' : '（停止中）'}</dt>
       <dd>${yen(vaultBalance(state,vault))}</dd></div>`).join('')}</dl>`) : '';
-  return `<div class="lr-view">
-    <div class="lr-report-toolbar">${dayPicker(state, period.date, api)}
-      ${canRecord ? `<button type="button" class="btn btn-primary" data-action="record-cash">${icon('plus',16)}入出金を記録</button>` : ''}</div>
-    ${describeClosing(period, current, api)}
-    <div class="lr-split">${registerBreakdown(state, period, current, api)}${cashTotals({...current,dailyPayTotals:getDailyPayTotals(state,period.date)}, api)}</div>
-    ${vaultPanel}
-    ${cashLedgerHistory(current, api)}</div>`;
+  return `<div class="lr-view">${controls}${describeClosing(day,day.current,api)}
+    <div class="lr-split">${registerBreakdown(state,day,day.current,api)}${cashTotals(day.current,api)}</div>
+    ${vaultPanel}${cashLedgerHistory(ledger,api,false)}</div>`;
+}
+
+export function renderCashReportPrint(report, api) {
+  const {escape,yen,storeName} = api;
+  const {period,ledger} = report;
+  const rows = ledger.map(({date,item,signedAmount,voided,categoryLabel,typeLabel,timestamp,voidedTime}) =>
+    `<tr><td>${escape(date)}<br>${escape(timestamp || '当日合計')}</td><td>${escape(typeLabel)}<br>${escape(categoryLabel)}</td>
+      <td class="lr-numeric">${signedYen(signedAmount,yen,true)}</td><td>${voided ? '取消済み' : '計上済み'}</td>
+      <td>${[item.reason,item.destination && `相手先 ${item.destination}`,item.actor?.label && `担当 ${item.actor.label}`,
+        item.stockPurchaseId && '仕入れ入庫',voided && [voidedTime,item.voidReason].filter(Boolean).join(' · ')].filter(Boolean).map(escape).join('<br>')}</td></tr>`);
+  return `<div class="lr-view lr-cash-print"><header><h1>入出金明細</h1><p>${escape(storeName)} · ${escape(period.start)}${period.start === period.end ? ''
+    : ` 〜 ${escape(period.end)}`} · 日本時間</p></header>${cashTotals(period.totals,api)}${cashReportDays(period,api,true)}
+    ${panel('入出金履歴',rows.length ? table(api,['営業日・時刻','区分','記録額','状態','詳細'],rows,'lr-cash-print-table')
+      : '<p class="lr-report-note">入出金の記録はありません。</p>',panelCount(rows.length,'件'))}</div>`;
 }
 
 function renderDaily(state, api, period, current, controls) {
-  const {yen, icon, escape} = api;
+  const {yen, icon, escape, print = false} = api;
   const settled = period.settledTickets;
   const cancelled = (state.cancelledSettlements ?? []).filter((entry) => entry.date === period.date);
-  const history = [...state.closedDays].reverse().map((entry) =>
+  const history = print ? '' : [...state.closedDays].reverse().map((entry) =>
     `<details class="lr-day"><summary><span class="lr-day-icon" aria-hidden="true">${icon('calendar', 18)}</span>
        <strong>${dateLabel(entry.date)}</strong><span class="lr-muted lr-day-time">${timeLabel(entry.openedAt)} – ${timeLabel(entry.closedAt)}</span>
        <strong class="lr-day-sales">${yen(entry.sales)}</strong><span class="lr-day-chevron" aria-hidden="true">${icon('chevron-down', 17)}</span></summary>
@@ -395,14 +439,17 @@ function renderDaily(state, api, period, current, controls) {
   const receiptRows = settled.slice().sort((a, b) => asNumber(b.settledAt) - asNumber(a.settledAt)).map((ticket) => {
     const amount = typeof api.quote === 'function' ? api.quote(period.state, ticket.id).total : 0;
     const seats = getTicketTableLabels(state, ticket).join('・');
-    return `<tr><td>${receiptLink(ticket, period.date, api)}</td><td>${escape(seats)}</td><td class="lr-muted">${timeLabel(ticket.settledAt)}</td>
+    const number = print ? escape(ticket.number || ticket.id) : receiptLink(ticket, period.date, api);
+    return `<tr><td>${number}</td><td>${escape(seats)}</td><td class="lr-muted">${timeLabel(ticket.settledAt)}</td>
       <td class="lr-numeric"><strong>${yen(amount)}</strong></td></tr>`;
   });
-  const cancelledRows = cancelled.map((entry) => `<tr><td><button class="lr-link" type="button" data-action="cancelled-receipt"
-    data-id="${escape(entry.id)}" aria-label="取消済みの会計 No. ${escape(entry.ticketNumber)}">${escape(entry.ticketNumber)}${icon('chevron-right',14)}</button></td>
-    <td class="lr-muted">${timeLabel(entry.at)}</td>
-    <td class="lr-numeric">${yen(entry.receipt.settlement.total)}</td>
-    <td>${escape(entry.reason)}</td></tr>`);
+  const cancelledRows = cancelled.map((entry) => {
+    const number = escape(entry.ticketNumber);
+    const receipt = print ? number : `<button class="lr-link" type="button" data-action="cancelled-receipt"
+      data-id="${escape(entry.id)}" aria-label="取消済みの会計 No. ${number}">${number}${icon('chevron-right',14)}</button>`;
+    return `<tr><td>${receipt}</td><td class="lr-muted">${timeLabel(entry.at)}</td>
+      <td class="lr-numeric">${yen(entry.receipt.settlement.total)}</td><td>${escape(entry.reason)}</td></tr>`;
+  });
   const guests = asNumber(current.guests);
   return `<div class="lr-view">
     ${controls}
@@ -418,7 +465,7 @@ function renderDaily(state, api, period, current, controls) {
       : empty(api, 'ticket', period.legacy ? '集計の保存がある営業日です' : '会計履歴はまだありません',
         period.legacy ? 'この営業日の会計件数と売上を上の集計で確認できます。' : '会計を確定した伝票がここに表示されます。'), panelCount(receiptRows.length, '件'))}
     ${cancelledRows.length ? panel('会計取消の履歴', table(api,['取消済み伝票','取消時刻','元の会計額','取消理由'],cancelledRows,'ops-cancelled'),panelCount(cancelledRows.length,'件')) : ''}
-    ${panel('締め履歴', history || empty(api, 'history', '締め履歴はまだありません', '閉店を確定すると、その営業日の実残高と売上を確認できます。'), panelCount(state.closedDays.length, '件'))}</div>`;
+    ${print ? '' : panel('締め履歴', history || empty(api, 'history', '締め履歴はまだありません', '閉店を確定すると、その営業日の実残高と売上を確認できます。'), panelCount(state.closedDays.length, '件'))}</div>`;
 }
 
 const reportModes = [
@@ -450,9 +497,9 @@ function renderReportControls(state, interval, period, api) {
   const canExportSales = period.valid && salesDays.length > 0 && !needsDetails;
   const canExportReport = period.valid && period.days.length > 0;
   const canExportRegister = period.valid && period.days.some(({closed}) => closed);
-  const exportButton = (id, label, enabled) => `<button type="button" class="btn btn-secondary" data-action="report-export"
-    data-id="${id}"${enabled ? '' : ' disabled'}>${icon('download',16)}${label}</button>`;
-  return `<section class="lr-period-tools" aria-label="日報の期間とCSV出力">
+  const exportButton = (id, label, enabled, glyph = 'download') => `<button type="button" class="btn btn-secondary" data-action="report-export"
+    data-id="${id}"${enabled ? '' : ' disabled'}>${icon(glyph,16)}${label}</button>`;
+  return `<section class="lr-period-tools" aria-label="日報の期間・印刷・CSV出力">
     <div class="lr-period-controls">
       <div class="lr-period-modes" role="group" aria-label="集計単位">
         ${reportModes.map(([id,label]) => `<button type="button" data-action="report-mode" data-report-mode="${id}"
@@ -465,6 +512,7 @@ function renderReportControls(state, interval, period, api) {
         ${exportButton('report','日報CSV',canExportReport)}
         ${exportButton('register','レジ締めCSV',canExportRegister)}
       </div>
+      ${exportButton('print','A4で印刷',canExportReport,'printer')}
       <div class="lr-period-freee" role="group" aria-label="freee向けCSV">
         <span>freee向け</span>
         ${exportButton('daily','日次集計CSV',canExportSales)}
@@ -491,14 +539,16 @@ function totalMethods(amounts) {
 }
 
 function renderPeriodDays(period, api) {
-  const {yen, escape, icon} = api;
+  const {yen, escape, icon, print = false} = api;
   const headings = ['営業日', '確定売上', '決済入金', '経費', '日払い支給'];
   const rows = period.days.slice().reverse().map(({date, current}) => {
     const amounts = [current.sales,totalMethods(current.payments),current.expenses,totalMethods(current.dailyPayTotals)];
+    const when = `<time datetime="${escape(date)}">${escape(date)}</time>`;
+    const day = print ? when : `<button type="button" class="lr-link" data-action="report-day" data-id="${escape(date)}"
+        aria-label="${escape(date)}の日報を表示">${when}${icon('chevron-right',14)}</button>`;
     return `<tr>
-      <td><button type="button" class="lr-link" data-action="report-day" data-id="${escape(date)}"
-        aria-label="${escape(date)}の日報を表示"><time datetime="${escape(date)}">${escape(date)}</time>${icon('chevron-right',14)}</button></td>
-      ${amounts.map((amount,index) => `<td class="lr-numeric"><span class="lr-mobile-label" aria-hidden="true">${headings[index+1]}</span>
+      <td>${day}</td>
+      ${amounts.map((amount,index) => `<td class="lr-numeric">${print ? '' : `<span class="lr-mobile-label" aria-hidden="true">${headings[index+1]}</span>`}
         <strong>${yen(asNumber(amount))}</strong></td>`).join('')}
     </tr>`;
   });
@@ -506,15 +556,15 @@ function renderPeriodDays(period, api) {
 }
 
 function renderMultipleDays(period, api, controls) {
-  const {yen, escape} = api;
+  const {yen, escape, print = false} = api;
   const {totals} = period;
   if (!period.valid || !period.days.length) {
     return `<div class="lr-view">${controls}${period.valid ? panel('期間の集計', empty(api,'calendar',
       'この期間の営業データはありません','別の月または期間を選ぶと、該当する営業日を確認できます。')) : ''}</div>`;
   }
   return `<div class="lr-view">${controls}
-    <p class="lr-period-caption"><time datetime="${escape(period.start)}">${escape(period.start)}</time>
-      〜 <time datetime="${escape(period.end)}">${escape(period.end)}</time></p>
+    ${print ? '' : `<p class="lr-period-caption"><time datetime="${escape(period.start)}">${escape(period.start)}</time>
+      〜 <time datetime="${escape(period.end)}">${escape(period.end)}</time></p>`}
     <div class="lr-stats lr-stats-daily">
       ${stat(api, 'chart', '確定売上', yen(asNumber(totals.sales)), 'accent')}
       ${stat(api, 'wallet', '決済入金', yen(totalMethods(totals.payments)))}
@@ -525,14 +575,22 @@ function renderMultipleDays(period, api, controls) {
   </div>`;
 }
 
+export function renderDailyReportPrint(state, period, {yen, escape, icon, quote, storeName}) {
+  if (!period.valid || !period.days.length) return '';
+  const day = period.mode === 'day' ? period.days[0] : null;
+  const mode = reportModes.find(([value]) => value === period.mode)?.[1];
+  const dates = period.start === period.end ? escape(period.start) : `${escape(period.start)} 〜 ${escape(period.end)}`;
+  const header = `<header class="workspace-print-heading"><h1>日報</h1>
+    <p><strong>${escape(storeName)}</strong> ／ ${mode} ／ 営業日 ${dates}</p></header>`;
+  const api = {yen, escape, icon, quote, print:true};
+  const report = day ? renderDaily(state,api,day,day.current,header) : renderMultipleDays(period,api,header);
+  return `<div class="np-daily-report-print">${report}</div>`;
+}
+
 export function renderReport(page, state, api) {
   if (page === 'stock') return renderStock(state, api);
   if (page === 'commission') return renderCommission(state,api);
-  if (page === 'cash') {
-    const period = reportPeriod(state, api);
-    const result = period.closed ?? api.summary(state);
-    return renderCash(state, api, period, result);
-  }
+  if (page === 'cash') return renderCash(state,api);
   const currentMonth = state.day.date.slice(0,7);
   const interval = {mode:'day',month:currentMonth,start:`${currentMonth}-01`,end:state.day.date,...api.reportInterval};
   const period = getReportPeriod(state,{...interval,date:api.reportDate});

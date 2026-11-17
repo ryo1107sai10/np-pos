@@ -19,11 +19,11 @@ function panel(title,body) {
   return `<section class="lr-panel labor-panel"><div class="lr-panel-head"><h2>${title}</h2></div>${body}</section>`;
 }
 
-function table(columns,rows,{escape}) {
-  return `<div class="analytics-table labor-table" tabindex="0"><table role="table">
+function table(columns,rows,{escape,print}) {
+  return `<div class="analytics-table${print ? '' : ' labor-table'}"${print ? '' : ' tabindex="0"'}><table role="table">
     <thead><tr>${columns.map((title)=>`<th scope="col">${title}</th>`).join('')}</tr></thead><tbody>
     ${rows.map((cells)=>`<tr><th scope="row">${escape(cells[0])}</th>${cells.slice(1).map((cell,index)=>
-      `<td><span class="labor-cell-label" aria-hidden="true">${columns[index+1]}</span>${escape(cell)}</td>`).join('')}</tr>`).join('')}
+      `<td>${print ? '' : `<span class="labor-cell-label" aria-hidden="true">${columns[index+1]}</span>`}${escape(cell)}</td>`).join('')}</tr>`).join('')}
     </tbody></table></div>`;
 }
 
@@ -58,20 +58,26 @@ function renderRoster(state,api) {
 }
 
 export function renderLaborReport(state,filters,api) {
-  const {escape,yen} = api;
+  const {escape,yen,print = false,storeName} = api;
   const report = getLaborReport(state,filters);
+  const canPrint = report.valid && Boolean(report.people.length || report.unavailableDates.length);
+  if (print && !canPrint) return '';
   const availableRoles = new Map([...['cast',...staffRoles].map((role)=>[role,roleLabel(state,role)]),
     ...Object.entries(state.rolePolicy?.custom ?? {}).map(([id,{label}])=>[id,label]),...(report.allRoleNames ?? [])]);
   const options = [...availableRoles].map(([key,name]) =>
     `<option value="${escape(key)}"${key === report.selectedRole ? ' selected' : ''}>${escape(name)}</option>`).join('');
-  const controls = `<section class="lr-period-tools" aria-label="勤怠・人件費の期間">
+  const roleName = report.selectedRole ? availableRoles.get(report.selectedRole) ?? report.selectedRole : '全役職';
+  const controls = print ? `<header class="workspace-print-heading"><h1>勤怠・人件費</h1>
+    <p>${storeName ? `${escape(storeName)} ／ ` : ''}営業日 ${escape(report.start)}${report.start === report.end ? '' : ` 〜 ${escape(report.end)}`} ／ ${escape(roleName)}</p></header>`
+    : `<section class="lr-period-tools" aria-label="勤怠・人件費の期間">
     <div class="lr-period-controls"><div class="lr-period-dates">
       ${field('開始営業日',`<input type="date" data-labor-filter="start" value="${escape(report.start)}" required>`)}
       ${field('終了営業日',`<input type="date" data-labor-filter="end" value="${escape(report.end)}" required>`)}
       ${field('役職',`<select data-labor-filter="role"><option value="">全役職</option>${options}</select>`)}
     </div></div>
     <div class="lr-period-exports">${report.valid && report.people.length ? button('人件費CSV','labor-export',api,{id:'summary',glyph:'download'}) : ''}
-      ${report.valid && report.details.length ? button('日別勤怠CSV','labor-export',api,{id:'daily',glyph:'download'}) : ''}</div></section>`;
+      ${report.valid && report.details.length ? button('日別勤怠CSV','labor-export',api,{id:'daily',glyph:'download'}) : ''}
+      ${canPrint ? button('印刷','labor-print',api,{glyph:'printer'}) : ''}</div></section>`;
   if (!report.valid) return `<div class="lr-view">${controls}<p class="ops-highlight" role="status">${escape(report.error)}</p>${renderRoster(state,api)}</div>`;
   const peopleRows = report.people.map((row) => [row.personName,row.roleName,`${row.days}日`,formatLaborHours(row.minutes),
     row.hasKnownBase ? yen(row.hourlyPay) : placeholder,yen(row.extras),row.hasKnownCost ? yen(row.knownCost) : placeholder,row.issues.join('・') || '集計済み']);
@@ -79,7 +85,7 @@ export function renderLaborReport(state,filters,api) {
   const attendance = report.details.map(({date,roleName,personName,minutes,hourlyRate,clockInAt,clockOutAt,source}) =>
     [date,roleName,personName,formatLaborHours(minutes),hourlyRate === null ? (minutes > 0 ? '未登録' : placeholder) : yen(hourlyRate),
       clockInAt ? `${time(clockInAt)} 〜 ${time(clockOutAt)}` : source === 'manual' ? '給与の勤務行' : '勤怠']);
-  return `<div class="lr-view">${controls}
+  return `<div class="lr-view${print ? ' report-print' : ''}">${controls}
     ${panel('役職別の合計',`<p class="field-help">人件費参考額は時給分・確定歩合・ポイント換金・日付のある勤怠手当を合算します。「出勤者」は期間内に勤務を記録した人数です。日払いと月次の手当・控除は給与画面で確認できます。</p>
       ${report.roles.length ? `<div class="result-bar"><span>期間の人件費参考額${report.partial ? '（判明分）' : ''}</span>
         <strong>${report.hasKnownCost ? yen(report.knownCost) : placeholder}</strong></div>` : ''}
@@ -89,7 +95,7 @@ export function renderLaborReport(state,filters,api) {
     ${peopleRows.length ? panel('勤務者別',table(['勤務者','役職','出勤日','勤務時間（時間）','時給分（判明分）','歩合等','人件費参考額（判明分）','確認事項'],peopleRows,api)) : ''}
     ${daily.length ? panel('営業日・役職別',table(['営業日','役職','出勤者','勤務時間（時間）'],daily,api)) : ''}
     ${attendance.length ? panel('勤怠明細',table(['営業日','役職','勤務者','勤務時間（時間）','時給','出退勤・記録元'],attendance,api)) : ''}
-    ${renderRoster(state,api)}</div>`;
+    ${print ? '' : renderRoster(state,api)}</div>`;
 }
 
 export function renderStaffAttendance(state,api) {

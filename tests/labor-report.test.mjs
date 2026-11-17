@@ -4,6 +4,7 @@ import { apply, createDemo } from '../docs/engine.mjs';
 import { getPayrollDraft } from '../docs/payroll.mjs';
 import { createLaborDemo } from '../docs/phase-two-demo.mjs';
 import { buildLaborCsv, getLaborReport } from '../docs/labor-report.mjs';
+import { renderLaborReport } from '../docs/labor-ui.mjs';
 import { projectState, validateSnapshot, verifyCommand } from '../server/policy.mjs';
 
 const now = Date.parse('2026-11-16T21:00:00+09:00');
@@ -13,6 +14,19 @@ const staff = {id:'staff',label:'担当',role:'staff'};
 const businessDate = '2026-11-15';
 const reportRange = {start:'2026-11-14',end:'2026-11-16'};
 const command = (state,action,actor = admin) => apply(state,action,now,actor);
+
+test('the labor print includes report tables and excludes the roster and controls', () => {
+  const state = createLaborDemo(now);
+  const filters = {...reportRange,role:'manager'};
+  const api = {escape:String,yen:(amount)=>`¥${amount}`,icon:()=>'',storeName:'検証店舗'};
+  const print = renderLaborReport(state,filters,{...api,print:true});
+  assert.match(renderLaborReport(state,filters,api),/data-action="labor-print">印刷/);
+  assert.match(print,/<h1>勤怠・人件費<\/h1>[\s\S]*検証店舗 ／ 営業日 2026-11-14 〜 2026-11-16 ／ マネージャー/);
+  assert.match(print,/役職別の合計[\s\S]*勤務者別[\s\S]*佐伯[\s\S]*営業日・役職別[\s\S]*勤怠明細/);
+  assert.match(print,new RegExp(`期間の人件費参考額</span>\\s*<strong>¥${getLaborReport(state,filters).knownCost}`));
+  assert.doesNotMatch(print,/望月|高橋|勤務者台帳と時給|<button|<select|labor-cell-label/);
+  assert.equal(renderLaborReport(state,{...filters,end:'2026-11-13'},{...api,print:true}),'');
+});
 
 test('role-based labor counts use business dates and distinguish zero wages from missing rates', () => {
   const state = createLaborDemo(now);

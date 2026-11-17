@@ -47,7 +47,7 @@ const groups = {
   reports:{
     title:'レポート・入出金', detail:'日報・過去伝票・分析の閲覧、個人売上の調整、レジ入出金',
     commands:['recordCashMovement','editCashMovement','voidCashMovement','recoverReceivable','adjustPersonalSales'],
-    actions:['record-cash','edit-cash-movement','void-cash-movement','report-mode','report-day','report-export',
+    actions:['record-cash','edit-cash-movement','void-cash-movement','report-mode','report-day','report-export','cash-export',
       'analytics-csv','analytics-print','history-receipt','personal-sales-adjustment'],
     pages:['commission','reports','tickets','analytics','product-sales','cash','team-performance'],
   },
