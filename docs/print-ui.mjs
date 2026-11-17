@@ -117,12 +117,12 @@ function lineItems(ticket, detailed, grouping, inclusive, {escape, yen}) {
 
 function chargeDetails(totals, api) {
   const inclusive = totals.priceMode === 'inclusive';
-  const rows = [[inclusive ? '小計（税込）' : '小計（税抜）', totals.subtotal]];
+  const rows = [[totals.priceMode === 'serviceInclusive' ? '小計' : inclusive ? '小計（税込）' : '小計（税抜）', totals.subtotal]];
   const lineDiscount = totals.lineDiscount ?? 0;
   if (lineDiscount) rows.push(['明細値引き', -lineDiscount]);
   if (totals.discount > lineDiscount) rows.push([lineDiscount ? '伝票値引き' : '値引き', lineDiscount - totals.discount]);
   if (totals.service) rows.push(['サービス料', totals.service]);
-  const taxLabel = inclusive ? 'うち消費税' : '消費税';
+  const taxLabel = totals.priceMode === 'serviceInclusive' ? 'うち消費税（サービス料に含む）' : inclusive ? 'うち消費税' : '消費税';
   rows.push([totals.cardFee ? `${taxLabel}（加算前）` : taxLabel, totals.tax - (totals.cardFeeTax ?? 0)]);
   if (totals.depositFee) rows.push(['前受金の決済加算（税込）',totals.depositFee]);
   const settlementFee = (totals.cardFee ?? 0) - (totals.depositFee ?? 0);

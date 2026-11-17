@@ -95,6 +95,25 @@ test('keeping inclusive attribution excludes embedded item tax and keeps the dis
   assert.deepEqual(retain.taxBreakdown, reflect.taxBreakdown);
 });
 
+test('the store default allocates discounted pretax or full bill amounts while preserving checkout and payouts', () => {
+  const {state,ticketId} = fixture();
+  const settings = {...getCalculationSettings(state),personalSalesDiscountMode:'prorateNet'};
+  let net = run(state,{type:'saveCalculationSettings',settings});
+  net = run(net,discount(ticketId,1_000));
+  let full = run(state,{type:'saveCalculationSettings',settings:{...settings,personalSalesDiscountMode:'prorateFull'}});
+  full = run(full,discount(ticketId,1_000));
+  const {commission:netRows,commissionDetails:netDetails,...netBill} = quote(net,ticketId);
+  const {commission:fullRows,commissionDetails:fullDetails,...fullBill} = quote(full,ticketId);
+  assert.deepEqual(fullBill,netBill);
+  assert.equal(netRows[0].sales,500);
+  assert.equal(fullRows[0].sales,180);
+  assert.equal(netRows[0].amount,fullRows[0].amount);
+  assert.equal(netDetails[0].sales,500);
+  assert.equal(fullDetails[0].sales,180);
+  assert.equal(full.tickets[0].discountDetails.personalSalesMode,'prorateFull');
+  assert.ok(validateSnapshot(full));
+});
+
 test('personal attribution survives settlement, close and migration without changing payroll sums', () => {
   const { state, ticketId } = fixture();
   const before = run(state, { type: 'settle', ticketId, payments: [{ method: 'cash', amount: quote(state,ticketId).remaining }] });

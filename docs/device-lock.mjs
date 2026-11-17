@@ -8,6 +8,13 @@ const isHex = (value, length) => typeof value === 'string' && value.length === l
 const validTime = (value) => Number.isSafeInteger(value) && value >= 0;
 const encodeHex = (bytes) => Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
 
+async function offlineDataKey(crypto,pin,salt) {
+  const encoder = new TextEncoder();
+  const input = await crypto.subtle.importKey('raw',encoder.encode(pin),'PBKDF2',false,['deriveKey']);
+  return crypto.subtle.deriveKey({name:'PBKDF2',hash:'SHA-256',iterations:rounds,salt:encoder.encode(`np-pos:offline:v1:${salt}`)},
+    input,{name:'AES-GCM',length:256},false,['encrypt','decrypt']);
+}
+
 async function digestPin(crypto, pin, salt) {
   const bytes = Uint8Array.from(salt.match(/../g), (byte) => Number.parseInt(byte, 16));
   const input = await crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveBits']);
@@ -40,6 +47,7 @@ export function createDeviceLock({
   let lastWrite = 0;
   let writeTimer;
   let locallyLocked = false;
+  let offlineKey;
 
   const available = Boolean(crypto?.subtle && crypto.getRandomValues && storage);
 
@@ -80,12 +88,14 @@ export function createDeviceLock({
       notify(previous);
       throw new Error(error);
     }
+    if (!next || next.locked || next.salt !== offlineKey?.salt) offlineKey = undefined;
   }
 
   function refresh() {
     const previous = snapshot();
     const old = record;
     record = read();
+    if (record?.locked || record?.salt !== offlineKey?.salt) offlineKey = undefined;
     if (record?.salt !== old?.salt || previous.locked !== (record?.locked === true)) {
       localDeadline = 0;
       clearTimeout(writeTimer);
@@ -165,12 +175,14 @@ export function createDeviceLock({
         salt = encodeHex(crypto.getRandomValues(new Uint8Array(16)));
         verifier = await digestPin(crypto, pin, salt);
       }
+      const key = await offlineDataKey(crypto,pin || currentPin,salt);
       const updated = refresh();
       if (updated?.salt !== latest?.salt || updated?.locked !== latest?.locked) {
         throw new Error('別のタブで画面ロックの状態が変わりました。');
       }
       localDeadline = 0;
       save({ uid, minutes, salt, verifier, locked: false, deadline: now() + minutes * minute, failures: 0, retryAt: 0 });
+      offlineKey = {salt,key};
     });
   }
 
@@ -179,7 +191,11 @@ export function createDeviceLock({
       const latest = refresh();
       if (!latest?.locked) return;
       const verified = await authenticate(latest, pin);
+      const key = await offlineDataKey(crypto,pin,verified.salt);
+      const current = refresh();
+      if (current?.salt !== verified.salt || !current.locked) throw new Error('別のタブで画面ロックの状態が変わりました。');
       save({ ...verified, locked: false, deadline: now() + verified.minutes * minute, failures: 0, retryAt: 0 });
+      offlineKey = {salt:verified.salt,key};
     });
   }
 
@@ -193,7 +209,11 @@ export function createDeviceLock({
     record = read();
     check();
   }
-  return { get snapshot() { return snapshot(); }, check, activity, lock, configure, unlock, resetAfterIdentityCheck };
+  return { get snapshot() { return snapshot(); }, check, activity, lock, configure, unlock, resetAfterIdentityCheck,
+    getOfflineDataKey(uid) {
+      return record && record.uid === uid && !record.locked && offlineKey?.salt === record.salt ? offlineKey.key : null;
+    },
+  };
 }
 
 export function memoryLockStorage() {

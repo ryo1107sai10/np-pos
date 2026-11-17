@@ -2,8 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { apply, createDemo } from '../docs/engine.mjs';
 import { createLaborDemo } from '../docs/phase-two-demo.mjs';
-import { getStaffOwnPayroll, getStaffPayrollDraft, previewStaffPayroll } from '../docs/staff-payroll.mjs';
-import { staffPayrollPrintRecord } from '../docs/staff-payroll-ui.mjs';
+import { getStaffOwnPayroll, getStaffPayrollDraft, previewStaffPayroll, previewStaffPayrollRange } from '../docs/staff-payroll.mjs';
+import { renderOwnStaffPayroll, staffPayrollPrintRecord } from '../docs/staff-payroll-ui.mjs';
+import { defaultPayrollStatementLayout } from '../docs/payroll-statement-layout.mjs';
+import { renderPayrollPrint } from '../docs/payroll-ui.mjs';
+import { getLaborReport } from '../docs/labor-report.mjs';
+import { getAttendanceBatchRows } from '../docs/attendance-batch-ui.mjs';
 import { projectState, validateSnapshot, verifyCommand } from '../server/policy.mjs';
 
 const now = Date.parse('2026-11-16T23:00:00+09:00');
@@ -84,4 +88,71 @@ test('the labor sample has a viewable personal statement in the staff role', () 
   const own = getStaffOwnPayroll(state,'demo-staff','staff');
   assert.equal(own.person.name,'森');
   assert.equal(own.records[0].snapshot.net,23900);
+});
+
+test('linked workers punch distinct intervals and reports count the business day once', () => {
+  let state = payrollFixture();
+  const actor = {id:'actual-staff',role:'staff',label:'スタッフA'};
+  const personId = state.staffLabor.people[0].id;
+  const clockIn = {type:'staffClockIn'};
+  const clockOut = {type:'staffClockOut'};
+  const first = Date.parse('2026-11-16T20:00:00+09:00');
+  assert.throws(() => apply(state,clockIn,first,{...actor,id:'someone-else'}),/本人/);
+  const before = state.staffLabor.attendance.length;
+  state = apply(state,clockIn,first,actor);
+  assert.throws(() => apply(state,clockIn,first + 10000,actor),/先に退勤/);
+  assert.equal(state.auditLog[0].reason,'本人の出勤打刻');
+  assert.equal(getStaffOwnPayroll(state,actor.id,actor.role).attendance[0].clockOutAt,null);
+  state = apply(state,clockOut,first + 60 * 60_000,actor);
+  assert.equal(state.auditLog[0].before.clockOutAt,null);
+  assert.equal(state.auditLog[0].reason,'本人の退勤打刻');
+  state = apply(state,clockIn,first + 90 * 60_000,actor);
+  state = apply(state,clockOut,first + 120 * 60_000,actor);
+  assert.equal(state.staffLabor.attendance.length,before + 2);
+  assert.equal(getAttendanceBatchRows(state,'2026-11-16').filter((row) => row.personId === personId && row.prior).length,2);
+  const report = getLaborReport(state,{start:'2026-11-16',end:'2026-11-16',role:'staff'});
+  assert.deepEqual(report.daily.map(({count,minutes}) => [count,minutes]),[[1,90]]);
+  assert.deepEqual(report.people.map(({days,hourlyPay}) => [days,hourlyPay]),[[1,3600]]);
+  assert.equal(previewStaffPayroll(state,{personId,month}).work.find(({date}) => date === '2026-11-16').minutes,90);
+  assert.equal(getStaffOwnPayroll(state,'someone-else','staff'),null);
+  assert.equal(validateSnapshot(state).staffLabor.attendance.length,before + 2);
+});
+
+test('a staff template uses worked days, freezes calculations and supports four-column printing', () => {
+  let state = payrollFixture();
+  const personId = state.staffLabor.people[0].id;
+  const period = '2026-12';
+  const at = Date.parse('2026-12-02T23:00:00+09:00');
+  const applyCommand = (command) => {state = apply(state,command,at);};
+  const clockInAt = Date.parse('2026-12-01T20:00:00+09:00');
+  applyCommand({type:'saveStaffAttendance',personId,date:'2026-12-01',clockInAt,clockOutAt:clockInAt + 120 * 60_000,breakMinutes:0,reason:'勤務'});
+  const statementLayout = defaultPayrollStatementLayout().map((row) => row.key === 'summary' ? {...row,columns:4} : row);
+  applyCommand({type:'savePayrollTemplate',name:'スタッフの計算',statementLayout,rules:[
+    {label:'出勤手当',kind:'allowance',basis:'formula',left:'workdays',operator:'*',right:'number',rightValue:500},
+    {label:'積立',kind:'deduction',basis:'hourlyPay',value:1000},
+  ]});
+  const templateId = state.payroll.templates.at(-1).id;
+  applyCommand({type:'assignStaffPayrollTemplate',personId,templateId});
+  applyCommand({type:'saveStaffPayrollDraft',personId,month:period});
+  const pay = previewStaffPayroll(state,{personId,month:period});
+  assert.deepEqual(pay.statementItems.map(({amount}) => amount),[500,480]);
+  assert.equal(pay.net,4820);
+  applyCommand({type:'finalizeStaffPayroll',personId,month:period,expectedNet:pay.net});
+  const frozen = getStaffPayrollDraft(state,personId,period);
+  assert.deepEqual(getStaffPayrollDraft(validateSnapshot(state),personId,period),frozen);
+  assert.throws(() => apply(state,{type:'removePayrollTemplate',templateId},at),/使用中/);
+  applyCommand({type:'assignStaffPayrollTemplate',personId,templateId:null});
+  applyCommand({type:'saveStaffRate',personId,effectiveDate:'2026-12-01',hourlyRate:6000});
+  assert.equal(previewStaffPayrollRange(state,{personId,start:'2026-11-15',end:'2026-12-01'}).snapshot.hourlyPay,9600);
+  const own = getStaffOwnPayroll(state,'actual-staff','staff');
+  const statement = own.records.find(({month}) => month === period);
+  assert.equal(statement.snapshot.formulaContext,undefined);
+  assert.deepEqual(statement.snapshot.settings,{statementLayout});
+  assert.equal(statement.snapshot.net,4820);
+  const api = {escape:String,yen:String,storeName:'テスト',icon:()=>'',button:String};
+  const html = renderPayrollPrint(staffPayrollPrintRecord(statement),api);
+  assert.match(html,/data-columns="4"/);
+  assert.match(html,/出勤手当/);
+  assert.match(renderOwnStaffPayroll(own,api),/2026-12の給与が確定しました/);
+  assert.doesNotMatch(renderOwnStaffPayroll(own,api,new Set([period])),/2026-12の給与が確定しました/);
 });

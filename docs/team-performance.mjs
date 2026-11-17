@@ -1,4 +1,4 @@
-import { encodeCsv } from './csv-file.mjs';
+import { encodeCsv, encodeTsv } from './csv-file.mjs';
 import { quote } from './engine.mjs';
 import { getReportPeriod } from './report-period.mjs';
 
@@ -38,10 +38,11 @@ export function getTeamPerformance(state, range = {}, role = 'all') {
     sales:rows.reduce((sum,row) => sum + row.sales,0)};
 }
 
-export function buildTeamPerformanceCsv(state, range, role) {
+export function buildTeamPerformanceCsv(state, range, role, {format = 'csv'} = {}) {
   const {start,end,period,rows,unattributed} = getTeamPerformance(state,range,role);
   if (!period.valid || !period.days.length) return '';
-  return encodeCsv([['開始日','終了日','会計確定者','役割','件数','税込会計額'],
+  const encode = format === 'tsv' ? encodeTsv : encodeCsv;
+  return encode([['開始日','終了日','会計確定者','役割','件数','税込会計額'],
     ...rows.map((row) => [start,end,row.label,roles[row.role],row.tickets,row.sales]),
     ...(unattributed ? [[start,end,'確定者の記録なし','',unattributed,'']] : [])]);
 }
@@ -57,6 +58,7 @@ export function renderTeamPerformance(state, {range,role = 'all',escape,icon,yen
     <label class="lr-period-field"><span>終了日</span><input type="date" data-team-end value="${escape(end)}"></label>
     <label class="lr-period-field field"><span>役割</span><select data-team-role><option value="all">${allRoles}</option>${Object.entries(roles).map(([id,label]) => `<option value="${id}"${id===role?' selected':''}>${label}</option>`).join('')}</select></label>
     </div></div><div class="lr-period-exports"><button type="button" class="btn btn-secondary" data-action="team-performance-csv"${hasData?'':' disabled'}>${icon('download',16)}CSV出力</button>
+      <button type="button" class="btn btn-secondary" data-action="team-performance-tsv"${hasData?'':' disabled'}>${icon('download',16)}TSV出力</button>
       <button type="button" class="btn" data-action="team-performance-print"${hasData?'':' disabled'}>${icon('printer',16)}印刷</button></div></section>`;
   if (!hasData) return `<div class="lr-view">${controls}<p class="notice" role="status">${escape(period.error || 'この期間の営業データはありません。')}</p></div>`;
   const metrics = [['確定者数',`${rows.length}名`],['確定件数',`${tickets}件`],['税込会計額',yen(sales)],['確定者の記録なし',`${unattributed}件`]];

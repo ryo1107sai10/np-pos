@@ -92,5 +92,16 @@
 }
 .payroll-rule-layout { display: grid; grid-template-columns: repeat(var(--payroll-columns, 1), minmax(0, 1fr)); gap: .45rem; }
 .payroll-rule-layout .lr-money-list > div { display: grid; }
+.payroll-statement-print-grid:not([data-columns="1"]) { display: grid; }
+.payroll-statement-print-grid[data-columns="2"] { grid-template-columns: repeat(2,minmax(0,1fr)); }
+.payroll-statement-print-grid[data-columns="3"] { grid-template-columns: repeat(3,minmax(0,1fr)); }
+.payroll-statement-print-grid[data-columns="4"] { grid-template-columns: repeat(4,minmax(0,1fr)); }
+.payroll-statement-print-grid:not([data-columns="1"]) > div {
+  display: grid;
+  align-content: start;
+  gap: 2px;
+  overflow-wrap: anywhere;
+  break-inside: avoid;
+}
 @media screen and (max-width: 600px) { .payroll-rule-layout { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media print { .payroll-print-page + .payroll-print-page { break-before: page; } }

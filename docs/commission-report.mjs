@@ -1,4 +1,4 @@
-import { encodeCsv } from './csv-file.mjs';
+import { encodeCsv, encodeTsv } from './csv-file.mjs';
 import { getTicketCommissionDetails } from './engine.mjs';
 import { getReportPeriod } from './report-period.mjs';
 
@@ -50,15 +50,16 @@ export function getCommissionReport(state, filters = {}, castId = '') {
       .map((row) => ({...row,name:row.entry.castName ?? name(row.entry.castId)}))};
 }
 
-export function buildCommissionCsv(report, kind, {showCost = true} = {}) {
+export function buildCommissionCsv(report, kind, {showCost = true, format = 'csv'} = {}) {
   const {period,roster,details,selected} = report;
   if (!period.valid || !period.days.length) return '';
+  const encode = format === 'tsv' ? encodeTsv : encodeCsv;
   if (kind === 'summary') {
-    return encodeCsv([['開始日','終了日','キャスト','個人売上','確定歩合','見込み歩合','確定ポイント'],
+    return encode([['開始日','終了日','キャスト','個人売上','確定歩合','見込み歩合','確定ポイント'],
       ...roster.filter(({id}) => !selected || id === selected).map(({name,final,estimate}) =>
         [period.start,period.end,name,final?.sales ?? 0,final?.amount ?? 0,estimate?.amount ?? 0,final?.points ?? 0])]);
   }
-  return encodeCsv([['営業日','区分','時刻（日本時間）','伝票番号','注文明細','キャスト','個人売上','歩合','ポイント','調整理由','担当数量',
+  return encode([['営業日','区分','時刻（日本時間）','伝票番号','注文明細','キャスト','個人売上','歩合','ポイント','調整理由','担当数量',
     ...(showCost ? ['個人原価'] : [])],
     ...details.map(({date,ticket,entry,isPending,at,name}) => [date,isPending ? '見込み' : '確定',
       Number.isFinite(at) ? time.format(at) : '',ticket.number,entry.name,name,entry.sales,entry.amount,entry.points,entry.adjustmentReason,

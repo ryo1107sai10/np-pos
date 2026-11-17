@@ -184,7 +184,7 @@ export function roleAllowsCommand(state, role, command, profileId) {
     && !roleAllows(state,role,'commands','voidCashMovement',profileId)))) return false;
   if (command.type === 'settle' && Array.isArray(command.payments) && command.payments.some((payment)=>payment?.method === 'receivable')
     && !roleGroupAllowed(state,role,'customers',profileId)) return false;
-  if (profileId && command.type !== 'syncAutoExtensions'
+  if (profileId && !['syncAutoExtensions','staffClockIn','staffClockOut'].includes(command.type)
     && !Object.values(permissions).some(({commands}) => commands?.includes(command.type))) return false;
   return roleAllows(state,role,'commands',command.type,profileId);
 }

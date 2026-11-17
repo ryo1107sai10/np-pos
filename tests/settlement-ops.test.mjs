@@ -2,6 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { apply, createDemo, getTicketForTable, quote, summary } from '../docs/engine.mjs';
 import { getStoreSettings } from '../docs/store-settings.mjs';
+import { getReportDay } from '../docs/report-period.mjs';
+import { isVisitAutoExtensionPaused } from '../docs/auto-extension.mjs';
+import { validateSnapshot } from '../server/policy.mjs';
 
 const now = Date.parse('2026-11-16T21:00:00+09:00');
 const admin = { id: 'admin-1', label: '店舗管理者', role: 'admin' };
@@ -90,7 +93,7 @@ test('reopening keeps the ticket and orders, reserves stock once, and supports s
   assert.deepEqual(reversedAgain.stock, start.stock);
   assert.equal(reversedAgain.cancelledSettlements.length, 2);
   assert.notEqual(reversedAgain.cancelledSettlements[0].id, receipt.id);
-  assert.deepEqual(reversedAgain.cancelledSettlements[1], receipt);
+  assert.deepEqual(reversedAgain.cancelledSettlements[1], {...receipt,reopenedAt:now,reopenedTicketId:ticketId});
 });
 
 test('reopening rejects occupied tables, inadequate capacity, and insufficient stock atomically', () => {
@@ -133,7 +136,51 @@ test('correction requires admin and a reason, and closed-day reversal records re
   assert.deepEqual(nextDay.tickets, []);
   assert.equal(nextDay.closedDays[0].sales, 0);
   assert.deepEqual(nextDay.cancelledSettlements, reversed.cancelledSettlements);
-  assert.throws(() => run(nextDay, reopening(ticketId)), /伝票が見つかりません/);
+  const nextAt = now + 24 * 60 * 60 * 1000;
+  const restored = apply(nextDay,reopening(ticketId),nextAt,admin);
+  assert.notEqual(restored.tickets[0].id,ticketId);
+  assert.deepEqual(restored.tickets[0].reopenedFrom,{ticketId,date:start.day.date,cancellationId:reversed.cancelledSettlements[0].id});
+  assert.ok(isVisitAutoExtensionPaused(restored.tickets[0]));
+  assert.throws(() => apply(restored,reopening(ticketId,['a2']),nextAt,admin),/再オープン済み/);
+});
+
+test('historical cancellation restates only the original operating day and preserves the count, the receipt, and served stock', () => {
+  const start = seated();
+  const ticketId = start.tickets[0].id;
+  let state = ordered(start,ticketId);
+  const served = state.tickets[0].lines.find(({menuId}) => menuId === 'castDrink');
+  const unserved = state.tickets[0].lines.find(({menuId}) => menuId === 'highball');
+  state = run(state,{type:'serve',ticketId,lineId:served.id});
+  state = run(state,{type:'deposit',ticketId,method:'cash',amount:2_000});
+  state = settle(state,ticketId,[{method:'cash',amount:8_000},{method:'card',amount:6_368}]);
+  state = run(state,{type:'depart',ticketId});
+  const original = run(state,{type:'close',actualCash:20_000});
+  const tomorrow = next => apply(next,{type:'open',date:'2026-11-17',openingCash:12_000},now + 86_400_000,admin);
+  assert.throws(() => run(original,{...cancellation(ticketId),expectedRevision:0}),/更新されました/);
+  const today = tomorrow(original);
+  const reversed = apply(today,{...cancellation(ticketId),expectedRevision:1},now + 86_400_000,admin);
+  const report = getReportDay(reversed,start.day.date);
+  assert.equal(report.ticketDataComplete,true);
+  assert.equal(report.current.actualCash,20_000);
+  assert.equal(report.current.expectedCash,10_000);
+  assert.equal(report.current.discrepancy,10_000);
+  assert.equal(report.current.sales,0);
+  assert.deepEqual(report.current.commission,[]);
+  assert.deepEqual(report.current.payments,{cash:0,card:0,qr:0});
+  assert.equal(report.current.depositsApplied,0);
+  assert.deepEqual(reversed.day,today.day);
+  assert.equal(summary(reversed).expectedCash,12_000);
+  assert.deepEqual(reversed.cancelledSettlements[0].receipt,original.closedDays[0].ticketSnapshots[0]);
+  assert.deepEqual(reversed.cancelledSettlements[0].restockedLineIds,[unserved.id]);
+  const returns = reversed.movements.slice(0,reversed.movements.length - today.movements.length);
+  assert.ok(returns.length && returns.every(({sourceLineId}) => sourceLineId === unserved.id));
+  assert.equal(reversed.auditLog[0].businessDate,start.day.date);
+  assert.equal(reversed.auditLog[0].before.closing.sales,16_368);
+  const restored = apply(reversed,reopening(ticketId),now + 86_400_000,admin);
+  assert.deepEqual(restored.stock,today.stock);
+  assert.equal(quote(restored,restored.tickets[0].id).total,16_368);
+  assert.equal(getReportDay(restored,start.day.date).current.sales,0);
+  assert.doesNotThrow(() => validateSnapshot(structuredClone(restored)));
 });
 
 test('cancelling an unmodified sale can restore a legitimately archived stock item with its original unit and cost', () => {

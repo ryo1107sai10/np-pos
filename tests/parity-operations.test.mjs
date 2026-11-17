@@ -112,6 +112,42 @@ test('archived line correction verifies the new total and updates cash, sales an
   assert.ok(validateSnapshot(state));
 });
 
+test('an archived extension price and its linked cancellation update the original receipt, timing and payout', () => {
+  let state = run(opened(),{type:'seat',tableIds:['a1'],guests:1,setId:'set60'});
+  const ticketId = state.tickets[0].id;
+  state = run(state,{type:'order',ticketId,items:[{menuId:'nomination',quantity:1,castIds:['cast1']}]});
+  const originalEnd = state.tickets[0].endsAt;
+  state = run(state,{type:'extend',ticketId,menuId:'extend30'});
+  const charge = state.tickets[0].lines.find(({menuId}) => menuId === 'extend30');
+  const surcharge = state.tickets[0].lines.find(({menuId}) => menuId === 'nominationExtra');
+  assert.equal(surcharge.extensionGroupId,charge.id);
+  const before = quote(state,ticketId);
+  state = run(state,{type:'settle',ticketId,payments:[{method:'cash',amount:before.total}]});
+  state = run(state,{type:'depart',ticketId});
+  state = run(state,{type:'close',actualCash:20_000 + before.total});
+  state = run(state,{type:'open',date:'2026-11-18',openingCash:20_000});
+  const ticket = state.closedDays[0].ticketSnapshots[0];
+  const action = {type:'correctSettledContents',ticketId,lineId:charge.id,price:2_000,
+    quantity:1,discount:0,castIds:[],adjustmentMethod:'cash',reason:'延長料金を訂正'};
+  const priceTotal = previewSettledContents(state,ticket,action).totals.total;
+  state = run(state,{...action,expectedTotal:priceTotal});
+  const adjusted = state.closedDays[0].ticketSnapshots[0];
+  assert.equal(adjusted.lines.find(({id}) => id === charge.id).price,2_000);
+  assert.equal(adjusted.endsAt,ticket.endsAt);
+  const voidGroup = {...action,cancelLine:true,reason:'延長自体を取り消し'};
+  const cancelledTotal = previewSettledContents(state,adjusted,voidGroup).totals.total;
+  state = run(state,{...voidGroup,expectedTotal:cancelledTotal});
+  const closing = state.closedDays[0];
+  assert.equal(closing.sales,cancelledTotal);
+  assert.equal(closing.expectedCash,20_000 + cancelledTotal);
+  assert.equal(closing.actualCash,20_000 + before.total);
+  assert.equal(closing.ticketSnapshots[0].endsAt,originalEnd);
+  assert.deepEqual(closing.ticketSnapshots[0].lines.filter(({cancelledAt}) => cancelledAt !== null).map(({id}) => id),
+    [charge.id,surcharge.id]);
+  assert.equal(state.auditLog[0].after.lines.length,2);
+  assert.ok(validateSnapshot(state));
+});
+
 test('payroll formulas freeze personal variable values and intermediate calculations', () => {
   const castId='cast1';
   const month='2026-11';

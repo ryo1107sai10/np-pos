@@ -36,7 +36,7 @@ function testOfflineCache() {
 }
 
 function service(t, { verified = true, role = 'admin', command, readState, project = (value) => value,
-  queue = testQueue(), identity = account, offlineCache, offlineAccessAllowed, now } = {}) {
+  queue = testQueue(), identity = account, offlineCache, offlineAccessAllowed, offlineKeyFor, now } = {}) {
   let online = true;
   let revision = 0;
   let state = { revision: 0 };
@@ -68,7 +68,7 @@ function service(t, { verified = true, role = 'admin', command, readState, proje
     firebaseLoader: async () => sdk,
     isOnline: () => online,
     operationQueue:queue,
-    offlineCache, offlineAccessAllowed, now,
+    offlineCache, offlineAccessAllowed, offlineKeyFor, now,
     onChange: (snapshot) => snapshots.push(snapshot),
     fetchImpl: async (url, options) => {
       const path = new URL(url).pathname;
@@ -249,6 +249,84 @@ test('cold offline restores only the device-bound operational data and revalidat
   assert(readIndex >= 0 && readIndex < writeIndex);
   assert.equal(calls[readIndex].query.get('since'),null);
   assert.deepEqual(calls[writeIndex].payload,{command:order,operationId:queued.operationId,expectedRevision:7});
+});
+
+test('PIN workspace extras encrypt customer and rotation data and queue exact revision offline', async (t) => {
+  const offlineCache = testOfflineCache();
+  const key = await crypto.subtle.generateKey({name:'AES-GCM',length:256},false,['encrypt','decrypt']);
+  const wrongKey = await crypto.subtle.generateKey({name:'AES-GCM',length:256},false,['encrypt','decrypt']);
+  const time = Date.parse('2026-11-16T20:00:00+09:00');
+  const options = {offlineCache,offlineAccessAllowed:() => true,offlineKeyFor:() => key,now:() => time};
+  const source = createDemo('live',time);
+  source.customers = [{id:'guest-known-1',name:'暗号化する顧客',kana:'あんごう',phone:'09000000001',notes:'private-note'}];
+  const ticket = source.tickets.find(({status})=>status === 'open');
+  ticket.castRotation = [{id:'waiting-1',castId:source.cast[0].id,castName:'待機者',queuedAt:time,startedAt:null,endedAt:null},
+    {id:'private-history',castId:source.cast[0].id,castName:'終了者',queuedAt:time - 10,startedAt:null,endedAt:time - 5,endReason:'removed'}];
+  const online = service(t,options);
+  online.setRevision(11,source);
+  await online.client.start();
+  await online.client.enterStore('shop');
+  assert(await online.client.saveOfflineSnapshot({force:true}));
+  online.client.dispose();
+  const stored = await offlineCache.read(JSON.stringify(['https://api.example.test/api','test-project']));
+  assert(stored.extras.ciphertext instanceof ArrayBuffer);
+  assert(!JSON.stringify(stored).includes('暗号化する顧客'));
+  assert(!JSON.stringify(stored).includes('待機者'));
+
+  const wrong = service(t,{...options,offlineKeyFor:() => wrongKey});
+  wrong.setOnline(false);
+  await wrong.client.restoreOfflineStore({uid:account.uid,storeId:'shop'});
+  assert.equal(wrong.client.snapshot.state.offlineCustomerSearch,undefined);
+  assert.throws(()=>wrong.client.submit({type:'changeCastRotation',ticketId:ticket.id}),{code:'offline-command'});
+
+  const local = service(t,options);
+  local.setRevision(11,source);
+  local.setOnline(false);
+  await local.client.restoreOfflineStore({uid:account.uid,storeId:'shop'});
+  const restored = local.client.snapshot.state;
+  assert.deepEqual(restored.customers,[{id:'guest-known-1',name:'暗号化する顧客',kana:'あんごう',restricted:true}]);
+  assert.deepEqual(restored.tickets.find(({id})=>id === ticket.id).castRotation.map(({id})=>id),['waiting-1']);
+  assert.throws(()=>local.client.submit({type:'seat',customerId:'other'}),{code:'offline-command'});
+  const seat = {type:'seat',tableIds:['a3'],guests:1,setId:'set60',customerId:'guest-known-1'};
+  const rotation = {type:'changeCastRotation',ticketId:ticket.id,mode:'remove',assignmentId:'waiting-1'};
+  const first = await local.client.submit(seat);
+  const second = await local.client.submit(rotation);
+  await assert.rejects(local.client.submit({type:'close',actualCash:0}),{code:'sync-pending'});
+  local.setOnline(true);
+  await local.client.retrySync();
+  await local.client.retrySync();
+  const writes = local.calls.filter(({path})=>path.endsWith('/commands')).map(({payload})=>payload);
+  assert.deepEqual(writes,[{command:seat,operationId:first.operationId,expectedRevision:11},
+    {command:rotation,operationId:second.operationId,expectedRevision:12}]);
+});
+
+test('an isolated offline close uses the encrypted drawer aggregate and cannot queue around other changes', async (t) => {
+  const offlineCache = testOfflineCache();
+  const key = await crypto.subtle.generateKey({name:'AES-GCM',length:256},false,['encrypt','decrypt']);
+  const time = Date.parse('2026-11-16T20:00:00+09:00');
+  const options = {offlineCache,offlineAccessAllowed:() => true,offlineKeyFor:() => key,now:() => time};
+  const source = createDemo('live',time);
+  source.tickets = [];
+  source.day.openingCash = 47_000;
+  const online = service(t,options);
+  online.setRevision(7,source);
+  await online.client.start();
+  await online.client.enterStore('shop');
+  online.client.dispose();
+  const local = service(t,options);
+  local.setRevision(7,source);
+  local.setOnline(false);
+  await local.client.restoreOfflineStore({uid:account.uid,storeId:'shop'});
+  assert.equal(local.client.snapshot.state.day.openingCash,0);
+  assert.equal(local.client.snapshot.state.offlineCloseSummary.expectedCash,47_000);
+  const close = {type:'close',actualCash:47_000,reason:''};
+  assert.equal((await local.client.submit(close)).queued,true);
+  await assert.rejects(local.client.submit({type:'seat',tableIds:['a1']}),{code:'sync-pending'});
+  local.setOnline(true);
+  await local.client.retrySync();
+  const write = local.calls.find(({path})=>path.endsWith('/commands'));
+  assert.deepEqual(write.payload.command,close);
+  assert.equal(write.payload.expectedRevision,7);
 });
 
 test('expired, revoked and signed-out browser workspaces never reuse the offline lease', async (t) => {

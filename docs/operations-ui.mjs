@@ -102,11 +102,11 @@ export function operationReason({ title = '理由', required = true } = {}) {
   return inputLabel(title, `<textarea name="reason" rows="2" maxlength="120"${required ? ' required' : ''} placeholder="具体的な理由を入力"></textarea>`);
 }
 
-export function renderDiscountForm({ticket, subtotal, limit, role, reasonCodes, priceMode}, {escape, yen}) {
+export function renderDiscountForm({ticket, subtotal, limit, role, reasonCodes, priceMode, defaultPersonalMode}, {escape, yen}) {
   const existing = ticket.discountRequest;
   const mode = existing?.mode ?? 'amount';
-  const personalSales = existing?.personalSalesMode ?? getPersonalSalesDiscountMode(ticket);
-  const subtotalLabel = priceMode === 'inclusive' ? '税込小計' : '税抜小計';
+  const personalSales = existing?.personalSalesMode ?? getPersonalSalesDiscountMode(ticket,defaultPersonalMode);
+  const subtotalLabel = priceMode === 'serviceInclusive' ? '小計' : priceMode === 'inclusive' ? '税込小計' : '税抜小計';
   return `<p class="form-copy">${subtotalLabel} ${yen(subtotal)} · 適用中の値引き ${yen(ticket.discount)}</p>
     ${existing ? `<p class="ops-highlight" role="status">${yen(existing.amount)}の承認待ちです。新しい申請で差し替えられます。</p>` : ''}
     <div class="form-grid">
@@ -169,7 +169,7 @@ function auditValues(title, value, escape) {
   return `<div><h4>${title}</h4><dl>${visibleAuditFields(value).map(([key, entry]) => `<div><dt>${escape(valueLabels[key] ?? key)}</dt><dd><pre>${escape(displayValue(entry,key))}</pre></dd></div>`).join('')}</dl></div>`;
 }
 
-export function renderAuditLog({entries, loading, more, failed}, {escape, icon}) {
+export function renderAuditLog({entries, loading, more, failed, integrity}, {escape, icon}) {
   const visible = entries.filter((entry) => entry.action !== 'recoverReceivable' && entry.target?.kind !== 'receivable'
     && !(entry.action === 'saveCustomer' && entry.after?.changedFields?.length
       && entry.after.changedFields.every((field) => omittedAuditFields.has(field))));
@@ -188,8 +188,13 @@ export function renderAuditLog({entries, loading, more, failed}, {escape, icon})
       <div class="ops-audit-compare">${auditValues('変更前', entry.before, escape)}${auditValues('変更後', entry.after, escape)}</div>
     </div></details>`;
   }).join('');
+  const integrityLabels = {verified:'表示範囲を別の保管先の署名と照合しました。',pending:'新しい記録は署名の保存待ちです。',
+    mismatch:'監査ログと別の保管先の署名が一致しません。欠落・変更をご確認ください。',unavailable:'監査ログの署名を照合できません。'};
+  const integrityMessage = integrityLabels[integrity?.status];
   return `<div class="ops-audit">
     ${failed ? `<p role="alert" class="form-error">${escape(failed)}</p>` : ''}
+    ${integrityMessage ? `<p role="${integrity.status === 'mismatch' ? 'alert' : 'status'}" class="${integrity.status === 'mismatch' ? 'ops-highlight' : 'form-copy'}">${integrityMessage}
+      ${Number.isSafeInteger(integrity.through) && integrity.through > 0 ? `署名を保存した番号 ${integrity.through} まで` : ''}</p>` : ''}
     ${rows || (loading || failed ? '' : '<p class="form-copy">表示できる監査記録がありません。</p>')}
     ${loading ? '<p class="form-copy" role="status">監査ログを読み込んでいます。</p>' : ''}
     ${more || failed ? `<button type="button" class="btn btn-secondary" data-action="audit-more"${loading ? ' disabled' : ''}>${icon('history', 16)}${failed ? '読み込みを再試行' : '以前の記録を表示'}</button>` : ''}

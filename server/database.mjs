@@ -8,11 +8,13 @@ import { ApiError, canOperate, projectState, requireCondition, roles, validateSn
 import { emailAddress, prepared, readRows, resultRow } from './db-queries.mjs';
 import { groupInviteAcceptance } from './store-groups.mjs';
 import { captureLineJobs } from './line-notifications.mjs';
+import { verifyAuditPage } from './audit-integrity.mjs';
 
 const chunkLength = 200_000;
 const maxSnapshotBytes = 7 * 1024 * 1024;
 const maxOrderWriteRetries = 4;
 const textEncoder = new TextEncoder();
+const automaticExtensionActor = Object.freeze({uid:'np-system:auto-extension',email:'自動延長（サーバー）'});
 
 function storeResponse(row) {
   return { id: row.id, name: row.name, role: row.role, hasState: row.revision > 0, ...profileResponse(row) };
@@ -302,6 +304,39 @@ function saveAutoExtensionSync(db, actor, storeId, current, now) {
   }, current, now);
 }
 
+async function scheduledExtensionSnapshot(db, storeId) {
+  const rows = await readRows(db, `SELECT s.revision, c.position, c.payload FROM np_stores s
+    JOIN np_state_chunks c ON c.store_id = s.id WHERE s.id = ? ORDER BY c.position`,storeId);
+  if (!rows.length) return null;
+  const chunks = rows.map(({payload}) => payload);
+  return {state:JSON.parse(chunks.join('')),chunks,revision:rows[0].revision,role:'admin'};
+}
+
+export async function runScheduledAutoExtensions(db,{now = Date.now(),limit = 12} = {}) {
+  const due = await readRows(db,`SELECT store_id FROM np_auto_extension_schedule
+    WHERE next_at IS NOT NULL AND next_at <= ? ORDER BY next_at,store_id LIMIT ?`,now,limit);
+  const unindexed = await readRows(db,`SELECT s.id AS store_id FROM np_stores s
+    WHERE s.revision > 0 AND NOT EXISTS (SELECT 1 FROM np_auto_extension_schedule q WHERE q.store_id = s.id)
+    ORDER BY s.id LIMIT ?`,limit);
+  const storeIds = new Set([...due,...unindexed].map(({store_id}) => store_id));
+  for (const storeId of storeIds) {
+    try {
+      const current = await scheduledExtensionSnapshot(db,storeId);
+      if (!current) continue;
+      if (autoExtensionDue(current.state,now)) {
+        await saveAutoExtensionSync(db,automaticExtensionActor,storeId,current,now);
+      } else {
+        await prepared(db,`INSERT INTO np_auto_extension_schedule (store_id,next_at)
+          SELECT id, ? FROM np_stores WHERE id = ? AND revision = ?
+          ON CONFLICT (store_id) DO UPDATE SET next_at = excluded.next_at`,
+        getNextAutoExtensionAt(current.state),storeId,current.revision).all();
+      }
+    } catch (error) {
+      console.error(JSON.stringify({event:'scheduled_auto_extension_failed',storeId,name:error.name}));
+    }
+  }
+}
+
 async function readVisibleState(db, actor, storeId) {
   return visibleSnapshot(await snapshot(db, actor, storeId), actor.uid);
 }
@@ -313,7 +348,7 @@ export async function readState(db, actor, storeId, since) {
   return visibleSnapshot(current, actor.uid);
 }
 
-export async function listAudit(db, actor, storeId, { before = null, limit = 50, ticketId = null, registerDate = null } = {}) {
+export async function listAudit(db, actor, storeId, { before = null, limit = 50, ticketId = null, registerDate = null } = {}, auditVault) {
   requireCondition(before === null || (Number.isSafeInteger(before) && before > 0),
     400, 'invalid-audit-cursor', '監査ログの表示位置を確認してください。');
   requireCondition(Number.isInteger(limit) && limit >= 1 && limit <= 100,
@@ -322,20 +357,28 @@ export async function listAudit(db, actor, storeId, { before = null, limit = 50,
     400,'invalid-audit-target','伝票の操作履歴を確認してください。');
   requireCondition(registerDate === null || ticketId === null && isReportDate(registerDate),
     400,'invalid-audit-target','レジの操作履歴を確認する営業日を指定してください。');
-  const rows = await readRows(db, `SELECT m.role, e.revision, e.payload FROM np_store_access m
+  const rows = await readRows(db, `SELECT m.role, s.revision AS store_revision, e.revision, e.payload FROM np_store_access m
+    JOIN np_stores s ON s.id = m.store_id
     LEFT JOIN np_audit_events e ON e.store_id = m.store_id AND m.role = 'admin'
       AND (? IS NULL OR e.revision < ?)
-      AND (? IS NULL OR (json_extract(e.payload,'$.target.kind') = 'ticket' AND json_extract(e.payload,'$.target.id') = ?))
-      AND (? IS NULL OR (json_extract(e.payload,'$.businessDate') = ?
-        AND json_extract(e.payload,'$.action') IN ('close','correctRegisterCount')))
+      AND (? IS NULL OR CASE WHEN json_valid(e.payload) THEN json_extract(e.payload,'$.target.kind') = 'ticket'
+        AND json_extract(e.payload,'$.target.id') = ? END)
+      AND (? IS NULL OR CASE WHEN json_valid(e.payload) THEN json_extract(e.payload,'$.businessDate') = ?
+        AND json_extract(e.payload,'$.action') IN ('close','correctRegisterCount') END)
     WHERE m.store_id = ? AND m.uid = ? ORDER BY e.revision DESC LIMIT ?`,
   before, before, ticketId, ticketId, registerDate, registerDate, storeId, actor.uid, limit + 1);
   adminRequired(memberRequired(rows[0]));
   const page = rows.slice(0, limit).filter((row) => row.payload !== null);
-  return {
-    events: page.map(({ payload }) => JSON.parse(payload)),
-    nextBefore: rows.length > limit ? page.at(-1).revision : null,
-  };
+  const nextBefore = rows.length > limit ? page.at(-1).revision : null;
+  const integrity = auditVault ? await verifyAuditPage(auditVault.binding,auditVault.secret,storeId,{
+    rows:page,minRevision:nextBefore ?? 1,maxRevision:before === null ? rows[0].store_revision : before - 1,
+    filtered:ticketId !== null || registerDate !== null,currentRevision:rows[0].store_revision,
+  }) : undefined;
+  const events = page.flatMap(({payload}) => {
+    try { const event = JSON.parse(payload); return event && typeof event === 'object' && !Array.isArray(event) ? [event] : []; }
+    catch { return []; }
+  });
+  return {events,nextBefore,...(integrity && {integrity:events.length === page.length ? integrity : {...integrity,status:'mismatch'}})};
 }
 
 function snapshotChunks(state) {
@@ -371,7 +414,7 @@ function matchingOperation(record, actor, fingerprint) {
 const currentOperation = `EXISTS (SELECT 1 FROM np_operations o JOIN np_stores s ON s.id = o.store_id
   WHERE o.store_id = ? AND o.operation_id = ? AND o.actor_uid = ? AND o.revision = ? AND s.revision = ?)`;
 
-function writeSnapshot(db, storeId, chunks, previousChunks, revision, conditionArgs) {
+function writeSnapshot(db, storeId, state, chunks, previousChunks, revision, conditionArgs) {
   const statements = [];
   for (const [position,payload] of chunks.entries()) {
     if (payload === previousChunks[position]) continue;
@@ -383,6 +426,10 @@ function writeSnapshot(db, storeId, chunks, previousChunks, revision, conditionA
     statements.push(prepared(db, `DELETE FROM np_state_chunks WHERE store_id = ? AND position >= ? AND ${currentOperation}`,
       storeId,chunks.length,...conditionArgs));
   }
+  statements.push(prepared(db,`INSERT INTO np_auto_extension_schedule (store_id,next_at)
+    SELECT ?, ? WHERE ${currentOperation}
+    ON CONFLICT (store_id) DO UPDATE SET next_at = excluded.next_at WHERE next_at IS NOT excluded.next_at`,
+  storeId,getNextAutoExtensionAt(state),...conditionArgs));
   statements.push(prepared(db,`UPDATE np_stores SET revision = ? WHERE id = ? AND ${currentOperation}`,revision,storeId,...conditionArgs));
   return statements;
 }
@@ -443,7 +490,7 @@ async function revokePayrollMembership(db,actor,storeId,memberUid,oldRole,role,p
   );
   // Advance the revision even when there was no link, so in-flight binds cannot target a membership that has been revoked and renewed.
   const chunks = oldLink ? snapshotChunks(state) : current.chunks;
-  statements.push(...writeSnapshot(db,storeId,chunks,current.chunks,revision,args));
+  statements.push(...writeSnapshot(db,storeId,state,chunks,current.chunks,revision,args));
   const results = await db.batch(statements);
   if (!results[0]?.meta?.changes) {
     adminRequired(memberRequired(await findMembership(db,actor,storeId)));
@@ -468,6 +515,7 @@ async function saveOperation(db, actor, storeId, command, observed, observedAt, 
   requireCondition(Number.isSafeInteger(expectedRevision) && expectedRevision >= 0,
     400, 'invalid-revision', '保存番号が無効です。');
   const current = observed ?? await snapshot(db, actor, storeId);
+  const scheduled = actor === automaticExtensionActor;
   const recorded = await operationLog(db, storeId, operationId);
   // Acknowledging a committed retry uses the operator's current store read access.
   if (!recorded || recorded.actor_uid !== actor.uid) {
@@ -479,6 +527,7 @@ async function saveOperation(db, actor, storeId, command, observed, observedAt, 
     return readVisibleState(db, actor, storeId);
   }
   const syncExtensions = operation === 'command' && value.type === 'syncAutoExtensions';
+  if (scheduled && !syncExtensions) throw new Error('Invalid scheduled store command');
   const canRebaseOrder = operation === 'command' && allowConcurrentOrder === true && expectedRevision > 0 && isConcurrentOrder(value);
   const now = observedAt ?? Date.now();
   const due = operation === 'command' && current.role !== 'cast' && autoExtensionDue(current.state, now);
@@ -543,7 +592,10 @@ async function saveOperation(db, actor, storeId, command, observed, observedAt, 
   const declaredProfiles = rolePolicyChange ? JSON.stringify(Object.entries(next.rolePolicy.custom ?? {})
     .map(([id,{base}]) => id + '=' + base)) : null;
   const statements = [
-    prepared(db, `INSERT INTO np_operations (store_id, operation_id, actor_uid, operation, fingerprint, revision, recorded_at)
+    scheduled ? prepared(db, `INSERT INTO np_operations (store_id,operation_id,actor_uid,operation,fingerprint,revision,recorded_at)
+      SELECT id, ?, ?, ?, ?, ?, ? FROM np_stores WHERE id = ? AND revision = ? ON CONFLICT DO NOTHING`,
+    operationId,actor.uid,value.type,fingerprint,revision,now,storeId,current.revision)
+    : prepared(db, `INSERT INTO np_operations (store_id, operation_id, actor_uid, operation, fingerprint, revision, recorded_at)
       SELECT s.id, ?, m.uid, ?, ?, ?, ? FROM np_stores s JOIN np_store_access m ON m.store_id = s.id
       LEFT JOIN np_member_role_profiles p ON p.store_id = m.store_id AND p.uid = m.uid
       WHERE s.id = ? AND s.revision = ? AND m.uid = ? AND m.role = ? AND p.profile_id IS ?
@@ -567,8 +619,9 @@ async function saveOperation(db, actor, storeId, command, observed, observedAt, 
   if (operation === 'command') statements.push(...captureLineJobs(db,storeId,current.state,next,{
     operationId,now,condition:currentOperation,conditionArgs,
   }));
-  statements.push(...writeSnapshot(db,storeId,chunks,current.chunks,revision,conditionArgs));
+  statements.push(...writeSnapshot(db,storeId,next,chunks,current.chunks,revision,conditionArgs));
   const results = await db.batch(statements);
+  if (scheduled) return {changed:Boolean(results[0]?.meta?.changes)};
   if (!results[0]?.meta?.changes) {
     if (matchingOperation(await operationLog(db, storeId, operationId), actor, fingerprint) || syncExtensions) {
       return readVisibleState(db, actor, storeId);

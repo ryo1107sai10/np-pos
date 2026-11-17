@@ -57,6 +57,8 @@ test('the staff performance print uses the selected business dates and role', ()
   assert.match(print,new RegExp(`佐伯[\\s\\S]*¥${nominatedSales}`));
   assert.doesNotMatch(print,/望月|<button|<select/);
   assert.match(buildTeamPerformanceCsv(state,range,'manager'),new RegExp(`佐伯,マネージャー,1,${nominatedSales}`));
+  assert.match(buildTeamPerformanceCsv(state,range,'manager',{format:'tsv'}),new RegExp(`佐伯\tマネージャー\t1\t${nominatedSales}`));
+  assert.match(screen,/data-action="team-performance-tsv"/);
   assert.equal(renderTeamPerformance(state,{...options,print:true,range:{start:date,end:before}}),'');
 });
 

@@ -1,15 +1,16 @@
 const databaseName = 'np-pos.pending-operations.v1';
 const bucket = 'storeQueues';
-export const offlineCommands = new Set(['open','seat','order','extend','move','settle','depart','serve']);
+export const offlineCommands = new Set(['open','seat','order','extend','move','settle','depart','serve','close','changeCastRotation']);
 export const offlineLimit = 30;
 
 export function orderCanWait(queue, next) {
   if (!queue.length) return true;
-  if (!offlineCommands.has(next?.type) || next.type === 'open') return false;
+  if (!offlineCommands.has(next?.type) || ['open','close'].includes(next.type)) return false;
   const tables = new Set(next.tableIds ?? []);
   return queue.every(({body}) => {
     const earlier = body.command;
-    if (!earlier || earlier.type === 'open' || earlier.tableIds?.some((id) => tables.has(id))) return false;
+    if (!earlier || ['open','close'].includes(earlier.type) || earlier.tableIds?.some((id) => tables.has(id))) return false;
+    if (earlier.type === 'changeCastRotation' && next.type === 'changeCastRotation') return false;
     if (!earlier.ticketId || earlier.ticketId !== next.ticketId) return true;
     return earlier.type === 'order' && next.type === 'order';
   });

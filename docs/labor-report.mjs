@@ -13,7 +13,7 @@ function staffWork(state,start,end) {
   return attendance.filter(({date,voidedAt,clockOutAt})=>voidedAt === undefined && clockOutAt !== null && date >= start && date <= end).map((row)=>{
     const {date,personId,minutes} = row;
     const rate = sorted.findLast((entry)=>entry.personId === personId && entry.effectiveDate <= date)?.hourlyRate;
-    return {...row,source:'staff',roleKey:roleKey(row),hourlyRate:rate ?? null,basePay:rate == null && minutes > 0 ? null : Math.round(minutes * (rate ?? 0) / 60)};
+    return {...row,source:'staff',roleKey:roleKey(row),hourlyRate:rate ?? null,baseNumerator:rate == null && minutes > 0 ? null : minutes * (rate ?? 0)};
   });
 }
 
@@ -47,16 +47,18 @@ function collectCosts(staffRows,castCosts) {
   for (const row of staffRows) {
     const key = JSON.stringify([row.personId,row.roleKey]);
     const cost = staff.get(key) ?? {personId:row.personId,personName:row.personName,roleKey:row.roleKey,roleName:row.roleName,
-      dates:new Set(),minutes:0,hourlyPay:0,extras:0,issues:[],hasKnownBase:false};
+      dates:new Set(),numerators:new Map(),minutes:0,hourlyPay:0,extras:0,issues:[],hasKnownBase:false};
     cost.dates.add(row.date);
     cost.minutes += row.minutes;
-    cost.hourlyPay += row.basePay ?? 0;
-    cost.hasKnownBase ||= row.basePay !== null;
-    if (row.basePay === null && !cost.issues.length) cost.issues.push('時給未登録');
+    if (row.baseNumerator !== null) cost.numerators.set(row.date,(cost.numerators.get(row.date) ?? 0) + row.baseNumerator);
+    cost.hasKnownBase ||= row.baseNumerator !== null;
+    if (row.baseNumerator === null && !cost.issues.length) cost.issues.push('時給未登録');
     staff.set(key,cost);
   }
-  return [...castCosts,...staff.values()].map(({dates,...row}) => ({...row,days:dates.size,
-    knownCost:row.hourlyPay + row.extras,hasKnownCost:row.hasKnownBase || row.extras > 0}))
+  return [...castCosts,...staff.values()].map(({dates,numerators,...row}) => {
+    const hourlyPay = numerators ? [...numerators.values()].reduce((sum,value) => sum + Math.round(value / 60),0) : row.hourlyPay;
+    return {...row,days:dates.size,hourlyPay,knownCost:hourlyPay + row.extras,hasKnownCost:row.hasKnownBase || row.extras > 0};
+  })
     .sort((a,b)=>a.roleName.localeCompare(b.roleName,'ja') || a.personName.localeCompare(b.personName,'ja'));
 }
 
@@ -79,8 +81,8 @@ export function getLaborReport(state,filters = {}) {
   const dailyGroups = new Map();
   for (const row of details) {
     const key = JSON.stringify([row.date,row.roleKey]);
-    const group = dailyGroups.get(key) ?? {date:row.date,roleKey:row.roleKey,roleName:row.roleName,count:0,minutes:0};
-    group.count++;
+    const group = dailyGroups.get(key) ?? {date:row.date,roleKey:row.roleKey,roleName:row.roleName,people:new Set(),minutes:0};
+    group.people.add(row.personId);
     group.minutes += row.minutes;
     dailyGroups.set(key,group);
   }
@@ -104,7 +106,8 @@ export function getLaborReport(state,filters = {}) {
   const sales = getReportPeriod(state,{mode:'range',start,end}).totals.sales;
   const castRow = roles.get('cast');
   const castRatio = !castUncertain && castRow?.issues === 0 && sales > 0 ? 100 * castRow.knownCost / sales : null;
-  return {start,end,selectedRole,valid:true,allRoleNames:[...allRoleNames],people,details,daily:[...dailyGroups.values()],roles:[...roles.values()],
+  return {start,end,selectedRole,valid:true,allRoleNames:[...allRoleNames],people,details,
+    daily:[...dailyGroups.values()].map(({people,...row}) => ({...row,count:people.size})),roles:[...roles.values()],
     partial,knownCost,castRatio,hasKnownCost:people.some(({hasKnownCost})=>hasKnownCost),
     unavailableDates:castUncertain ? cast.unavailableDates : [],sales};
 }

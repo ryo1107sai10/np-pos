@@ -475,15 +475,35 @@ function auditStaffLabor(before,after,action) {
     return !sameValue(old,next) && {businessDate:next.effectiveDate,target:target('payroll',next.personId,`${name}の時給`),
       before:old ?? null,after:next,reason:'適用開始日付きの時給を保存'};
   }
-  const old = previous.attendance.find(({id})=>id === action.attendanceId);
-  const next = action.attendanceId ? current.attendance.find(({id})=>id === action.attendanceId) : current.attendance.at(-1);
+  const ownPunch = ['staffClockIn','staffClockOut'].includes(action.type);
+  const next = !ownPunch && action.attendanceId ? current.attendance.find(({id})=>id === action.attendanceId) : current.attendance.at(-1);
+  const old = previous.attendance.find(({id})=>id === next.id);
+  const reason = ownPunch ? next.reason : textReason(action.reason);
   return !sameValue(old,next) && {businessDate:next.date,target:target('attendance',next.id,next.personName),
-    before:old ?? null,after:next,reason:textReason(action.reason)};
+    before:old ?? null,after:next,reason};
 }
 
 export function buildOperationAudit(before, after, action, at, actor) {
   let details;
-  if (ticketActions.has(action.type)) {
+  const cancellation = action.type === 'cancelSettlement' ? after.cancelledSettlements?.[0] : null;
+  const archivedReopening = action.type === 'reopenTicket' ? after.tickets.find(({reopenedFrom,id}) =>
+    reopenedFrom?.ticketId === action.ticketId && !before.tickets.some((ticket) => ticket.id === id)) : null;
+  if (cancellation && before.closedDays.some(({date}) => date === cancellation.date)) {
+    const select = (state) => {
+      const {sales,expectedCash,actualCash,discrepancy} = state.closedDays.find(({date}) => date === cancellation.date);
+      return {sales,expectedCash,actualCash,discrepancy};
+    };
+    details = {businessDate:cancellation.date,target:target('ticket',action.ticketId,`伝票 No. ${cancellation.ticketNumber}`),
+      before:{...ticketValues(cancellation.receipt),closing:select(before)},
+      after:{status:'cancelled',closing:select(after),stockMovements:auditMovements(before,after)},reason:textReason(action.reason)};
+  } else if (archivedReopening) {
+    const {date,ticketId,cancellationId} = archivedReopening.reopenedFrom;
+    const archived = after.cancelledSettlements.find(({id}) => id === cancellationId);
+    details = {target:target('ticket',archivedReopening.id,`伝票 No. ${archivedReopening.number}`),
+      before:{status:'cancelled',businessDate:date,ticketId,ticketNumber:archived.ticketNumber},
+      after:{...ticketValues(archivedReopening),reopenedFrom:archivedReopening.reopenedFrom,
+        stockMovements:auditMovements(before,after)},reason:textReason(action.reason)};
+  } else if (ticketActions.has(action.type)) {
     details = auditTicket(before, after, action);
   } else if (action.type === 'changeCastRotation' && action.mode === 'next') {
     const waiting = (state) => (state.tickets.find(({id}) => id === action.ticketId)?.castRotation ?? [])
@@ -526,9 +546,14 @@ export function buildOperationAudit(before, after, action, at, actor) {
     const current = findSettledCustomerTicket(after,action.ticketId);
     const oldLine = old.ticket.lines.find(({id})=>id === action.lineId);
     const newLine = current.ticket.lines.find(({id})=>id === action.lineId);
+    const cancelled = current.ticket.lines.filter(({id,cancelledAt}) => cancelledAt != null
+      && old.ticket.lines.some((line) => line.id === id && line.cancelledAt === null));
+    const ids = new Set(cancelled.map(({id}) => id));
     details = {businessDate:old.date,target:target('ticket',action.ticketId,`伝票 No. ${old.ticket.number}`),
-      before:{...ticketValues(old.ticket),...(oldLine && {line:auditLine(oldLine)})},
-      after:{...ticketValues(current.ticket),...(newLine && {line:auditLine(newLine)}),stockMovements:auditMovements(before,after)},
+      before:{...ticketValues(old.ticket),...(oldLine && {line:auditLine(oldLine)}),...(ids.size > 1
+        && {lines:old.ticket.lines.filter(({id}) => ids.has(id)).map(auditLine),endsAt:old.ticket.endsAt})},
+      after:{...ticketValues(current.ticket),...(newLine && {line:auditLine(newLine)}),...(ids.size > 1
+        && {lines:cancelled.map(auditLine),endsAt:current.ticket.endsAt}),stockMovements:auditMovements(before,after)},
       reason:textReason(action.reason)};
   } else if (isPayrollCommand(action.type) || action.type === 'castRequestDailyPay') {
     details = auditPayroll(before, after, action.type === 'castRequestDailyPay' ? {...action,type:'requestDailyPay'} : action);
@@ -539,6 +564,12 @@ export function buildOperationAudit(before, after, action, at, actor) {
       const current = linked(after);
       if (!sameValue(old,current)) details = {target:target('payroll',(current ?? old).personId,'従業員の支給明細アカウント'),
         before:old,after:current,reason:'本人アカウントの連携を更新'};
+    } else if (action.type === 'assignStaffPayrollTemplate') {
+      const assignment = (state) => state.staffPayroll?.templateAssignments?.find(({personId}) => personId === action.personId) ?? null;
+      const old = assignment(before);
+      const current = assignment(after);
+      if (!sameValue(old,current)) details = {target:target('payroll',action.personId,'従業員の給与テンプレート'),
+        before:old,after:current,reason:'従業員の給与テンプレートを更新'};
     } else {
       const old = getStaffPayrollDraft(before,action.personId,action.month);
       const current = getStaffPayrollDraft(after,action.personId,action.month);

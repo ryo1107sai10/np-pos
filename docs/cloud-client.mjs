@@ -1,7 +1,7 @@
 import { getNextAutoExtensionAt } from './auto-extension.mjs';
 import { offlineCommands, offlineLimit, openOperationQueue, orderCanWait } from './offline-operations.mjs';
 import { getCastDutyMode } from './cast-duty.mjs';
-import { createOfflineWorkspace, offlineWorkspaceLifetime, openOfflineWorkspaceCache, usableOfflineWorkspace } from './offline-snapshot.mjs';
+import { createOfflineWorkspace, offlineWorkspaceLifetime, openOfflineWorkspaceCache, restoreOfflineExtras, sealOfflineExtras, usableOfflineWorkspace } from './offline-snapshot.mjs';
 import { roleAllowsCommand } from './role-policy.mjs';
 import { isConcurrentOrder, orderConcurrencyWindow } from './order-concurrency.mjs';
 
@@ -79,6 +79,7 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
   operationQueue = openOperationQueue(globalThis.indexedDB),
   offlineCache = openOfflineWorkspaceCache(globalThis.indexedDB),
   offlineAccessAllowed = () => false,
+  offlineKeyFor = () => null,
   now = Date.now,
 } = {}) {
   const endpoint = endpointFor(apiBase);
@@ -128,20 +129,25 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
     return writeOfflineCache(null).catch(() => {});
   }
 
-  async function saveOfflineSnapshot() {
+  async function saveOfflineSnapshot({force = false} = {}) {
     const scope = activeScope;
     if (!scope || scope.cold || !isOnline() || current.userVerified !== true || !offlineAccessAllowed(scope.uid,scope.storeId)) return false;
     const savedAt = now();
-    if (scope.cachedAt !== undefined && current.revision === scope.cachedRevision && current.store.role === scope.cachedRole
+    const key = offlineKeyFor(scope.uid);
+    if (!force && Boolean(key) === scope.cachedExtras && scope.cachedAt !== undefined && current.revision === scope.cachedRevision && current.store.role === scope.cachedRole
       && current.store.profileId === scope.cachedProfileId && savedAt >= scope.cachedAt && savedAt - scope.cachedAt < 300_000) return true;
     try {
-      const record = createOfflineWorkspace({ uid:scope.uid, store:current.store, state:current.state, revision:current.revision, savedAt });
+      const state = current.state;
+      const record = createOfflineWorkspace({ uid:scope.uid, store:current.store, state, revision:current.revision, savedAt });
       if (!record) { await clearOfflineSnapshot(); return false; }
-      await writeOfflineCache(record);
+      const sealed = await sealOfflineExtras(record,state,key);
+      if (scope !== activeScope || current.state !== state || workspaceLocked) return false;
+      await writeOfflineCache(sealed);
       scope.cachedAt = savedAt;
       scope.cachedRevision = record.revision;
       scope.cachedRole = record.store.role;
       scope.cachedProfileId = record.store.profileId;
+      scope.cachedExtras = Boolean(key);
       return true;
     } catch { return false; }
   }
@@ -465,6 +471,13 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
       || !usableOfflineWorkspace(record,{uid,storeId,now:now()})) {
       throw new CloudError('offline-snapshot-unavailable',coldOfflineUnavailable);
     }
+    const state = await restoreOfflineExtras(record,offlineKeyFor(uid));
+    assertWorkspaceUnlocked();
+    if (isOnline() || activeScope || !offlineAccessAllowed(uid,storeId)
+      || (auth && (!auth.currentUser || auth.currentUser.uid !== uid || !auth.currentUser.emailVerified))
+      || !usableOfflineWorkspace(record,{uid,storeId,now:now()})) {
+      throw new CloudError('offline-snapshot-unavailable',coldOfflineUnavailable);
+    }
     attachEvents();
     const expiresAt = record.savedAt + offlineWorkspaceLifetime;
     const scope = {
@@ -472,7 +485,7 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
       cold:true,fromOffline:true,savedAt:record.savedAt,expiresAt,
     };
     activeScope = scope;
-    patch({user:{uid},userVerified:false,stores:[],store:record.store,state:record.state,revision:record.revision,restricted:false,
+    patch({user:{uid},userVerified:false,stores:[],store:record.store,state,revision:record.revision,restricted:false,
       status:'offline',coldOffline:true,offlineSavedAt:record.savedAt,offlineExpiresAt:expiresAt,conflict:'',error:''});
     leaseTimer = setTimeout(() => expireOfflineScope(scope),Math.max(0,expiresAt - now()));
     await refreshQueue(scope);
@@ -640,7 +653,7 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
     }
     if (activeScope.cold) validateColdCommand(command);
     if (!isOnline() && isDutyOrder(command)) throw new CloudError('offline-command',dutyOfflineMessage);
-    if (!isOnline() && !offlineCommands.has(command?.type)) throw new CloudError('offline-command', 'この操作にはインターネット接続が必要です。');
+    if (!isOnline() && !offlineRoleAllows(command)) throw new CloudError('offline-command', 'この操作にはインターネット接続が必要です。');
     return queueOrSend('commands', { command: structuredClone(command), expectedRevision });
   }
 
@@ -652,7 +665,11 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
 
   function validateColdCommand(command) {
     if (isOnline()) throw new CloudError('offline-reauthenticating','店舗への接続を確認してから操作してください。');
-    if (!offlineRoleAllows(command) || (command.type === 'seat' && (command.customer || command.customerId || command.newCustomer || command.companionCustomerIds?.length))
+    const customerIds = [command.customerId,...(Array.isArray(command.companionCustomerIds) ? command.companionCustomerIds : [])].filter(Boolean);
+    if (!offlineRoleAllows(command)
+      || (command.type === 'seat' && (command.customer || command.newCustomer || customerIds.some((id) => !current.state.customers.some((customer) => customer.id === id))))
+      || (command.type === 'close' && !current.state.offlineCloseSummary)
+      || (command.type === 'changeCastRotation' && !current.state.offlineRotation)
       || (command.type === 'settle' && (command.payments?.some(({method}) => method === 'receivable')
         || (getNextAutoExtensionAt(current.state) ?? Infinity) <= now()))) {
       throw new CloudError('offline-command','この操作は、店舗に再接続してから行ってください。');

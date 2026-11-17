@@ -1,4 +1,5 @@
 import { monthlyPayrollSections, payrollStatementNote, payrollSummaryAmounts, payrollWorkRows } from './payroll-statement-layout.mjs';
+import { staffPayRangeNote } from './staff-payroll.mjs';
 
 const encoder = new TextEncoder();
 const pageWidth = 595.28;
@@ -117,20 +118,26 @@ async function renderStatementPages({title,period,castName,totalLabel,total,sect
   text(totalLabel,margin,top + 3,{size:13,weight:'bold'});
   text(yen.format(total),pageWidth - margin,top + 3,{size:20,weight:'bold',align:'right'});
   top += 32;
-  for (const [title,rows] of sections) {
+  for (const [title,rows,columns = 1] of sections) {
     if (!rows.length) continue;
     await ensureSpace(42);
     sectionTitle(title);
-    for (const [label,value] of rows) {
+    for (let index = 0; index < rows.length; index += columns) {
       font(11);
-      const labelWidth = pageWidth - 2 * margin - context.measureText(value).width - 16;
-      const lines = wrapText(context,label,labelWidth);
-      if (await ensureSpace(lines.length * lineHeight + 22)) sectionTitle(`${title}（続き）`);
-      text(value,pageWidth - margin,top,{align:'right'});
-      for (const line of lines) {
-        text(line,margin,top);
-        top += lineHeight;
-      }
+      const gap = 12;
+      const colWidth = (pageWidth - 2 * margin - (columns - 1) * gap) / columns;
+      const cells = rows.slice(index,index + columns).map(([label,value]) => {
+        const labelWidth = columns === 1 ? colWidth - context.measureText(value).width - 16 : colWidth;
+        return {value,lines:wrapText(context,label,labelWidth)};
+      });
+      const height = (Math.max(...cells.map(({lines}) => lines.length)) + (columns > 1 ? 1 : 0)) * lineHeight;
+      if (await ensureSpace(height + 22)) sectionTitle(`${title}（続き）`);
+      cells.forEach(({value,lines},column) => {
+        const left = margin + column * (colWidth + gap);
+        lines.forEach((line,lineIndex) => text(line,left,top + lineIndex * lineHeight));
+        text(value,left + colWidth,columns === 1 ? top : top + height - lineHeight,{align:'right'});
+      });
+      top += height;
       rule(top - 12);
     }
     top += 13;
@@ -262,4 +269,10 @@ export function createPayrollPdf(record,storeName) {
 
 export function createPayrollRangeZip(records,storeName) {
   return createStatementZip(records.map(rangeStatement),storeName);
+}
+
+export function createStaffPayrollRangePdf({start,end,snapshot},storeName) {
+  return renderStatementPages({title:'従業員の給与期間参考明細',period:start === end ? start : `${start} 〜 ${end}`,
+    castName:snapshot.personName,totalLabel:'時給分',total:snapshot.hourlyPay,
+    sections:[['勤務の内訳',payrollWorkRows(snapshot.work,yen.format)]],note:staffPayRangeNote},storeName);
 }

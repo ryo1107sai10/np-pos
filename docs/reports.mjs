@@ -126,6 +126,8 @@ function commissionControls(state, filters, report, api) {
     <div class="lr-period-dates">${periodFields}</div></div><div class="lr-period-exports">
     ${outputButton('summary','成績CSV','download',roster.length)}
     ${outputButton('details','明細CSV','download',details.length)}
+    ${outputButton('summary-tsv','成績TSV','download',roster.length)}
+    ${outputButton('details-tsv','明細TSV','download',details.length)}
     ${outputButton('print','A4で印刷','printer',roster.length)}</div></section>`;
 }
 
@@ -498,6 +500,7 @@ function renderReportControls(state, interval, period, api) {
   const salesDays = period.days.filter(({current}) => asNumber(current.sales) > 0);
   const needsDetails = salesDays.some(({ticketDataComplete}) => !ticketDataComplete);
   const canExportSales = period.valid && salesDays.length > 0 && !needsDetails;
+  const canExportExpenses = period.valid && period.days.some(({current}) => asNumber(current.expenses) > 0);
   const canExportReport = period.valid && period.days.length > 0;
   const canExportRegister = period.valid && period.days.some(({closed}) => closed);
   const exportButton = (id, label, enabled, glyph = 'download') => `<button type="button" class="btn btn-secondary" data-action="report-export"
@@ -520,6 +523,7 @@ function renderReportControls(state, interval, period, api) {
         <span>freee向け</span>
         ${exportButton('daily','日次集計CSV',canExportSales)}
         ${exportButton('tickets','伝票別CSV',canExportSales)}
+        ${exportButton('expenses','経費仕訳CSV',canExportExpenses)}
       </div>
       <div class="lr-period-freee" role="group" aria-label="設定した会計CSV">
         <span>カスタム会計CSV</span>

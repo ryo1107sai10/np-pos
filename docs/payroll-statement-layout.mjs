@@ -13,10 +13,11 @@ export function normalizePayrollStatementLayout(value) {
   if (value == null) return undefined;
   const keys = Object.keys(payrollStatementLabels);
   if (!Array.isArray(value) || value.length !== keys.length || new Set(value.map((row) => row?.key)).size !== keys.length
-    || Array.from(value).some((row) => !keys.includes(row?.key) || typeof row.visible !== 'boolean' || (row.key === 'summary' && !row.visible))) {
+    || Array.from(value).some((row) => !keys.includes(row?.key) || typeof row.visible !== 'boolean' || (row.key === 'summary' && !row.visible)
+      || (row.columns !== undefined && ![1,2,3,4].includes(row.columns)))) {
     throw new Error('支給明細の表示項目と表示順を確認してください。');
   }
-  return value.map(({key,visible}) => ({key,visible}));
+  return value.map(({key,visible,columns}) => ({key,visible,...(columns !== undefined && {columns})}));
 }
 
 export function payrollSummaryAmounts(pay) {
@@ -45,5 +46,5 @@ export function monthlyPayrollSections(pay,yen) {
       ? [label,`${amount} pt`] : money([label,kind === 'deduction' ? -amount : amount])),
   };
   return (pay.settings?.statementLayout ?? defaultPayrollStatementLayout()).filter(({key,visible}) => visible && rowsByKey[key].length)
-    .map(({key}) => [payrollStatementLabels[key],rowsByKey[key]]);
+    .map(({key,columns}) => [payrollStatementLabels[key],rowsByKey[key],columns ?? 1]);
 }

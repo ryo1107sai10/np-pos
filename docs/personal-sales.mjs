@@ -1,7 +1,9 @@
 export const maxPersonalSalesAdjustment = 100_000_000;
 export const personalSalesDiscountModes = Object.freeze({
-  reflect: '個人売上に反映する',
+  reflect: '従来どおり注文ごとに反映する',
   keep: '値引き前の個人売上を維持する',
+  prorateNet: '税・サービス料を除いた値引きを按分する',
+  prorateFull: '税込の値引き全額を按分する',
 });
 
 const roles = new Set(['admin', 'manager']);
@@ -13,8 +15,8 @@ export function isPersonalSalesDiscountMode(value) {
   return typeof value === 'string' && Object.hasOwn(personalSalesDiscountModes, value);
 }
 
-export function getPersonalSalesDiscountMode(ticket) {
-  return ticket.discountDetails?.personalSalesMode === 'keep' ? 'keep' : 'reflect';
+export function getPersonalSalesDiscountMode(ticket, fallback = 'reflect') {
+  return ticket.discountDetails?.personalSalesMode ?? fallback;
 }
 
 export function isPersonalSalesAmount(amount) {

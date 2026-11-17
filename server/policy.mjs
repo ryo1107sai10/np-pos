@@ -25,7 +25,7 @@ import { getStaffOwnPayroll, getStaffPayrollDelegation, isStaffPayrollCommand, n
 import { isValidAttendanceBatch } from '../docs/attendance-batch.mjs';
 
 export const roles = new Set(['admin', 'manager', 'staff', 'cast', 'trainee']);
-const staffCommands = ['seat', 'move', 'order', 'extend', 'extendOverdue', 'deposit', 'settle', 'depart', 'serve', 'issuePrintDocument', 'saveTicketNote',
+const staffCommands = ['staffClockIn','staffClockOut','seat', 'move', 'order', 'extend', 'extendOverdue', 'deposit', 'settle', 'depart', 'serve', 'issuePrintDocument', 'saveTicketNote',
   'syncAutoExtensions', 'setTableAutoExtension', 'pauseVisitAutoExtension', 'resumeVisitAutoExtension', 'setTicketCustomer','setTicketCompanion','changeCastRotation'];
 const managerCommands = [...staffCommands, 'open', 'close', 'discount', 'stockAdjust', 'recordStockOperation', 'cancelDeposit', 'cancelLine', 'void', 'adjustTicketEnd',
   'saveCustomer', 'recoverReceivable', 'recordCashMovement', 'saveShift', 'removeShift', 'reviewCastAttendance', 'saveManagedAttendance', 'adjustTicketGuests',
@@ -41,7 +41,7 @@ const roleCommands = {
     'saveAutoExtensionSettings', 'saveCardFeeSettings', 'savePayrollDraft', 'finalizePayroll', 'savePayrollSettings',
     'savePayrollTemplate', 'assignPayrollTemplate', 'removePayrollTemplate', 'saveEmployeeProfile', 'saveAttendanceItems','savePayrollVariables',
     'requestDailyPay', 'reviewDailyPay', 'payDailyPay', 'saveInitialSetSchedule', 'bindCastAccount', 'saveCalculationSettings','saveRolePolicy','saveCashAccounts',
-    'saveStaffPerson','saveStaffPayrollDraft','finalizeStaffPayroll','bindStaffPayrollAccount']),
+    'saveStaffPerson','saveStaffPayrollDraft','finalizeStaffPayroll','bindStaffPayrollAccount','assignStaffPayrollTemplate']),
 };
 const reasonCommands = new Set(['discount', 'cancelSettlement', 'reopenTicket', 'cancelLine', 'recordCashMovement', 'recordStockOperation',
   'correctSettledTicketCustomer', 'correctSettledTicketCompanion', 'correctSettledTicketPayments', 'adjustTicketEnd', 'adjustTicketGuests', 'editTicketLine', 'cancelTicketExtension',
@@ -80,7 +80,8 @@ export function verifyCommand(role, command, state, profileId) {
     const validId = (value) => typeof value === 'string' && value.length > 0 && value.length <= 128 && value.trim() === value;
     const valid = command.type === 'bindStaffPayrollAccount'
       ? validId(command.memberUid) && (command.personId === null || validId(command.personId))
-      : validId(command.personId) && isPayrollMonth(command.month) && (command.type !== 'finalizeStaffPayroll' || Number.isSafeInteger(command.expectedNet));
+      : command.type === 'assignStaffPayrollTemplate' ? validId(command.personId) && (command.templateId === null || validId(command.templateId))
+        : validId(command.personId) && isPayrollMonth(command.month) && (command.type !== 'finalizeStaffPayroll' || Number.isSafeInteger(command.expectedNet));
     requireCondition(valid,400,'invalid-command','勤務者と給与月を確認してください。');
   }
   if (command.type === 'saveRolePolicy') {
@@ -298,6 +299,13 @@ export function verifyCommand(role, command, state, profileId) {
         && validYen(command.price) && Array.isArray(command.castIds) && command.castIds.length <= 100
         && command.castIds.every((id) => typeof id === 'string' && id.length <= 128))),
     400,'invalid-command','訂正する明細と金額を確認してください。');
+  }
+  if (command.type === 'cancelSettlement' || command.type === 'reopenTicket') {
+    requireCondition(typeof command.ticketId === 'string' && command.ticketId.length > 0 && command.ticketId.length <= 128
+      && (command.expectedRevision === undefined || validYen(command.expectedRevision))
+      && (command.expectedPaymentsCorrectedAt === undefined || validYen(command.expectedPaymentsCorrectedAt))
+      && (command.cancellationId === undefined || optionalText(command.cancellationId,128)),
+    400,'invalid-command','会計取消の対象を確認してください。');
   }
 }
 
@@ -675,7 +683,13 @@ function validTableAutoExtension(state) {
 function validCancelledSettlement(entry) {
   return typeof entry.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(entry.date) && nonnegative(entry.at)
     && typeof entry.reason === 'string' && isRecord(entry.receipt) && validTicket(entry.receipt)
-    && entry.ticketId === entry.receipt.id && entry.receipt.settlement != null;
+    && entry.ticketId === entry.receipt.id && entry.receipt.settlement != null
+    && ((entry.reopenedTicketId === undefined && entry.reopenedAt === undefined)
+      || (typeof entry.reopenedTicketId === 'string' && entry.reopenedTicketId.length > 0 && entry.reopenedTicketId.length <= 128
+        && Number.isSafeInteger(entry.reopenedAt) && entry.reopenedAt >= entry.at))
+    && (entry.restockedLineIds === undefined || (Array.isArray(entry.restockedLineIds)
+      && new Set(entry.restockedLineIds).size === entry.restockedLineIds.length
+      && entry.restockedLineIds.every((id) => entry.receipt.lines.some((line) => line.id === id && line.cancelledAt === null))));
 }
 
 function validControls(controls) {

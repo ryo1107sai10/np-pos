@@ -362,8 +362,9 @@ export function renderSeatGuestSelection(state, selected, api) {
 
 function renderSeatCustomerPicker(state, api, {query, selected, label, help, selection}) {
   const {escape} = api;
+  const placeholder = state.offlineCustomerSearch ? '表示名・ふりがな' : canView(api) ? '表示名・ふりがな・電話番号' : '表示名';
   return `<fieldset class="np-seat-customer"><legend>${label}</legend>
-    ${field('顧客を検索', `<input name="customerQuery" type="search" autocomplete="off" value="${escape(query)}" placeholder="${canView(api) ? '表示名・ふりがな・電話番号' : '表示名'}" maxlength="100" aria-controls="seat-customer-results">`, help)}
+    ${field('顧客を検索', `<input name="customerQuery" type="search" autocomplete="off" value="${escape(query)}" placeholder="${placeholder}" maxlength="100" aria-controls="seat-customer-results">`, help)}
     <div id="seat-customer-results" class="np-seat-customer-results" role="group" aria-label="顧客の検索候補">${renderSeatCustomerResults(state, query, selected, api)}</div>
     <div id="seat-customer-selection" aria-live="polite">${selection}</div>
   </fieldset>`;

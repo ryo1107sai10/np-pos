@@ -1,5 +1,5 @@
 import { applyCastSelfCommand } from './cast-self.mjs';
-import { applyStaffLaborCommand, getStaffLabor, isLaborDate } from './labor-workspace.mjs';
+import { applyStaffLaborCommand, getStaffLabor, isLaborDate, validateStaffAttendanceList } from './labor-workspace.mjs';
 
 export const attendanceBatchLimit = 50;
 
@@ -12,9 +12,9 @@ export function isValidAttendanceBatch({date,reason,rows}) {
   for (const row of rows) {
     if (!row || !['cast','staff'].includes(row.kind) || !validId(row.personId)
       || (row.attendanceId != null && !validId(row.attendanceId))) return false;
-    const person = JSON.stringify([row.kind,row.personId]);
-    if (seen.has(person)) return false;
-    seen.add(person);
+    const entry = JSON.stringify([row.kind,row.personId,row.kind === 'staff' ? row.attendanceId ?? '' : '']);
+    if (seen.has(entry)) return false;
+    seen.add(entry);
   }
   return true;
 }
@@ -33,7 +33,7 @@ export function attendanceBatchSnapshot(state,{date,rows},includeNew) {
 }
 
 export function applyAttendanceBatch(state,action,now,actor,allocateId) {
-  if (!isValidAttendanceBatch(action)) throw new Error(`対象者を1〜${attendanceBatchLimit}名選択し、勤務者ごとに1件の入力と理由を指定してください。`);
+  if (!isValidAttendanceBatch(action)) throw new Error(`保存する勤怠を1〜${attendanceBatchLimit}件選択し、理由を入力してください。`);
   const {date,reason,rows} = action;
   for (const {kind,personId,attendanceId,clockInAt,clockOutAt,breakMinutes,classification,breaks,itemIds} of rows) {
     if (attendanceId && !attendanceForKind(state,kind).some(({id,date:recordDate}) => id === attendanceId && recordDate === date)) {
@@ -41,6 +41,7 @@ export function applyAttendanceBatch(state,action,now,actor,allocateId) {
     }
     const details = {attendanceId,date,clockInAt,clockOutAt,breakMinutes,reason};
     if (kind === 'cast') applyCastSelfCommand(state,{...details,type:'saveManagedAttendance',castId:personId,classification,breaks,itemIds},now,actor,allocateId);
-    else applyStaffLaborCommand(state,{...details,type:'saveStaffAttendance',personId},now,actor,allocateId);
+    else applyStaffLaborCommand(state,{...details,type:'saveStaffAttendance',personId},now,actor,allocateId,{deferAttendanceValidation:true});
   }
+  if (rows.some(({kind}) => kind === 'staff')) validateStaffAttendanceList(getStaffLabor(state).attendance);
 }

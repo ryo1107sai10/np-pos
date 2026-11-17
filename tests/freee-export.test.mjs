@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { apply, createDemo } from '../docs/engine.mjs';
 import { createCashDemo } from '../docs/phase-two-demo.mjs';
-import { buildFreeeCsv, freeeJournalColumns } from '../docs/freee-export.mjs';
+import { buildFreeeCsv, buildFreeeExpenseCsv, freeeJournalColumns, getFreeeExpenses } from '../docs/freee-export.mjs';
 import { getReportPeriod } from '../docs/report-period.mjs';
 
 const first = '2026-11-16';
@@ -138,4 +138,28 @@ test('real settled checkout, recovery and expense keep the date-range freee sale
     assert(!result.csv.includes('山本'));
   }
   assert.equal(getReportPeriod(createDemo('closed',timestamp),{mode:'day',date:first}).totals.sales,0);
+});
+
+test('freee expenses reconcile each day, ignore non-expenses and reversals, and remain separate from sales', () => {
+  const source = createCashDemo(timestamp);
+  const view = getReportPeriod(source,{mode:'day',date:first});
+  const fixture = getFreeeExpenses(view);
+  assert(fixture.length > 0);
+  const day = view.days[0];
+  day.current.cashMovements = [...day.current.cashMovements,
+    {id:'voided',kind:'expense',reason:'取消済み追加経費',amount:999,voidedAt:timestamp}];
+  const choices = fixture.map(({date,entry}) => ({date,id:entry.id,amount:entry.amount,account:'消耗品費',taxType:'課対仕入10%',tax:'90'}));
+  const result = buildFreeeExpenseCsv(view,choices,options);
+  const [header,...records] = rows(result.csv);
+  assert.deepEqual(header,freeeJournalColumns);
+  assert.equal(result.expenseTotal,view.totals.expenses);
+  assert.equal(result.journalCount,fixture.length);
+  assert(records.every((row) => row.length === 16 && row[4] === '消耗品費' && row[7] === row[12]
+    && row[8] === '課対仕入10%' && row[9] === '90' && row[10] === '現金'));
+  assert(records.every((row) => /^202611163\d{6}$/.test(row[2])));
+  assert(!result.csv.includes('取消済み追加経費') && !result.csv.includes('売上高'));
+  assert.throws(() => buildFreeeExpenseCsv(view,[{...choices[0],amount:799},...choices.slice(1)],options),/更新/);
+  assert.throws(() => buildFreeeExpenseCsv(view,[{...choices[0],taxType:'対象外'},...choices.slice(1)],options),/税区分/);
+  day.current.expenses++;
+  assert.throws(() => buildFreeeExpenseCsv(view,choices,options),/日報の金額/);
 });

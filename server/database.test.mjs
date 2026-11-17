@@ -6,18 +6,20 @@ import { apply, createDemo, quote, summary } from '../docs/engine.mjs';
 import { getTeamPerformance } from '../docs/team-performance.mjs';
 import worker from './index.mjs';
 import {
-  applyCommand, changeMember, createStore, getStoreOverview, inviteMember, listAudit, listMembers, listStores, migrateState, readState, restoreGroupStoreMember, revokeInvite,
+  applyCommand, changeMember, createStore, getStoreOverview, inviteMember, listAudit, listMembers, listStores, migrateState, readState, restoreGroupStoreMember, revokeInvite, runScheduledAutoExtensions,
 } from './database.mjs';
 import { changeGroupMember, createStoreGroup, inviteGroupMember, listStoreGroups, renameStoreGroup, revokeGroupInvite, setGroupStore } from './store-groups.mjs';
 import { answerGuideTopic, getGuideAccess } from './guide-assistant.mjs';
 import { dispatchLineJobs, getLineSettings, primeLineReminders, queueLineTest, saveLineSettings } from './line-notifications.mjs';
 import { beginLinePairing, confirmLinePairing, getLinePairing, processLineWebhook } from './line-pairing.mjs';
+import { mirrorAuditVault } from './audit-integrity.mjs';
 
 const schema = readFileSync(new URL('schema.sql', import.meta.url), 'utf8');
 const groupMigration = readFileSync(new URL('migrations/20261117-store-groups.sql', import.meta.url), 'utf8');
 const accessMigration = readFileSync(new URL('migrations/20261117-store-access-blocks.sql', import.meta.url), 'utf8');
 const roleMigration = readFileSync(new URL('migrations/20261117-custom-store-roles.sql', import.meta.url), 'utf8');
 const lineMigration = readFileSync(new URL('migrations/20261117-line-notifications.sql', import.meta.url), 'utf8');
+const auditVaultSchema = readFileSync(new URL('backup-vault.sql', import.meta.url), 'utf8');
 const owner = { uid: 'owner-1', email: 'owner@example.test' };
 const helper = { uid: 'helper-1', email: 'helper@example.test' };
 const outsider = { uid: 'outsider-1', email: 'outsider@example.test' };
@@ -647,7 +649,8 @@ test('changing or revoking cast membership atomically invalidates links and old 
 
 test('staff payroll account ownership is verified and revoked atomically from the cloud workspace', async (t) => {
   const now = Date.parse('2026-11-16T22:00:00+09:00');
-  t.mock.method(Date,'now',() => now);
+  let clock = now;
+  t.mock.method(Date,'now',() => clock);
   const db = database();
   const tenant = await store(db);
   await inviteMember(db,owner,tenant,helper.email,'staff');
@@ -671,6 +674,17 @@ test('staff payroll account ownership is verified and revoked atomically from th
   assert.equal(paid.staffPayroll,undefined);
   assert.equal(paid.staffPayrollDelegation,undefined);
   assert.equal(paid.staffPayrollSelf.records[0].snapshot.net,3500);
+  const clockIn = await run(helper,7,'clock-in',{type:'staffClockIn'});
+  assert.equal(clockIn.state.staffPayrollSelf.attendance[0].clockOutAt,null);
+  assert.equal(clockIn.state.staffLabor,undefined);
+  clock += 60 * 60_000;
+  await run(helper,8,'clock-out',{type:'staffClockOut'});
+  const worker = (await read(owner)).state.staffLabor.attendance.filter((row) => row.personId === personId);
+  assert.equal(worker.length,2);
+  assert.equal(worker[1].minutes,60);
+  const auditedClock = (await listAudit(db,owner,tenant)).events.find(({action}) => action === 'staffClockOut');
+  assert.equal(auditedClock.actor.id,helper.uid);
+  assert.equal(auditedClock.before.clockOutAt,null);
   await changeMember(db,owner,tenant,helper.uid);
   await assert.rejects(read(helper),{code:'store-access'});
   await inviteMember(db,owner,tenant,helper.email,'staff');
@@ -1425,6 +1439,54 @@ test('cloud reconciles automatic extensions before a quote can be settled, once 
   assert.equal(events.filter((event)=>event.action==='syncAutoExtensions').length,2);
   assert(events.some((event)=>event.action==='saveAutoExtensionSettings'));
   assert.equal(events.find((event)=>event.action==='syncAutoExtensions').after.tickets[0].orders[0].quantity,1);
+});
+
+test('audit integrity detects changed and missing rows with an independently signed vault', async () => {
+  const db = database();
+  const binding = database(auditVaultSchema);
+  const secret = 'ab'.repeat(32);
+  const audit = {binding,secret};
+  const tenant = await store(db);
+  await command(db,owner,tenant,0,'seal-audit-opening', {type:'open',openingCash:0});
+  await command(db,owner,tenant,1,'seal-audit-seat-01', {type:'seat',tableIds:['a1'],setId:'set60',guests:1});
+  assert.equal((await listAudit(db,owner,tenant,{},audit)).integrity.status,'pending');
+  await Promise.all([mirrorAuditVault(db,binding,secret),mirrorAuditVault(db,binding,secret)]);
+  const latest = await listAudit(db,owner,tenant,{limit:1},audit);
+  assert.equal(latest.integrity.status,'verified');
+  assert.equal(latest.integrity.through,2);
+  assert.equal((await listAudit(db,owner,tenant,{before:latest.nextBefore},audit)).integrity.status,'verified');
+  assert.equal((await listAudit(db,owner,tenant,{}, {binding,secret:'ac'.repeat(32)})).integrity.status,'mismatch');
+  await db.prepare("UPDATE np_audit_events SET payload = json_set(payload,'$.reason','tamper') WHERE store_id = ? AND revision = 2").bind(tenant).all();
+  assert.equal((await listAudit(db,owner,tenant,{},audit)).integrity.status,'mismatch');
+  await db.prepare("UPDATE np_audit_events SET payload = 'invalid JSON' WHERE store_id = ? AND revision = 2").bind(tenant).all();
+  assert.equal((await listAudit(db,owner,tenant,{},audit)).integrity.status,'mismatch');
+  await db.prepare('DELETE FROM np_audit_events WHERE store_id = ? AND revision = 2').bind(tenant).all();
+  assert.equal((await listAudit(db,owner,tenant,{},audit)).integrity.status,'mismatch');
+  await assert.rejects(listAudit(db,helper,tenant,{},audit),{code:'store-access'});
+});
+
+test('scheduled auto extension runs without terminal reads and stays single under overlapping jobs', async (t) => {
+  const db = database();
+  const tenant = await store(db);
+  let now = Date.parse('2026-11-16T20:00:00+09:00');
+  t.mock.method(Date,'now',() => now);
+  await command(db,owner,tenant,0,'scheduled-opening', {type:'open',openingCash:0});
+  await command(db,owner,tenant,1,'scheduled-enable-auto', {type:'saveAutoExtensionSettings',enabled:true,menuId:'extend30'});
+  const seated = await command(db,owner,tenant,2,'scheduled-first-visit', {type:'seat',tableIds:['a1'],setId:'set60',guests:1});
+  const deadline = seated.state.tickets[0].endsAt;
+  // Simulate a store restored from legacy SQL with no schedule index entry.
+  await db.prepare('DELETE FROM np_auto_extension_schedule WHERE store_id = ?').bind(tenant).all();
+  await runScheduledAutoExtensions(db,{now:deadline - 1});
+  assert.equal((await db.prepare('SELECT next_at FROM np_auto_extension_schedule WHERE store_id = ?').bind(tenant).first()).next_at,deadline);
+  now = deadline;
+  await Promise.all([runScheduledAutoExtensions(db),runScheduledAutoExtensions(db)]);
+  const [event] = (await listAudit(db,owner,tenant)).events;
+  assert.equal(event.action,'syncAutoExtensions');
+  assert.equal(event.actor.id,'np-system:auto-extension');
+  const result = await readState(db,owner,tenant,3);
+  assert.equal(result.revision,4);
+  assert.equal(result.state.tickets[0].lines.filter(({autoExtension}) => autoExtension).length,1);
+  assert.equal((await db.prepare('SELECT next_at FROM np_auto_extension_schedule WHERE store_id = ?').bind(tenant).first()).next_at,deadline + 30 * 60_000);
 });
 
 test('table auto-extension overrides persist and use the authoritative deadline across operators', async (t) => {

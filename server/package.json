@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "test": "node --test *.test.mjs",
+    "verify:peak": "node verify-peak.mjs",
     "verify:restore": "node restore-drill.mjs",
     "restore:daily-backup": "node restore-backup.mjs"
   },

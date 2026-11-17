@@ -65,7 +65,7 @@ export function getPayrollSettings(state) {
     ...(statementLayout && {statementLayout:statementLayout.map((row) => ({...row}))}) };
 }
 
-function normalizeStatementRules(rules) {
+export function normalizeStatementRules(rules) {
   check(Array.isArray(rules) && rules.length <= 20, '支給明細の計算項目は20件以内で登録してください。');
   return rules.map((row,index) => {
     check(isRecord(row) && ['allowance','deduction','intermediate'].includes(row.kind)
@@ -108,7 +108,8 @@ function applyTemplateCommand(state, action, allocateId) {
   }
   check(templateId == null ? action.type === 'savePayrollTemplate' : index >= 0, '計算テンプレートが見つかりません。');
   if (action.type === 'removePayrollTemplate') {
-    check(!assignments.some((row) => row.templateId === templateId), '使用中のテンプレートは、キャストの割り当てを変更してから削除してください。');
+    check(![...assignments,...(state.staffPayroll?.templateAssignments ?? [])].some((row) => row.templateId === templateId),
+      '使用中のテンプレートは、割り当てを変更してから削除してください。');
     templates.splice(index,1);
     return;
   }
@@ -259,7 +260,7 @@ function attendanceWork(state, month, castId, manualWork) {
   return [...work.values()].sort((first, second) => first.date.localeCompare(second.date));
 }
 
-function calculateStatementItems(settings, hourlyPay, commission, pointPay, context = {}) {
+export function calculateStatementItems(settings, hourlyPay, commission, pointPay, context = {}) {
   const baseGross = hourlyPay + commission + pointPay;
   check([hourlyPay,commission,pointPay,baseGross].every((amount) => Number.isSafeInteger(amount) && amount >= 0),
     '給与の計算範囲を超えています。');

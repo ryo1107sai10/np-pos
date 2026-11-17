@@ -10,9 +10,9 @@ export function getAttendanceBatchRows(state,date) {
   const existingStaff = staff.attendance.filter((row) => row.date === date && !row.voidedAt);
   const existingCast = (state.castAttendance ?? []).filter((row) => row.date === date && row.status !== 'rejected');
   const staffRows = staff.people.flatMap((person) => {
-    const prior = existingStaff.find(({personId}) => personId === person.id);
-    return !person.enabled && !prior ? [] : [{kind:'staff',personId:person.id,name:prior?.personName ?? person.name,
-      role:prior?.roleName ?? roleLabel(state,person.role,person.profileId),prior}];
+    const saved = existingStaff.filter(({personId}) => personId === person.id).sort((first,second) => first.clockInAt - second.clockInAt);
+    return [...saved,...(person.enabled ? [undefined] : [])].map((prior) => ({kind:'staff',personId:person.id,name:prior?.personName ?? person.name,
+      role:prior?.roleName ?? roleLabel(state,person.role,person.profileId),prior}));
   });
   const castRows = [...state.cast,...(state.archivedCast ?? [])].flatMap((person) => {
     const existing = existingCast.filter(({castId}) => castId === person.id);
@@ -23,10 +23,10 @@ export function getAttendanceBatchRows(state,date) {
 }
 
 export function renderAttendanceBatchRows(date,rows,{escape}) {
-  return `<p class="form-copy">営業日 ${escape(date)} ／ 変更を保存する行だけ選択してください。1人1件、最大${attendanceBatchLimit}人まで保存できます。</p>
+  return `<p class="form-copy">営業日 ${escape(date)} ／ 変更を保存する行だけ選択してください。最大${attendanceBatchLimit}件まで保存できます。</p>
     <p class="field-help">出勤のみを記録する場合は退勤を空欄にします。休憩を時刻で登録済みの行は、個別訂正で休憩を変更できます。</p>
     ${rows.map(({kind,name,role,prior},index) => `<fieldset class="choices payroll-edit-section" data-attendance-batch-row>
-      <legend>${escape(name)} ／ ${escape(role)}${prior ? ' · 記録あり' : ''}</legend>
+      <legend>${escape(name)} ／ ${escape(role)}${prior ? ' · 記録あり' : ' · 新規'}</legend>
       <label class="inline-check"><input type="checkbox" name="attendanceRow" value="${index}">この行を保存する</label>
       <fieldset class="form-grid" data-attendance-batch-fields disabled>
         ${kind === 'cast' ? `<label class="field"><span>区分</span><select name="batchClass${index}">${Object.entries(classes).map(([id,label]) =>
@@ -63,6 +63,6 @@ export function readAttendanceBatch(data,date,choices) {
       ...(kind === 'cast' && {classification,breaks:prior?.breaks,itemIds:prior?.items?.map(({id}) => id)})};
   });
   const action = {type:'saveAttendanceBatch',date,reason:data.get('batchReason'),rows};
-  if (!isValidAttendanceBatch(action)) throw new Error(`対象者を1〜${attendanceBatchLimit}名選び、勤務者ごとに1件の入力と理由を指定してください。`);
+  if (!isValidAttendanceBatch(action)) throw new Error(`保存する勤怠を1〜${attendanceBatchLimit}件選び、理由を入力してください。`);
   return action;
 }

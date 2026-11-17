@@ -182,3 +182,25 @@ test('settings transfer preserves old ticket policy, supports legacy settings fi
   }
   assert.throws(() => parseStoreConfiguration(JSON.stringify({ ...file, calculationSettings: null })), /設定を確認/);
 });
+
+test('service-inclusive tax is itemized within the subtotal plus service and keeps the listed-price commission base', () => {
+  let state = menuPrices(open(), {
+    set60:{price:1_100,taxRate:1_000},castDrink:{price:1_080,taxRate:800,commission:{rate:10}},
+  });
+  state = configure(state,{serviceRateBps:1_000,priceMode:'serviceInclusive',taxRounding:'round'});
+  state = seat(state);
+  const ticketId = state.tickets[0].id;
+  state = run(state,{type:'order',ticketId,items:[{menuId:'castDrink',quantity:1,castIds:['cast1']}]});
+  const bill = quote(state,ticketId);
+  assert.equal(bill.priceMode,'serviceInclusive');
+  assert.equal(bill.service,218);
+  assert.equal(bill.tax,198);
+  assert.equal(bill.total,2_398);
+  assert.deepEqual(bill.taxBreakdown,[{rate:1_000,base:1_100,tax:110},{rate:800,base:1_100,tax:88}]);
+  assert.deepEqual(bill.commission,[{castId:'cast1',sales:1_080,amount:108,points:0}]);
+  state = configure(state,{priceMode:'exclusive'});
+  assert.deepEqual(quote(state,ticketId),bill);
+  state = run(state,{type:'settle',ticketId,payments:[{method:'cash',amount:bill.total}]});
+  const output = buildFreeeCsv(getReportPeriod(state),{mode:'tickets'});
+  assert.equal(output.salesTotal,bill.total);
+});

@@ -1,10 +1,11 @@
 import { createRemoteJWKSet, jwtVerify } from 'jose';
-import { applyCommand, changeMember, createStore, getStoreOverview, inviteMember, listAudit, listMembers, listStores, migrateState, readState, restoreGroupStoreMember, revokeInvite } from './database.mjs';
+import { applyCommand, changeMember, createStore, getStoreOverview, inviteMember, listAudit, listMembers, listStores, migrateState, readState, restoreGroupStoreMember, revokeInvite, runScheduledAutoExtensions } from './database.mjs';
 import { changeGroupMember, createStoreGroup, inviteGroupMember, listStoreGroups, renameStoreGroup, revokeGroupInvite, setGroupStore } from './store-groups.mjs';
 import { ApiError, isRecord, requireCondition } from './policy.mjs';
 import { answerGuideTopic, getGuideAccess } from './guide-assistant.mjs';
 import { runDailyBackup } from './daily-backup.mjs';
 import { openBackupVault } from './backup-vault.mjs';
+import { mirrorAuditVault } from './audit-integrity.mjs';
 import { dispatchLineJobs, getLineSettings, primeLineReminders, queueLineTest, saveLineSettings } from './line-notifications.mjs';
 import { beginLinePairing, confirmLinePairing, getLinePairing, processLineWebhook } from './line-pairing.mjs';
 
@@ -205,7 +206,9 @@ async function route(request, env, url) {
     if (method === 'POST' && id === 'test') return queueLineTest(db,env,actor,storeId);
   }
   if (section === 'state' && method === 'GET' && !id) return readState(db, actor, storeId, sinceRevision(url.searchParams));
-  if (section === 'audit' && method === 'GET' && !id) return listAudit(db, actor, storeId, auditPage(url.searchParams));
+  if (section === 'audit' && method === 'GET' && !id) return listAudit(db, actor, storeId, auditPage(url.searchParams),{
+    binding:env.NP_POS_BACKUP_VAULT,secret:env.NP_POS_AUDIT_KEY ?? env.NP_POS_BACKUP_KEY,
+  });
   if (section === 'commands' && method === 'POST' && !id) return applyCommand(db, actor, storeId, await jsonBody(request));
   if (section === 'migrate' && method === 'POST' && !id) return migrateState(db, actor, storeId, await jsonBody(request, 8 * 1024 * 1024));
   if (section === 'members' && !id) {
@@ -233,8 +236,13 @@ export default {
     const db = env.DB.withSession?.('first-primary') ?? env.DB;
     const backupEnv = env.NP_POS_BACKUP_VAULT && !env.NP_POS_BACKUPS
       ? {...env,NP_POS_BACKUPS:openBackupVault(env.NP_POS_BACKUP_VAULT)} : env;
-    const [line,backup] = await Promise.allSettled([dispatchLineJobs(db,env),runDailyBackup(backupEnv)]);
+    const [line,backup,extensions,audit] = await Promise.allSettled([
+      dispatchLineJobs(db,env),runDailyBackup(backupEnv),runScheduledAutoExtensions(db),
+      mirrorAuditVault(db,env.NP_POS_BACKUP_VAULT,env.NP_POS_AUDIT_KEY ?? env.NP_POS_BACKUP_KEY),
+    ]);
     if (backup.status === 'rejected') console.error(JSON.stringify({event:'daily_backup_failed',name:backup.reason?.name ?? 'Error'}));
+    if (extensions.status === 'rejected') console.error(JSON.stringify({event:'scheduled_auto_extensions_failed',name:extensions.reason?.name ?? 'Error'}));
+    if (audit.status === 'rejected') console.error(JSON.stringify({event:'audit_vault_seal_failed',name:audit.reason?.name ?? 'Error'}));
     if (line.status === 'rejected') throw line.reason;
   },
   async fetch(request, env) {

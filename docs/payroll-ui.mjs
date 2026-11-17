@@ -278,10 +278,12 @@ function renderStatementLayout(layout,{icon},template = false) {
   return `<details class="payroll-rate-history"${layout ? ' open' : ''}><summary>支給明細の表示・並び順</summary>
     <label class="inline-check"><input type="checkbox" name="payrollStatementLayoutEnabled"${layout ? ' checked' : ''}>${template ? 'このテンプレートの表示設定を使う' : '店舗共通の表示設定を使う'}</label>
     <p class="field-help">確定する月次明細の印刷と個別PDFに反映します。支給合計と支給内訳は常に表示します。${template ? '未選択の場合は店舗共通の設定を使用します。' : ''}</p>
-    <ol class="payroll-advances" data-payroll-statement-layout>${rows.map(({key,visible},index) => {
+    <ol class="payroll-advances" data-payroll-statement-layout>${rows.map(({key,visible,columns},index) => {
       const title = payrollStatementLabels[key];
       return `<li><input type="hidden" name="payrollStatementSection" value="${key}"><label class="inline-check">
         <input type="checkbox" name="payrollStatementVisible" value="${key}"${visible ? ' checked' : ''}${key === 'summary' ? ' disabled' : ''}>${title}</label>
+        <select name="payrollStatementColumns-${key}" aria-label="${title}の列数">
+          ${[1,2,3,4].map((number) => `<option value="${number}"${(columns ?? 1) === number ? ' selected' : ''}>${number}列</option>`).join('')}</select>
         <div class="ops-actions"><button type="button" class="icon-btn" data-action="payroll-layout-up" aria-label="${title}を上へ"${index === 0 ? ' disabled' : ''}>${icon('chevron-up',16)}</button>
         <button type="button" class="icon-btn" data-action="payroll-layout-down" aria-label="${title}を下へ"${index === rows.length - 1 ? ' disabled' : ''}>${icon('chevron-down',16)}</button></div></li>`;
     }).join('')}</ol></details>`;
@@ -290,7 +292,10 @@ function renderStatementLayout(layout,{icon},template = false) {
 export function readPayrollStatementLayout(data) {
   if (!data.has('payrollStatementLayoutEnabled')) return null;
   const visible = new Set(data.getAll('payrollStatementVisible'));
-  return data.getAll('payrollStatementSection').map((key) => ({key,visible:key === 'summary' || visible.has(key)}));
+  return data.getAll('payrollStatementSection').map((key) => {
+    const columns = Number(data.get(`payrollStatementColumns-${key}`) ?? 1);
+    return {key,visible:key === 'summary' || visible.has(key),...(columns !== 1 && {columns})};
+  });
 }
 
 export function movePayrollStatementSection(target) {
@@ -328,7 +333,8 @@ export function renderPayrollTemplates(state, {castId}, api) {
     <p class="field-help">割り当てを変更すると、選んだキャストの未確定の給与に適用します。</p>
     <section class="payroll-edit-section"><h3>登録済みのテンプレート</h3>
       ${templates.length ? `<ul class="payroll-advances">${templates.map(({id,name,rules}) => {
-        const count = cast.filter((member) => getPayrollTemplateAssignment(state,member.id) === id).length;
+        const count = cast.filter((member) => getPayrollTemplateAssignment(state,member.id) === id).length
+          + (state.staffPayroll?.templateAssignments ?? []).filter(({templateId}) => templateId === id).length;
         return `<li><div><strong>${escape(name)}</strong><small>計算項目 ${rules.length}件 ／ 使用中 ${count}名</small></div>
           <div class="ops-actions"><button type="button" class="btn" data-action="payroll-template-editor" data-id="${escape(id)}" aria-label="${escape(name)}を編集">編集</button>
           ${count ? '' : `<button type="button" class="btn" data-action="payroll-template-remove" data-id="${escape(id)}" aria-label="${escape(name)}を削除">削除</button>`}</div></li>`;
@@ -471,8 +477,8 @@ export function renderPayrollRate(state, {month,castId}, {escape}) {
 
 export function renderPayrollPrint(record, {escape,yen,storeName}) {
   const pay = record.snapshot;
-  const sections = pay.settings?.statementLayout ? monthlyPayrollSections(pay,yen).map(([title,rows]) =>
-    panel(title,`<dl class="lr-money-list">${rows.map(([label,value]) => `<div><dt>${escape(label)}</dt><dd>${escape(value)}</dd></div>`).join('')}</dl>`)).join('')
+  const sections = pay.settings?.statementLayout ? monthlyPayrollSections(pay,yen).map(([title,rows,columns]) =>
+    panel(title,`<dl class="lr-money-list payroll-statement-print-grid" data-columns="${columns}">${rows.map(([label,value]) => `<div><dt>${escape(label)}</dt><dd>${escape(value)}</dd></div>`).join('')}</dl>`)).join('')
     : `${panel('支給内訳',details(pay,{escape,yen}))}
     ${pay.workWithheld ? '' : panel('勤務の内訳',pay.work.length ? workDetails(pay,{escape,yen}) : '<p>勤務時間の登録なし</p>')}
     ${pay.allowances.length ? panel('手当',listAmounts(pay.allowances.map(({label,amount}) => [label,amount]),{escape,yen})) : ''}

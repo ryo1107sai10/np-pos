@@ -1,8 +1,10 @@
+import { isPersonalSalesDiscountMode } from './personal-sales.mjs';
+
 const rateDivisor = 10_000;
 export const defaultItemTaxRateBps = 1_000;
 const roundingModes = new Set(['floor', 'round', 'ceil']);
 const serviceBases = new Set(['afterDiscount', 'beforeDiscount']);
-const priceModes = new Set(['exclusive', 'inclusive']);
+const priceModes = new Set(['exclusive', 'inclusive', 'serviceInclusive']);
 export const castAllocationUnits = Object.freeze({
   amount:Object.freeze([1,10,100]), points:Object.freeze([1,10,100]),
   quantity:Object.freeze([10,100,1000]), sales:Object.freeze([1,10,100]), cost:Object.freeze([1,10,100]),
@@ -17,10 +19,11 @@ const defaults = Object.freeze({
   priceMode: 'exclusive',
 });
 
-function projectSettings({ serviceRateBps, serviceRounding, serviceRoundingUnit, taxRounding, serviceBase, priceMode,
+function projectSettings({ serviceRateBps, serviceRounding, serviceRoundingUnit, taxRounding, serviceBase, priceMode, personalSalesDiscountMode,
   allowOrderServiceExclusion, allowOrderTaxOverride, allowOrderLineDiscount, castAllocation }) {
   return { serviceRateBps, serviceRounding, taxRounding, serviceBase, priceMode,
     ...(serviceRoundingUnit !== undefined && {serviceRoundingUnit}),
+    ...(personalSalesDiscountMode !== undefined && {personalSalesDiscountMode}),
     ...(castAllocation !== undefined && {castAllocation:Object.fromEntries(Object.entries(castAllocation)
       .map(([key,{unit,mode}]) => [key,{unit,mode}]))}),
     ...(allowOrderServiceExclusion !== undefined && {allowOrderServiceExclusion}),
@@ -40,6 +43,7 @@ export function isValidCalculationSettings(settings) {
     && roundingModes.has(settings.serviceRounding) && roundingModes.has(settings.taxRounding)
     && serviceBases.has(settings.serviceBase) && priceModes.has(settings.priceMode)
     && (settings.serviceRoundingUnit === undefined || serviceRoundingUnits.includes(settings.serviceRoundingUnit))
+    && (settings.personalSalesDiscountMode === undefined || isPersonalSalesDiscountMode(settings.personalSalesDiscountMode))
     && (settings.castAllocation === undefined || validCastAllocation(settings.castAllocation))
     && ['allowOrderServiceExclusion','allowOrderTaxOverride','allowOrderLineDiscount']
       .every((key) => settings[key] === undefined || typeof settings[key] === 'boolean');
@@ -47,7 +51,7 @@ export function isValidCalculationSettings(settings) {
 
 export function normalizeCalculationSettings(settings) {
   if (!isValidCalculationSettings(settings)) {
-    throw new Error('サービス料率と端数処理、値引きの基準、税込・税抜の設定を確認してください。');
+    throw new Error('サービス料率、税、値引きと端数処理の設定を確認してください。');
   }
   return projectSettings(settings);
 }
@@ -105,7 +109,7 @@ export function castLineCost(line, index, rule) {
 }
 
 export function calculationTaxGroup(amount, rate, { priceMode, taxRounding }) {
-  const inclusive = priceMode === 'inclusive';
+  const inclusive = priceMode === 'inclusive' || priceMode === 'serviceInclusive';
   const tax = roundCalculationRate(amount, rate, taxRounding, inclusive ? rateDivisor + rate : rateDivisor);
   const base = inclusive ? Number(BigInt(amount) - BigInt(tax)) : Number(amount);
   return { rate, base, tax };

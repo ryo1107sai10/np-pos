@@ -4,7 +4,8 @@ import * as roles from './role-policy.mjs';
 export const staffRoles = ['admin','manager','staff','trainee'];
 const minute = 60_000;
 const day = 1440 * minute;
-const commands = new Set(['saveStaffPerson','saveStaffRate','saveStaffAttendance','voidStaffAttendance']);
+export const staffClockCommands = new Set(['staffClockIn','staffClockOut']);
+const commands = new Set(['saveStaffPerson','saveStaffRate','saveStaffAttendance','voidStaffAttendance',...staffClockCommands]);
 const noStaff = Object.freeze({people:[],rates:[],attendance:[]});
 
 function check(condition,message) {
@@ -28,6 +29,11 @@ export function getStaffLabor(state) {
 
 export function isStaffLaborCommand(type) {
   return commands.has(type);
+}
+
+export function findLinkedStaffPerson(state,uid,role) {
+  const linked = state.staffPayroll?.links?.find((entry) => entry.uid === uid);
+  return linked && getStaffLabor(state).people.find(({id,enabled,role:personRole}) => id === linked.personId && enabled && personRole === role);
 }
 
 function staffRole(row) {
@@ -71,7 +77,7 @@ function normalizeAttendance(row, people) {
     ...(voidedAt !== undefined && {voidedAt,voidReason:cleanText(row.voidReason,120)})};
 }
 
-function validateAttendanceList(attendance) {
+export function validateStaffAttendanceList(attendance) {
   const ids = new Set();
   const byPerson = new Map();
   for (const row of attendance) {
@@ -83,11 +89,12 @@ function validateAttendanceList(attendance) {
   }
   for (const rows of byPerson.values()) {
     rows.sort((a,b) => a.clockInAt-b.clockInAt);
-    const dates = new Set();
+    const minutes = new Map();
     for (const [index,row] of rows.entries()) {
-      check(!dates.has(row.date),'同じ勤務者には営業日ごとに1件の勤務を登録できます。既存の記録を訂正してください。');
       check(!index || (rows[index-1].clockOutAt ?? Infinity) <= row.clockInAt,'同じ勤務者の勤務時間が重複しています。');
-      dates.add(row.date);
+      const total = (minutes.get(row.date) ?? 0) + row.minutes;
+      check(total <= 1440,'同じ営業日の勤務は合計24時間以内で記録してください。');
+      minutes.set(row.date,total);
     }
   }
 }
@@ -101,11 +108,15 @@ export function normalizeStaffLabor(snapshot) {
   check(new Set(rates.map(({personId,effectiveDate})=>JSON.stringify([personId,effectiveDate]))).size === rates.length,
     '時給の適用日が重複しています。');
   const attendance = snapshot.attendance.map((row)=>normalizeAttendance(row,personIds));
-  validateAttendanceList(attendance);
+  validateStaffAttendanceList(attendance);
   return {people,rates,attendance};
 }
 
-export function applyStaffLaborCommand(state, action, now, actor, allocateId) {
+export function applyStaffLaborCommand(state, action, now, actor, allocateId, {deferAttendanceValidation = false} = {}) {
+  if (staffClockCommands.has(action.type)) {
+    applyStaffClock(state,action,now,actor,allocateId);
+    return;
+  }
   const attendanceCommand = ['saveStaffAttendance','voidStaffAttendance'].includes(action.type);
   check(actor.role === 'admin' || (attendanceCommand && actor.role === 'manager')
     || (action.type === 'saveStaffRate' && roles.canDelegatePayroll(state,actor.role,actor.profileId,'editHourlyRates')),'この操作には権限が必要です。');
@@ -149,6 +160,24 @@ export function applyStaffLaborCommand(state, action, now, actor, allocateId) {
   const attendance = normalizeAttendance({personId:person.id,date,clockInAt,clockOutAt,breakMinutes,reason,...staffRole(roleSnapshot),
     personName:roleSnapshot.personName,roleName:roleSnapshot.roleName,id:previous?.id ?? allocateId('staff-attendance'),timeUnitMinutes},personIds);
   const updated = labor.attendance.filter(({id})=>id !== attendance.id).concat(attendance);
-  validateAttendanceList(updated);
+  if (!deferAttendanceValidation) validateStaffAttendanceList(updated);
+  labor.attendance = updated;
+}
+
+function applyStaffClock(state,{type},now,{id,role},allocateId) {
+  const person = findLinkedStaffPerson(state,id,role);
+  check(person && ['manager','staff'].includes(role),'本人アカウントに連携した勤務者のみ打刻できます。');
+  const labor = getStaffLabor(state);
+  const previous = labor.attendance.find((row) => row.personId === person.id && row.voidedAt === undefined && row.clockOutAt === null);
+  const clockingIn = type === 'staffClockIn';
+  check(clockingIn ? !previous : previous,clockingIn ? '勤務中の記録を先に退勤してください。' : '勤務中の記録がありません。');
+  const personIds = new Set(labor.people.map(({id}) => id));
+  const row = clockingIn ? normalizeAttendance({
+    id:allocateId('staff-attendance'),personId:person.id,date:businessDate(now,registerCutoff(state)),clockInAt:now,clockOutAt:null,
+    breakMinutes:0,timeUnitMinutes:getAttendanceTimeUnit(state),reason:'本人の出勤打刻',...staffRole(person),
+    personName:person.name,roleName:roles.roleLabel(state,person.role,person.profileId),
+  },personIds) : normalizeAttendance({...previous,clockOutAt:now,reason:'本人の退勤打刻'},personIds);
+  const updated = labor.attendance.filter(({id}) => id !== row.id).concat(row);
+  validateStaffAttendanceList(updated);
   labor.attendance = updated;
 }

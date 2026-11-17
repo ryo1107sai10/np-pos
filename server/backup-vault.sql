@@ -14,3 +14,21 @@ CREATE TABLE IF NOT EXISTS np_backup_vault_chunks (
   ciphertext TEXT NOT NULL,
   PRIMARY KEY (object_id,position)
 );
+
+CREATE TABLE IF NOT EXISTS np_audit_vault_heads (
+  store_id TEXT PRIMARY KEY,
+  revision INTEGER NOT NULL CHECK(revision > 0),
+  checked_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS np_audit_vault_signatures (
+  store_id TEXT NOT NULL,
+  revision INTEGER NOT NULL CHECK(revision > 0),
+  signature TEXT NOT NULL CHECK(length(signature) = 64),
+  PRIMARY KEY (store_id,revision)
+);
+
+CREATE TABLE IF NOT EXISTS np_audit_vault_cursor (
+  id INTEGER PRIMARY KEY CHECK(id = 1),
+  store_id TEXT NOT NULL
+);

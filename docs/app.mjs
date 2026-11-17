@@ -13,7 +13,7 @@ import { canWaivePaymentFee, depositGrossAmount, getCardFee, getCardFeeSettings,
 import { getSettlementPaymentFees } from './engine.mjs';
 import { getMonthlyReportSales, getReportDates, getReportPeriod } from './report-period.mjs';
 import { buildDailyReportCsv, buildRegisterCloseCsv } from './report-export.mjs';
-import { buildFreeeCsv } from './freee-export.mjs';
+import { buildFreeeCsv, buildFreeeExpenseCsv, getFreeeExpenses, readFreeeExpenseFields, renderFreeeExpenseFields } from './freee-export.mjs';
 import { accountingCsvColumns, accountingCsvEditor, accountingCsvPreview, buildCustomAccountingCsv, readAccountingCsvEditor } from './accounting-csv.mjs';
 import { bindLayoutEditor, commitLayoutFields, floorLayoutStage, handleLayoutEditorAction, layoutAreaTabs, newLayoutDraft, renderLayoutEditor } from './floor-layout.mjs';
 import { renderLayoutTransfer } from './layout-transfer.mjs';
@@ -36,6 +36,8 @@ import { buildCashMovementCsv, getCashReport } from './cash-report.mjs';
 import { purchaseCancellationBlocker } from './inventory-operations.mjs';
 import { findPrintableTicket, getPrintAutoKind, getPrintDocuments, getPrintSettings, getPrintTenderReceived } from './print-domain.mjs';
 import { printDocumentTitles, renderDailyPayReceipt, renderExtensionQuote, renderPrintOptions, renderPrintPreview, renderPrintSettings, renderPrintTest } from './print-ui.mjs';
+import { eposReceiptDocuments, epsonAssistantLink, makeEposReceipt, readReceiptPrinter, receiptPrinterFromForm,
+  renderReceiptPrinterFields, saveReceiptPrinter, sendEposLan } from './receipt-printer.mjs';
 import { createBillingDemo, createCashDemo, createCastDutyDemo, createCustomerNoticeDemo, createLaborDemo, createPayrollDemo, createPhaseTwoDemo, createPeriodReportDemo, createVisitAnalyticsDemo } from './phase-two-demo.mjs';
 import * as customerUI from './customer-ui.mjs';
 import { operationReason, renderAuditLog, renderDiscountForm, renderPersonalSalesAdjustment } from './operations-ui.mjs';
@@ -60,9 +62,10 @@ import { activeCastAssignments, splitCastRotation } from './cast-rotation.mjs';
 import { renderCastRotationBoard, renderCastRotationHistory, renderCastRotationTicket } from './cast-rotation-ui.mjs';
 import { buildTeamPerformanceCsv, renderTeamPerformance } from './team-performance.mjs';
 import { getStaffLabor, isLaborDate } from './labor-workspace.mjs';
-import { getStaffOwnPayroll, getStaffPayrollDelegation, getStaffPayrollDraft, previewStaffPayroll, staffPayrollMemberRoles } from './staff-payroll.mjs';
+import { getStaffOwnPayroll, getStaffPayrollDelegation, getStaffPayrollDraft, previewStaffPayroll, previewStaffPayrollRange, staffPayrollMemberRoles } from './staff-payroll.mjs';
 import { findManagedPayrollRecord, getManagedPayrollOptions, readStaffPayrollAdjustments, renderManagedStaffPayroll, renderOwnStaffPayroll,
-  renderStaffPayrollAdjustment, renderStaffPayrollDraft, renderStaffPayrollFinal, staffPayrollPrintRecord } from './staff-payroll-ui.mjs';
+  renderStaffPayrollAdjustment, renderStaffPayrollBatch, renderStaffPayrollDraft, renderStaffPayrollFinal,
+  renderStaffPayrollRange, renderStaffPayrollRangePrint, renderStaffPayrollTemplates, staffPayrollPrintRecord } from './staff-payroll-ui.mjs';
 import { buildLaborCsv, getLaborReport } from './labor-report.mjs';
 import { renderLaborHighlights, renderLaborReport, renderStaffAttendance, renderStaffAttendanceForm,
   renderStaffPersonForm, renderStaffRateForm } from './labor-ui.mjs';
@@ -96,7 +99,7 @@ const pages = {
   'product-sales': { title: '商品別売上', icon: 'box', group:'分析・レポート', help: '商品ごとの販売数量と売上を確認できます。' },
   payroll: { title: '給与・支給明細', icon: 'wallet', group:'スタッフ管理', roles:['admin'], help: '出勤、手当・控除、支給明細を管理できます。' },
   'staff-payroll': {title:'従業員の給与・時給',icon:'wallet',group:'スタッフ管理',roles:['admin','manager'],help:'勤務者の給与、確定明細、時給履歴'},
-  'staff-payroll-own': {title:'自分の給与明細',icon:'user',group:'スタッフ管理',roles:['manager','staff'],help:'本人の確定済みの支給明細'},
+  'staff-payroll-own': {title:'自分の勤怠・給与明細',icon:'user',group:'スタッフ管理',roles:['manager','staff'],help:'本人の出退勤と確定済みの支給明細'},
   shifts: { title: 'シフト', icon: 'calendar', group:'スタッフ管理', help: '勤務希望と確定シフトを日・週・月で確認できます。' },
   attendance: {title:'勤怠',icon:'clock',group:'スタッフ管理',help:'役職別の出退勤を記録し、キャストの打刻を確認します。'},
   labor: {title:'勤怠・人件費',icon:'users',group:'分析・レポート',roles:['admin'],help:'役職・勤務者ごとに出勤者数、勤務時間、人件費を集計できます。'},
@@ -182,6 +185,7 @@ let offlineVerifiedUid;
 let offlineRestartError = '';
 let restoringOffline;
 const cloud = createCloudClient(cloudConfig, { onChange: cloudUpdated, pollMs: 6000,
+  offlineKeyFor: (uid) => persistentDeviceLock.getOfflineDataKey(uid),
   offlineAccessAllowed: (uid, storeId) => {
     const lock = persistentDeviceLock.snapshot;
     const hint = rememberedCloudStore();
@@ -299,7 +303,7 @@ async function saveDeviceLockSettings(form) {
     await controller.configure({uid:sample ? 'demo' : cloudState.user?.uid,enabled,pin,
       minutes:Number(values.get('deviceLockMinutes')),currentPin:String(values.get('deviceCurrentPin') ?? '')});
     if (!sample) {
-      if (enabled) await cloud.saveOfflineSnapshot().catch(() => {});
+      if (enabled) await cloud.saveOfflineSnapshot({force:true}).catch(() => {});
       else await cloud.clearOfflineSnapshot().catch(() => {});
     }
     if (modal === active && dialog.open) {
@@ -444,7 +448,8 @@ function currentRoleLabel() {
 }
 
 function currentRoleAllows(group) {
-  if (cloudState?.coldOffline && ['reports','customers','staffing','inventory'].includes(group)) return false;
+  if (cloudState?.coldOffline && (['reports','staffing','inventory'].includes(group)
+    || group === 'customers' && !state.offlineCustomerSearch)) return false;
   return roleGroupAllowed(state,currentRole(),group,currentProfileId());
 }
 
@@ -457,7 +462,8 @@ const offlineWorkspaceActions = new Set([
   'dismiss','navigate','open-workspace-menu','close-workspace-menu','floor-view','layout-view-area','table','filter','hide-detail','open','seat','order',
   'move','extend','settle','depart','serve','receipt','category','product','order-line-stage','order-line-edit',
   'order-line-remove','order-line-reset','add-payment','remove-payment','cloud-sync-review','cloud-sync-retry',
-  'cloud-sync-discard','cloud-sync-close','visit-end-focus',
+  'cloud-sync-discard','cloud-sync-close','visit-end-focus','close','open-ticket','seat-guest-primary','seat-guest-remove',
+  'rotation-board','rotation-ticket','rotation-change','rotation-transfer',
 ]);
 
 function permittedAction(action) {
@@ -469,6 +475,8 @@ function permittedAction(action) {
     && (activeDeviceLock() === sampleDeviceLock || cloudState.userVerified && (!persistentDeviceLock.snapshot.enabled
       || persistentDeviceLock.snapshot.uid === cloudState.user?.uid));
   if (cloudState.coldOffline && !offlineWorkspaceActions.has(action)) return false;
+  if (cloudState.coldOffline && (action === 'close' && !state.offlineCloseSummary
+    || action.startsWith('rotation-') && !state.offlineRotation)) return false;
   const store = cloudState.store;
   if (action.startsWith('practice-')) return !store;
   if (demoPractice && (action.startsWith('cloud-') || action.startsWith('demo-'))) return false;
@@ -724,7 +732,7 @@ function renderFloorCastDuty(people) {
 }
 
 function totalRows(q, { settlement = false, large = false } = {}) {
-  const tax = q.priceMode === 'inclusive' ? 'うち消費税' : '消費税';
+  const tax = q.priceMode === 'serviceInclusive' ? 'うち消費税（サービス料に含む）' : q.priceMode === 'inclusive' ? 'うち消費税' : '消費税';
   const taxLabel = q.cardFee ? `${tax}（加算前）` : q.taxBreakdown.length === 1 ? `${tax}（${q.taxBreakdown[0].rate / 100}%）` : tax;
   const settlementFee = (q.cardFee ?? 0) - (q.depositFee ?? 0);
   return `<dl class="totals ${large ? 'totals-large' : ''}">
@@ -763,10 +771,6 @@ function receiptBody(ticket, totals) {
     ${permittedAction('rotation-board') ? renderCastRotationHistory(ticket,{escape}) : ''}`;
 }
 
-function canCorrectToday(date) {
-  return state.day.status === 'open' && state.day.date === date && currentRole() === 'admin';
-}
-
 function printButton(ticket, date, kind, label, options = {}) {
   return button(label,'print-document',{id:ticket.id,glyph:'printer',...options,
     data:`data-print-kind="${kind}" data-date="${escape(date)}"`});
@@ -789,7 +793,7 @@ function receiptActions(ticket, date) {
   const prints = `<div class="ops-actions">${printButton(ticket,date,'receipt','レシートを印刷',{tone:'secondary'})}
     ${printButton(ticket,date,'invoice','領収書を印刷',{disabled:!hasTender})}${settledCorrectionActions(ticket)}</div>
     ${hasTender ? '' : '<p class="field-help">領収書は、この会計で受け取った金額がある場合に発行できます。</p>'}`;
-  if (!canCorrectToday(date)) return prints;
+  if (currentRole() !== 'admin') return prints;
   if (state.receivables?.some((entry) => entry.ticketId === ticket.id && entry.cancelledAt == null && entry.collections.length)) {
     return prints;
   }
@@ -936,7 +940,7 @@ function render({ preserveFocus = false } = {}) {
     content = `<header class="page-head"><div><h1>マイページ</h1><p>勤怠・シフト・支給明細</p></div>
       <div class="actions">${renderWorkspaceMenuTrigger()}${renderCloudEntry(model,{escape,icon})}</div></header>${banner}
       ${cloudState.store && cloudState.status === 'connecting' ? '<p class="notice" role="status">店舗に接続しています。</p>'
-        : renderCastWorkspace(workspace,{escape,icon,yen},{seenPayrollMonths:seenCastPayrollNotices(workspace)})}`;
+        : renderCastWorkspace(workspace,{escape,icon,yen},{seenPayrollMonths:seenPayrollNotices(castPayrollNoticeKey(workspace))})}`;
   } else if (cloudState.store && (!cloudState.state || !cloudState.store.hasState)) {
     content = `<header class="page-head"><h1>クラウド店舗</h1><div class="actions">${renderWorkspaceMenuTrigger()}${renderCloudEntry(model,{escape,icon})}</div></header>${banner}
       ${cloudState.restricted ? renderCloudRestricted(model,{escape,icon}) : '<p class="notice">店舗・アカウントから営業データを準備してください。</p>'}`;
@@ -959,7 +963,10 @@ function render({ preserveFocus = false } = {}) {
       const payroll = managedStaffPayroll();
       view = renderManagedStaffPayroll(state,payroll.model,payroll,{escape,yen,button});
     }
-    else if (page === 'staff-payroll-own') view = renderOwnStaffPayroll(ownStaffPayroll(),{escape,icon,yen,button});
+    else if (page === 'staff-payroll-own') {
+      const own = ownStaffPayroll();
+      view = renderOwnStaffPayroll(own,{escape,icon,yen,button},seenPayrollNotices(ownPayrollNoticeKey(own)));
+    }
     else if (page === 'shifts') view = renderShifts(state,{escape,icon,date:shiftDate || state.day.date,mode:shiftMode,
       canEdit:permittedAction('shift-new')});
     else if (page === 'attendance') view = `<div class="ops-tools">${button('勤怠を一括登録・訂正','attendance-batch',{glyph:'calendar',tone:'primary'})}</div>`
@@ -1010,22 +1017,25 @@ function castPayrollNoticeKey(model) {
   return `np-pos.payroll-notice.v1:${JSON.stringify([cloudState.store?.id ?? 'demo',cloudState.user?.uid ?? 'demo-cast',model.cast.id])}`;
 }
 
-function seenCastPayrollNotices(model) {
-  const key = castPayrollNoticeKey(model);
+function ownPayrollNoticeKey(model) {
+  if (!model?.person) return null;
+  return `np-pos.staff-payroll-notice.v1:${JSON.stringify([cloudState.store?.id ?? 'demo',cloudState.user?.uid ?? demoActor().id,model.person.id])}`;
+}
+
+function seenPayrollNotices(key) {
   if (!key) return new Set();
   let saved;
   try { saved = JSON.parse(localStorage.getItem(key)); } catch { /* Use the current session when storage is unavailable. */ }
   return new Set([...(Array.isArray(saved) ? saved : []),...(castNoticesSeen.get(key) ?? [])]);
 }
 
-function readCastPayrollNotice(model,month) {
-  const key = castPayrollNoticeKey(model);
-  const seen = seenCastPayrollNotices(model);
+function readPayrollNotice(key,month,statementId) {
+  const seen = seenPayrollNotices(key);
   seen.add(month);
   castNoticesSeen.set(key,seen);
   try { localStorage.setItem(key,JSON.stringify([...seen])); } catch { /* The current session still remembers the notice. */ }
   render();
-  const statement = document.getElementById(`cast-payslip-${month}`);
+  const statement = document.getElementById(statementId);
   if (statement) {
     statement.open = true;
     statement.querySelector('summary').focus({preventScroll:true});
@@ -1138,6 +1148,7 @@ async function restoreCloud() {
   const hint = rememberedCloudStore();
   if (!hint) return;
   if (navigator.onLine === false) {
+    if (!offlineVerifiedUid && persistentDeviceLock.snapshot.uid === hint.uid) persistentDeviceLock.lock();
     if (isDeviceLocked() || cloudState.store || restoringOffline || hint.uid !== offlineVerifiedUid) return;
     restoringOffline = cloud.restoreOfflineStore({uid:hint.uid,storeId:hint.id});
     try { await restoringOffline; }
@@ -1777,7 +1788,7 @@ function currentReportInterval() {
 }
 
 function exportReport(kind) {
-  if (page !== 'reports' || !canOpenPage('reports') || !['report','register','daily','tickets','custom-daily','custom-tickets','print'].includes(kind)) return;
+  if (page !== 'reports' || !canOpenPage('reports') || !['report','register','daily','tickets','expenses','custom-daily','custom-tickets','print'].includes(kind)) return;
   const period = getReportPeriod(state,currentReportInterval());
   if (!period.valid || !period.days.length) return;
   if (kind === 'register' && !period.days.some(({closed}) => closed)) return;
@@ -1790,6 +1801,11 @@ function exportReport(kind) {
   let csv;
   let encoding = 'utf-8';
   try {
+    if (kind === 'expenses') {
+      const expenses = getFreeeExpenses(period);
+      if (expenses.length) openDialog('freee-expenses',{expenses,interval:currentReportInterval(),suffix});
+      return;
+    }
     if (kind.startsWith('custom-')) ({data:csv,encoding} = buildCustomAccountingCsv(state,period,kind.slice(7),storeName));
     else if (kind === 'register') csv = buildRegisterCloseCsv(period,storeName);
     else csv = kind === 'report' ? buildDailyReportCsv(period,storeName)
@@ -1851,10 +1867,11 @@ async function loadAuditPage() {
   paintDialog();
   try {
     if (cloudState.store) {
-      const { events, nextBefore } = await cloud.listAudit({before:active.before, limit:30,ticketId:active.ticketAuditId,
+      const { events, nextBefore, integrity } = await cloud.listAudit({before:active.before, limit:30,ticketId:active.ticketAuditId,
         registerDate:active.registerAuditDate});
       if (modal !== active || !dialog.open) return;
       active.entries.push(...events);
+      if (integrity && active.integrity?.status !== 'mismatch') active.integrity = integrity;
       active.before = nextBefore;
       active.more = nextBefore != null;
     } else {
@@ -2172,11 +2189,19 @@ function paintDialog(layoutFileInput) {
       present('延長・カード設定',renderBillingSettings(modal.billingTab),'設定を保存',{style:'ops-modal billing-dialog'});
       return;
     case 'print-settings':
-      present('印刷設定',renderPrintSettings(getPrintSettings(state),{escape}),'印刷設定を保存',{style:'ops-modal np-print-dialog'});
+      present('印刷設定',renderPrintSettings(getPrintSettings(state),{escape})
+        + renderReceiptPrinterFields(localReceiptPrinter(),{escape}),'印刷設定を保存',{style:'ops-modal np-print-dialog'});
+      return;
+    case 'receipt-printer-handoff':
+      present('Epson TM Print Assistantで印刷',receiptPrinterHandoff(modal.link)
+        + button('ブラウザーから印刷','receipt-printer-browser',{glyph:'printer',tone:'secondary'}),null,{style:'ops-modal'});
       return;
     case 'accounting-settings':
       present('会計CSV設定',accountingCsvEditor(state,modal.csvMode ?? 'daily',{escape,icon}),
         'この出力区分を保存',{style:'ops-modal modal-wide'});
+      return;
+    case 'freee-expenses':
+      present('freee向け経費仕訳',renderFreeeExpenseFields(modal.expenses,{escape,yen}),'経費仕訳CSVを保存',{style:'ops-modal modal-wide'});
       return;
     case 'role-policy':
       present('役職・権限',renderRolePolicy(state,{escape},modal.rolePolicyDraft),'権限を保存',{style:'ops-modal modal-wide'});
@@ -2299,6 +2324,12 @@ function paintDialog(layoutFileInput) {
       present('勤務者の時給を登録',renderStaffRateForm(state,person,{escape}),'時給を保存',{style:'ops-modal'});
       return;
     }
+    case 'staff-payroll-own-clock-in':
+    case 'staff-payroll-own-clock-out': {
+      const title = modal.type.endsWith('-in') ? '出勤' : '退勤';
+      present(`${title}を記録`,`<p class="form-copy">現在の時刻を${title}として記録します。</p>`,`${title}する`,{style:'ops-modal'});
+      return;
+    }
     case 'staff-payroll-draft': {
       const {person,month} = modal.staffPayrollSelection;
       const draft = getStaffPayrollDraft(state,person.id,month);
@@ -2307,6 +2338,17 @@ function paintDialog(layoutFileInput) {
     }
     case 'staff-payroll-finalize':
       present('従業員の給与を確定',renderStaffPayrollFinal(modal.staffPayrollPreview,{escape,yen}),'確定する',{style:'ops-modal'});
+      return;
+    case 'staff-payroll-templates':
+      present('従業員の計算テンプレート',renderStaffPayrollTemplates(state,modal.staffPayrollSelection.person,{escape,button}),
+        '割り当てを保存',{style:'ops-modal modal-wide'});
+      return;
+    case 'staff-payroll-managed-batch':
+      present('従業員の確定明細を一括出力',renderStaffPayrollBatch(modal.staffPayrollSelection,{escape}),'ZIPを保存する',{style:'ops-modal'});
+      return;
+    case 'staff-payroll-range':
+      present('従業員の給与を日付指定で集計',renderStaffPayrollRange({...modal.staffPayrollSelection,range:modal.range,result:modal.result},
+        {escape,yen,button}),'集計する',{style:'ops-modal'});
       return;
     case 'staff-payroll-rate': {
       const {person,month} = modal.staffPayrollSelection;
@@ -2432,7 +2474,8 @@ function paintDialog(layoutFileInput) {
       const {id:initialSetId} = initialSetForSeat(state,modal.tableId);
       const options = getAvailableInitialSets(state).map((item)=>`<option value="${escape(item.id)}" ${item.id===initialSetId ? 'selected' : ''}>${escape(item.name)}${item.name.includes(`${item.duration}分`) ? '' : ` · ${item.duration}分`} · ${yen(item.price)}/人</option>`).join('');
       const customerChoice = currentRoleAllows('customers') ? customerUI.renderSeatCustomer(
-        customerWorkspaceState(),customerUIApi(),{query:modal.seatCustomerQuery ?? '',selected:modal.seatGuestIds ?? []}) : '';
+        customerWorkspaceState(),customerUIApi(),{query:modal.seatCustomerQuery ?? '',selected:modal.seatGuestIds ?? []})
+        + (cloudState.coldOffline ? '<p class="field-help">端末に保存した顧客を表示します。表示名・ふりがなで検索できます。</p>' : '') : '';
       present('来店登録',`<div class="form-grid">${label('来店人数','<input name="guests" type="number" min="1" max="100" step="1" value="2" required inputmode="numeric">')}${label('初回セット',`<select name="setId" aria-describedby="seat-set-hint" required>${options}</select>`,'<span id="seat-set-hint" role="status"></span>')}</div>${customerChoice}
         <details class="arrival-time-detail"><summary>来店時刻を指定</summary>${label('実際の来店日時（日本時間）',
           '<input type="datetime-local" name="arrivedAt">','未入力の場合は、登録した時刻を使います。')}</details>
@@ -2519,7 +2562,8 @@ function paintDialog(layoutFileInput) {
     }
     case 'discount':
       present('値引きを設定',headline + renderDiscountForm({ticket,subtotal:getTicketDiscountableSubtotal(q),priceMode:q.priceMode,
-        limit:getManagerDiscountLimit(state),role:currentRole(),reasonCodes:discountReasonCodes},{escape,yen}),
+        limit:getManagerDiscountLimit(state),role:currentRole(),reasonCodes:discountReasonCodes,
+        defaultPersonalMode:getCalculationSettings(state).personalSalesDiscountMode},{escape,yen}),
       currentRole() === 'manager' ? '値引きを保存・申請' : '値引きを確定',{style:'ops-modal'});
       return;
     case 'discount-review':
@@ -2564,24 +2608,49 @@ function paintDialog(layoutFileInput) {
       present(`会計内訳 No. ${archived.number}`, header + receiptBody(archived, totals) + receiptActions(archived,modal.date) + ticketAuditButton(archived,modal.date), null);
       return;
     }
-    case 'cancel-settlement':
-      present('会計を取り消す',`${headline}<div class="result-bar"><span>取消対象の会計</span><strong>${yen(q.total)}</strong></div>
-        <p class="form-copy">伝票 No. ${ticket.number} の売上・確定歩合・支払記録を取り消し、注文で引いた在庫を戻します。会計と支払の内訳は取消履歴から確認できます。実際の返金は、受け付けた決済手段で処理してください。</p>
+    case 'cancel-settlement': {
+      const entry = findSettledCustomerTicket(state,id);
+      if (!entry) { present('会計を取り消す','<p class="form-copy">最新の会計伝票を開き直してください。</p>',null); return; }
+      const archived = state.closedDays.some(({date}) => date === entry.date);
+      const expectedRevision = entry.ticket.settlementRevision ?? 0;
+      modal.cancelSettlementDate = entry.date;
+      modal.cancelSettlementRevision ??= expectedRevision;
+      modal.cancelPaymentRevision ??= entry.ticket.paymentsCorrectedAt ?? 0;
+      const total = entry.ticket.settlement?.total ?? quote({...state,tickets:[entry.ticket]},id).total;
+      const corrections = archived ? '<p class="form-copy">元の営業日の売上・確定歩合・支払記録を訂正します。元のレジ実査額は保ち、当日のレジは動かしません。未提供分の在庫を戻します。</p>'
+        : '<p class="form-copy">売上・確定歩合・支払記録を取り消し、注文の在庫を戻します。</p>';
+      present('会計を取り消す',`${settledTicketContext(entry)}<div class="result-bar"><span>取消対象の会計</span><strong>${yen(total)}</strong></div>
+        ${corrections}<p class="form-copy">会計と支払いの内訳は取消履歴に残ります。実際の返金は、受け付けた決済手段で処理してください。</p>
         ${operationReason({title:'会計の取消理由'})}`,'会計取消を確定',{style:'ops-modal'});
       return;
+    }
     case 'cancelled-receipt': {
-      const {record} = modal;
+      const record = state.cancelledSettlements?.find(({id}) => id === modal.record.id) ?? modal.record;
       const receipt = record.receipt;
       const current = state.tickets.find((item) => item.id === record.ticketId);
-      const reopen = canCorrectToday(record.date) && current?.status === 'cancelled'
-        ? button('伝票を再オープン','reopen-ticket',{id:current.id,glyph:'refresh',tone:'primary'}) : '';
+      const latest = state.cancelledSettlements?.find(({ticketId}) => ticketId === record.ticketId);
+      const reopen = currentRole() === 'admin' && !record.reopenedTicketId && latest?.id === record.id
+        && (record.date !== state.day.date || current?.status === 'cancelled')
+        ? state.day.status === 'open' ? button('伝票を再オープン','reopen-ticket',{id:record.ticketId,glyph:'refresh',tone:'primary',
+          data:`data-cancellation-id="${escape(record.id)}"`}) : '<p class="field-help">営業中に伝票を再オープンできます。</p>' : '';
       present(`取消済みの会計 No. ${record.ticketNumber}`,`<p class="ops-highlight">取消済み · ${escape(record.date)}<br>${escape(record.reason)}</p>
-        ${receiptBody(receipt,receipt.settlement)}${reopen}`,null,{style:'ops-modal'});
+        ${receiptBody(receipt,receipt.settlement)}${record.reopenedTicketId ? '<p class="field-help">この会計は再オープン済みです。</p>' : ''}${reopen}
+        ${ticketAuditButton(receipt,record.date)}`,null,{style:'ops-modal'});
       return;
     }
     case 'reopen-ticket': {
-      const previous = ticket.tableIds.filter((tableId) => state.tables.some((row) => row.id === tableId) && !getTicketForTable(state,tableId));
-      present('伝票を再オープン',`${headline}<p class="form-copy">空席を選ぶと元の注文を引き継ぎ、取消時に戻した在庫を引き直して未会計の伝票に戻します。</p>
+      const record = state.cancelledSettlements?.find(({id:recordId,ticketId}) =>
+        id === ticketId && (!modal.cancellationId || recordId === modal.cancellationId));
+      const source = ticket ?? record?.receipt;
+      if (!source || state.day.status !== 'open') {
+        present('伝票を再オープン','<p class="form-copy">営業中に取消済みの伝票を開き直してください。</p>',null);
+        return;
+      }
+      const historical = record && record.date !== state.day.date;
+      const previous = source.tableIds.filter((tableId) => state.tables.some((row) => row.id === tableId) && !getTicketForTable(state,tableId));
+      const instructions = historical ? '今日の空席を選ぶと、元の注文を引き継いだ未会計の伝票を今日の伝票番号で開きます。自動延長は停止した状態で始まります。'
+        : '空席を選ぶと元の注文を引き継ぎ、取消時に戻した在庫を引き直して未会計の伝票に戻します。';
+      present('伝票を再オープン',`${historical ? settledTicketContext({ticket:source,date:record.date}) : headline}<p class="form-copy">${instructions}</p>
         ${seatPicker(previous,{ticketId:id})}${operationReason({title:'再オープンの理由'})}`,'再オープンを確定',{style:'ops-modal'});
       return;
     }
@@ -2619,7 +2688,9 @@ function paintDialog(layoutFileInput) {
     }
     case 'close': {
       const outstanding = state.tickets.filter((item)=>['open','paid'].includes(item.status));
-      const totals = summary(state);
+      const totals = state.offlineCloseSummary ?? summary(state);
+      const offline = cloudState.store && cloudState.status === 'offline';
+      const offlineNote = offline ? '<p class="field-help">接続回復後に締めを確定します。同期待ちの操作がある場合は、同期後に締めてください。</p>' : '';
       if (state.day.status !== 'open') {
         present('閉店処理','<p class="form-copy">この営業日は締め済みです。</p>',null,{style:'ops-modal'});
         return;
@@ -2631,12 +2702,12 @@ function paintDialog(layoutFileInput) {
       }
       if (!modal.closeCountStep) {
         const attendanceButton = button('勤怠を開く','navigate',{id:'attendance',glyph:'clock',tone:'secondary'});
-        present('閉店処理',renderCloseReview(state,totals,{escape,yen,attendanceVisible:canViewAttendance,attendanceButton}),
+        present('閉店処理',renderCloseReview(state,totals,{escape,yen,attendanceVisible:canViewAttendance,attendanceButton}) + offlineNote,
           'レジ金確認へ進む',{style:'ops-modal cash-dialog'});
         return;
       }
       modal.expectedCash = totals.expectedCash;
-      present('閉店処理',renderRegisterClose(totals),'閉店を確定',{style:'ops-modal cash-dialog'});
+      present('閉店処理',renderRegisterClose(totals) + offlineNote,offline ? '閉店の送信待ちを保存' : '閉店を確定',{style:'ops-modal cash-dialog'});
       return;
     }
     case 'record-cash':
@@ -2884,8 +2955,67 @@ async function outputStaffPayroll(record,pdf) {
   } catch (error) { toast(error.message,{error:true}); }
 }
 
+async function outputStaffPayrollReport(type,source,selection) {
+  const origin = {modal,storeId:cloudState.store?.id,uid:cloudState.user?.uid,role:currentRole(),profileId:currentProfileId()};
+  const storeName = cloudState.store?.name ?? '銀座店';
+  try {
+    const pdf = await import('./payroll-pdf.mjs');
+    const batch = type === 'batch';
+    const file = batch ? await pdf.createPayrollZip(source.map(staffPayrollPrintRecord),storeName)
+      : await pdf.createStaffPayrollRangePdf(source,storeName);
+    if (isDeviceLocked() || modal !== origin.modal || !dialog.open || page !== 'staff-payroll' || cloudState.store?.id !== origin.storeId
+      || cloudState.user?.uid !== origin.uid || currentRole() !== origin.role || currentProfileId() !== origin.profileId
+      || !staffPayrollGrants().viewPayslips || (selection.viewRates && !staffPayrollGrants().viewRates)) return;
+    if (batch) downloadFile('従業員の支給明細.zip',file,'application/zip');
+    else downloadFile(`従業員の給与参考明細_${source.start}_${source.end}.pdf`,file,'application/pdf');
+    dialog.close();
+  } catch (error) { showError(error.message); }
+}
+
 function printDailyPayReceipt(source, record) {
-  printMarkup(renderDailyPayReceipt(record,getPrintSettings(source),{escape,yen,storeName:cloudState.store?.name ?? '銀座店'}));
+  const settings = getPrintSettings(source);
+  const html = renderDailyPayReceipt(record,settings,{escape,yen,storeName:cloudState.store?.name ?? '銀座店'});
+  void printThermalReceipt(html,settings.width);
+}
+
+function receiptPrinterScope() { return cloudState.store?.id ?? 'demo'; }
+
+function localReceiptPrinter() { return readReceiptPrinter(localStorage,receiptPrinterScope()); }
+
+function receiptPrinterHandoff(link) {
+  return `<p class="field-help">プリンターの登録と印刷結果はEpson TM Print Assistantで確認できます。</p>
+    <a class="btn btn-primary" href="${escape(link)}">Epson TM Print Assistantを開く</a>`;
+}
+
+async function printThermalReceipt(html,width,settings = localReceiptPrinter(),{test = false} = {}) {
+  if (isDeviceLocked()) return;
+  if (settings.mode === 'browser') { printMarkup(html); return; }
+  const scope = receiptPrinterScope();
+  const active = modal;
+  try {
+    const template = document.createElement('template');
+    template.innerHTML = html;
+    const data = makeEposReceipt(eposReceiptDocuments(template.content),width);
+    if (settings.mode === 'epson-assistant') {
+      const link = epsonAssistantLink(data);
+      if (test && dialog.open && modal === active) {
+        dialog.querySelector('[data-receipt-printer-test-link]')?.remove();
+        dialog.querySelector('[data-action=receipt-printer-test]')?.insertAdjacentHTML('afterend',
+          `<div data-receipt-printer-test-link>${receiptPrinterHandoff(link)}</div>`);
+        dialog.querySelector('[data-receipt-printer-test-link] a')?.focus();
+      } else {
+        await Promise.resolve();
+        if (scope === receiptPrinterScope() && !isDeviceLocked()) openDialog('receipt-printer-handoff',{link,html});
+      }
+      return;
+    }
+    await sendEposLan(settings,data);
+    if (scope === receiptPrinterScope() && !isDeviceLocked()) toast('プリンターから印刷完了の応答がありました。');
+  } catch (error) {
+    if (scope !== receiptPrinterScope() || isDeviceLocked()) return;
+    if (test && dialog.open && modal === active) showError(error.message);
+    else toast(error.message,{error:true});
+  }
 }
 
 function printMarkup(html) {
@@ -2908,7 +3038,8 @@ async function issuePrintDocument(options) {
   const entry = ticket && getPrintDocuments(next,ticket,date,kind).at(-1);
   if (!entry) return;
   const issuedOptions = {...options,printRecipient:entry.recipient ?? recipient,printPurpose:entry.purpose ?? purpose};
-  printMarkup(renderPrintPreview(printData(next,ticket,issuedOptions,entry),{escape,yen}));
+  const document = printData(next,ticket,issuedOptions,entry);
+  void printThermalReceipt(renderPrintPreview(document,{escape,yen}),document.settings.width);
 }
 
 async function settleAndPrint(command) {
@@ -2957,7 +3088,7 @@ function renderCashMovementForm(entry) {
 
 function renderRegisterClose(totals, archived) {
   const rows = archived ? [] : [
-    ['釣銭準備金',state.day.openingCash], ['会計・前受金の現金入金',totals.payments.cash],
+    ['釣銭準備金',totals.openingCash ?? state.day.openingCash], ['会計・前受金の現金入金',totals.payments.cash],
     ['その他の現金入金',totals.cashIn + totals.recoveries.cash],
     ['出金・経費',-totals.cashOut],
   ];
@@ -3301,12 +3432,13 @@ function renderCalculationSettings() {
     <input type="checkbox" role="switch" name="${key}"${settings[key] ? ' checked' : ''}></label>`;
   return `<div class="form-grid">
     ${label('サービス料率（%）',`<input type="number" name="serviceRate" min="0" max="100" step="0.01" value="${settings.serviceRateBps / 100}" required inputmode="decimal">`)}
-    ${label('メニュー価格',choices('priceMode',{exclusive:'税抜価格',inclusive:'税込価格'}))}
+    ${label('メニュー価格と消費税',choices('priceMode',{exclusive:'税抜価格',inclusive:'税込価格',serviceInclusive:'消費税をサービス料に含める'}))}
     ${label('サービス料の計算基準',choices('serviceBase',{afterDiscount:'値引き後の小計',beforeDiscount:'値引き前の小計'}))}
     ${label('サービス料の端数',choices('serviceRounding',rounding))}
     ${label('サービス料の丸め単位',choices('serviceRoundingUnit',Object.fromEntries(serviceRoundingUnits.map((unit) => [unit,`${unit}円`])),settings.serviceRoundingUnit ?? 1))}
     ${label('消費税の端数',choices('taxRounding',rounding))}
-    </div><p class="field-help">計算設定は新しく登録する来店に適用します。税込価格に切り替えると、登録済みのメニュー単価を税込として扱います。</p>
+    ${label('値引きの個人売上への既定の反映',choices('personalSalesDiscountMode',personalSalesDiscountModes,settings.personalSalesDiscountMode ?? 'reflect'))}
+    </div><p class="field-help">税・サービス料の計算は新規来店に適用します。「消費税をサービス料に含める」では小計とサービス料の合計から消費税を内訳として計算します。</p>
     ${toggle('allowOrderServiceExclusion','注文明細ごとのサービス料除外を許可する')}
     ${toggle('allowOrderTaxOverride','注文明細ごとの消費税率変更を許可する')}
     ${toggle('allowOrderLineDiscount','注文明細ごとの値引きを許可する')}
@@ -3512,7 +3644,8 @@ function modalFromAction(target) {
   const {action,id} = target.dataset;
   if (['customer-new','customer-import'].includes(action)) openDialog(action);
   if (['customer-detail','customer-edit','customer-merge','customer-link'].includes(action)) openDialog(action,{customerId:id});
-  if (['move','extend','deposit','discount','depart','receipt','seat-history','cancel-settlement','reopen-ticket','personal-sales-adjustment'].includes(action)) openDialog(action,{ticketId:id});
+  if (['move','extend','deposit','discount','depart','receipt','seat-history','cancel-settlement','personal-sales-adjustment'].includes(action)) openDialog(action,{ticketId:id});
+  if (action === 'reopen-ticket') openDialog(action,{ticketId:id,cancellationId:target.dataset.cancellationId});
   if (action === 'extend-overdue' && state.bulkExtensionEnabled !== false && state.tickets.some((ticket) => ticket.id === id && ticket.status === 'open')) {
     openDialog(action,{ticketId:id});
   }
@@ -3655,6 +3788,20 @@ function clickAction(target) {
   if (['ops-settings','print-settings','ops-notices','set-schedule','calculation-settings','role-policy'].includes(action)) { openDialog(action); return; }
   if (action === 'print-test' && modal?.type === 'print-settings' && permittedAction('print-settings')) {
     printMarkup(renderPrintTest(dialog.querySelector('[name=printWidth]').value));
+    return;
+  }
+  if (action === 'receipt-printer-test' && modal?.type === 'print-settings' && permittedAction('print-settings')) {
+    try {
+      const data = new FormData(dialog.querySelector('form'));
+      const width = Number(data.get('printWidth'));
+      target.disabled = true;
+      void printThermalReceipt(renderPrintTest(width),width,receiptPrinterFromForm(data),{test:true})
+        .finally(() => { target.disabled = false; });
+    } catch (error) { target.disabled = false; showError(error.message); }
+    return;
+  }
+  if (action === 'receipt-printer-browser' && modal?.type === 'receipt-printer-handoff') {
+    printMarkup(modal.html);
     return;
   }
   if (modal?.type === 'role-policy' && ['role-custom-add','role-custom-remove'].includes(action)) {
@@ -3882,14 +4029,44 @@ function clickAction(target) {
       }
       return;
     }
-    if (page === 'staff-payroll-own' && ['staff-payroll-own-print','staff-payroll-own-pdf'].includes(action)) {
-      const record = ownStaffPayroll()?.records.find(({month}) => month === id);
-      if (record) void outputStaffPayroll(record,action.endsWith('-pdf'));
+    if (page === 'staff-payroll-own') {
+      const own = ownStaffPayroll();
+      if (!own) return;
+      if (['staff-payroll-own-clock-in','staff-payroll-own-clock-out'].includes(action)) openDialog(action);
+      else {
+        const record = own.records.find(({month}) => month === id);
+        if (record && action === 'staff-payroll-own-notice') readPayrollNotice(ownPayrollNoticeKey(own),id,`staff-payslip-${id}`);
+        else if (record) void outputStaffPayroll(record,action.endsWith('-pdf'));
+      }
       return;
     }
     if (page === 'staff-payroll') {
       const selection = managedStaffPayroll();
+      if (action === 'staff-payroll-managed-batch') {
+        if (selection.model) openDialog(action,{staffPayrollSelection:selection});
+        return;
+      }
       if (!selection.person) return;
+      if (['staff-payroll-templates','staff-payroll-range'].includes(action)) {
+        openDialog(action,{staffPayrollSelection:selection});
+        return;
+      }
+      if (action === 'staff-payroll-template-editor' && modal?.type === 'staff-payroll-templates'
+        && (!id || getPayrollTemplates(state).some((template) => template.id === id))) {
+        openDialog('payroll-template-editor',{templateId:id || undefined});
+        return;
+      }
+      if (['staff-payroll-range-print','staff-payroll-range-pdf'].includes(action) && modal?.type === 'staff-payroll-range' && modal.result) {
+        try {
+          const data = new FormData(dialog.querySelector('form'));
+          const {start,end} = modal.result;
+          if (data.get('staffPayrollStart') !== start || data.get('staffPayrollEnd') !== end) throw new Error('日付を変更した後に集計してください。');
+          const result = previewStaffPayrollRange(state,modal.range);
+          if (action.endsWith('-print')) printWorkspace(renderStaffPayrollRangePrint(result,{escape,yen,storeName:cloudState.store?.name ?? '銀座店'}));
+          else void outputStaffPayrollReport('range',result,selection);
+        } catch (error) { showError(error.message); }
+        return;
+      }
       const record = findManagedPayrollRecord(state,selection.model,selection.person,selection.month,selection.admin);
       if (['staff-payroll-managed-print','staff-payroll-managed-pdf'].includes(action) && record?.status !== 'draft' && record?.snapshot) {
         void outputStaffPayroll(record,action.endsWith('-pdf'));
@@ -3906,7 +4083,7 @@ function clickAction(target) {
     const model = currentCastWorkspace();
     if (!model) return;
     if (action === 'cast-payroll-notice' && model.payroll.finals.some(({month})=>month === id)) {
-      readCastPayrollNotice(model,id);
+      readPayrollNotice(castPayrollNoticeKey(model),id,`cast-payslip-${id}`);
     } else if (action === 'cast-payslip-print') {
       const snapshot = model.payroll.finals.find(({month})=>month === id);
       if (snapshot) printWorkspace(payrollUI.renderPayrollPrint({month:id,snapshot},{escape,yen,storeName:cloudState.store?.name ?? '銀座店'}));
@@ -3987,9 +4164,11 @@ function clickAction(target) {
     printWorkspace(renderAnalytics(page,state,{escape,icon,yen,range:analyticsRange,print:true,laborReport}));
     return;
   }
-  if (action === 'team-performance-csv' && page === 'team-performance' && canOpenPage(page)) {
-    const csv = buildTeamPerformanceCsv(state,teamRange,teamRole);
-    if (csv) downloadFile(`np-pos-staff-${teamRange.end || state.day.date}.csv`,csv,'text/csv;charset=utf-8');
+  if (['team-performance-csv','team-performance-tsv'].includes(action) && page === 'team-performance' && canOpenPage(page)) {
+    const format = action.slice(-3);
+    const data = buildTeamPerformanceCsv(state,teamRange,teamRole,{format});
+    const mime = format === 'tsv' ? 'text/tab-separated-values' : 'text/csv';
+    if (data) downloadFile(`np-pos-staff-${teamRange.end || state.day.date}.${format}`,data,`${mime};charset=utf-8`);
     return;
   }
   if (action === 'team-performance-print' && page === 'team-performance' && canOpenPage(page)) {
@@ -4153,9 +4332,11 @@ function clickAction(target) {
       if (!result.period.valid || !result.period.days.length) return;
       if (id === 'print') printWorkspace(renderReport('commission',state,{escape,icon,yen,commissionCast,commissionPeriod,print:true,
         canViewCommissionCost:currentRoleAllows('inventory'),storeName:cloudState.store?.name ?? '銀座店'}));
-      else if (['summary','details'].includes(id)) {
-        const csv = buildCommissionCsv(result,id,{showCost:currentRoleAllows('inventory')});
-        downloadFile(`np-pos-commission-${id}-${result.period.start}_${result.period.end}.csv`,csv,'text/csv;charset=utf-8');
+      else if (['summary','details','summary-tsv','details-tsv'].includes(id)) {
+        const [kind,format = 'csv'] = id.split('-');
+        const data = buildCommissionCsv(result,kind,{showCost:currentRoleAllows('inventory'),format});
+        const mime = format === 'tsv' ? 'text/tab-separated-values' : 'text/csv';
+        downloadFile(`np-pos-commission-${kind}-${result.period.start}_${result.period.end}.${format}`,data,`${mime};charset=utf-8`);
       }
       return;
     }
@@ -4465,6 +4646,12 @@ function submitDialog(form) {
       commit({type:'saveStaffRate',personId:modal.staffPersonId,effectiveDate:value('staffRateDate'),hourlyRate:numeric('staffHourlyRate')},
         '時給を保存しました。');
       break;
+    case 'staff-payroll-own-clock-in':
+      commit({type:'staffClockIn'},'出勤を記録しました。');
+      break;
+    case 'staff-payroll-own-clock-out':
+      commit({type:'staffClockOut'},'退勤を記録しました。');
+      break;
     case 'staff-payroll-draft': {
       const {person,month} = modal.staffPayrollSelection;
       commit({type:'saveStaffPayrollDraft',personId:person.id,month,allowances:readStaffPayrollAdjustments(data,'allowance'),
@@ -4474,6 +4661,30 @@ function submitDialog(form) {
     case 'staff-payroll-finalize': {
       const {personId,month,net:expectedNet} = modal.staffPayrollPreview;
       commit({type:'finalizeStaffPayroll',personId,month,expectedNet},'従業員給与を確定し、支給明細を保存しました。');
+      break;
+    }
+    case 'staff-payroll-templates': {
+      const {person} = modal.staffPayrollSelection;
+      commit({type:'assignStaffPayrollTemplate',personId:person.id,templateId:value('staffPayrollTemplate') || null},
+        '従業員の計算テンプレートを更新しました。');
+      break;
+    }
+    case 'staff-payroll-range': {
+      const {person} = modal.staffPayrollSelection;
+      const range = {personId:person.id,start:value('staffPayrollStart'),end:value('staffPayrollEnd')};
+      const result = previewStaffPayrollRange(state,range);
+      Object.assign(modal,{range,result});
+      paintDialog();
+      break;
+    }
+    case 'staff-payroll-managed-batch': {
+      const selection = managedStaffPayroll();
+      const start = value('staffPayrollStart'), end = value('staffPayrollEnd'), personId = value('staffPayrollPerson');
+      if (!isPayrollMonth(start) || !isPayrollMonth(end) || start > end) throw new Error('出力する期間を確認してください。');
+      const records = selection.model?.records.filter((row) => row.month >= start && row.month <= end && (!personId || row.personId === personId)) ?? [];
+      if (!records.length) throw new Error('指定した期間に確定済みの支給明細がありません。');
+      if (records.length > 60) throw new Error('一度に60件まで出力できます。期間や勤務者を絞り込んでください。');
+      void outputStaffPayrollReport('batch',records,selection);
       break;
     }
     case 'staff-payroll-rate': {
@@ -4739,6 +4950,7 @@ function submitDialog(form) {
         return unit ? [[key,{unit,mode:value(`allocationMode-${key}`)}]] : [];
       }));
       commit({type:'saveCalculationSettings',settings:{serviceRateBps:Math.round(numeric('serviceRate')*100),priceMode:value('priceMode'),
+        personalSalesDiscountMode:value('personalSalesDiscountMode'),
         serviceBase:value('serviceBase'),serviceRounding:value('serviceRounding'),taxRounding:value('taxRounding'),
         serviceRoundingUnit:Number(value('serviceRoundingUnit')),castAllocation,
         allowOrderServiceExclusion:data.has('allowOrderServiceExclusion'),allowOrderTaxOverride:data.has('allowOrderTaxOverride'),
@@ -4775,6 +4987,8 @@ function submitDialog(form) {
       }
       break;
     case 'print-settings': {
+      const printer = receiptPrinterFromForm(data);
+      const scope = receiptPrinterScope();
       const autoPrintKind = value('printAutoKind');
       const documents = Object.fromEntries(Object.keys(printDocumentTitles).map((kind)=>[kind,{
         grouping:value(`printGrouping-${kind}`),items:value(`printItems-${kind}`),
@@ -4783,12 +4997,27 @@ function submitDialog(form) {
       commit({type:'savePrintSettings',settings:{width:numeric('printWidth'),storeName:value('printStoreName'),
         address:value('printAddress'),phone:value('printPhone'),registrationNumber:value('printRegistrationNumber'),
         showItems:data.has('printShowItems'),autoReceipt:autoPrintKind === 'receipt',autoPrintKind,
-        invoiceDate:value('printInvoiceDate'),invoicePurpose:value('printInvoicePurpose'),documents}},'印刷設定を保存しました。');
+        invoiceDate:value('printInvoiceDate'),invoicePurpose:value('printInvoicePurpose'),documents}},'印刷設定を保存しました。')
+        .then((saved) => {
+          if (!saved || scope !== receiptPrinterScope()) return;
+          try { saveReceiptPrinter(localStorage,scope,printer); }
+          catch { toast('この端末にプリンターの接続先を保存できませんでした。',{error:true}); }
+        });
       break;
     }
     case 'accounting-settings':
       commit({type:'saveAccountingCsv',mode:modal.csvMode,settings:readAccountingCsvEditor(form)},'会計CSVの設定を保存しました。');
       break;
+    case 'freee-expenses': {
+      if (page !== 'reports' || !canOpenPage('reports')) break;
+      const period = getReportPeriod(state,modal.interval);
+      const choices = readFreeeExpenseFields(modal.expenses,data);
+      const {csv,journalCount} = buildFreeeExpenseCsv(period,choices,{storeName:cloudState.store?.name ?? '銀座店',storeId:cloudState.store?.id});
+      downloadFile(`np-pos-freee-expenses-${modal.suffix}.csv`,csv,'text/csv;charset=utf-8');
+      dialog.close();
+      toast(`経費仕訳${journalCount}件を保存しました。`);
+      break;
+    }
     case 'line-notifications':
       void handleLineSettings('line-notifications-save',form);
       break;
@@ -4812,7 +5041,7 @@ function submitDialog(form) {
         showError('伝票の内容が更新されました。最新の見積もりを確認してから印刷してください。');
         break;
       }
-      printMarkup(preview);
+      void printThermalReceipt(preview,modal.printWidth);
       break;
     }
     case 'settle': {
@@ -4826,16 +5055,19 @@ function submitDialog(form) {
     case 'depart':
       commit({type:'depart',ticketId:id},'退店を記録し、使用卓を解放しました。',()=>{selected=null;mobileDetails=false;});
       break;
-    case 'cancel-settlement':
-      commit({type:'cancelSettlement',ticketId:id,reason:value('reason')},'会計を取り消しました。',()=>{
-        selected = null; mobileDetails = false; reportDate = ''; page = 'reports';
+    case 'cancel-settlement': {
+      const originalDate = modal.cancelSettlementDate;
+      commit({type:'cancelSettlement',ticketId:id,expectedRevision:modal.cancelSettlementRevision,
+        expectedPaymentsCorrectedAt:modal.cancelPaymentRevision,reason:value('reason')},'会計を取り消しました。',()=>{
+        selected = null; mobileDetails = false; reportDate = originalDate ?? ''; page = 'reports';
         reportInterval.mode = 'day'; reportExportError = '';
         history.replaceState(null,'','#reports'); window.scrollTo(0,0);
       });
       break;
+    }
     case 'reopen-ticket': {
       const tableIds = data.getAll('tableIds');
-      commit({type:'reopenTicket',ticketId:id,tableIds,reason:value('reason')},'伝票を再オープンしました。',()=>{
+      commit({type:'reopenTicket',ticketId:id,tableIds,cancellationId:modal.cancellationId,reason:value('reason')},'伝票を再オープンしました。',()=>{
         page = 'floor'; history.replaceState(null,'','#floor'); revealTable(tableIds[0]);
         area = null; filter = 'all'; mobileDetails = true; window.scrollTo(0,0);
       });
