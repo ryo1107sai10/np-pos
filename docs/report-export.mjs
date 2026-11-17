@@ -1,4 +1,5 @@
 import { encodeCsv } from './csv-file.mjs';
+import { cashDenominations } from './register-cash.mjs';
 
 const methods = [['cash','現金'], ['card','カード'], ['qr','QR決済']];
 const columns = [
@@ -24,4 +25,23 @@ export function buildDailyReportCsv(period, storeName) {
     current.dailyPayTotals?.cash ?? 0, current.dailyPayTotals?.bank ?? 0,
   ]);
   return encodeCsv([columns, ...rows]);
+}
+
+const registerColumns = ['営業日','店舗名','開店日時（日本時間）','閉店日時（日本時間）','釣銭準備金',
+  'レジ理論残高','レジ実残高','差額','差額理由','金種の記録',...cashDenominations.map((value) => `${value}円の枚数`)];
+const registerTime = new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Tokyo',year:'numeric',month:'2-digit',
+  day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'});
+
+function registerTimestamp(timestamp) {
+  return Number.isFinite(timestamp) && Number.isFinite(new Date(timestamp).getTime()) ? registerTime.format(timestamp) : '';
+}
+
+export function buildRegisterCloseCsv(period, storeName) {
+  const entries = period.days.flatMap(({closed}) => closed ? [closed] : []);
+  return encodeCsv([registerColumns, ...entries.map((entry) => {
+    const counts = entry.cashDenominations;
+    return [entry.date,storeName,registerTimestamp(entry.openedAt),registerTimestamp(entry.closedAt),entry.openingCash,
+      entry.expectedCash,entry.actualCash,entry.discrepancy,entry.reason,counts ? '記録あり' : '未記録',
+      ...cashDenominations.map((value) => counts ? counts[value] ?? 0 : undefined)];
+  })]);
 }

@@ -1,7 +1,8 @@
 import { cashMovementCategories, cashMovementKinds, getCashMovement } from './cash-ledger.mjs';
 import { cashAccounts, vaultBalance } from './cash-accounts.mjs';
 import { cashDenominations } from './register-cash.mjs';
-import { businessDate, getTicketCommissionDetails, getTicketTableLabels } from './engine.mjs';
+import { businessDate, getTicketTableLabels } from './engine.mjs';
+import { getCommissionReport } from './commission-report.mjs';
 import { operationBusinessDate, registerCutoff } from './register-config.mjs';
 import { getInventoryCostSummary, purchaseCancellationBlocker } from './inventory-operations.mjs';
 import { getReportPeriod } from './report-period.mjs';
@@ -103,10 +104,10 @@ function reportPeriod(state, {reportDate}) {
     legacy: Boolean(closed && date !== state.day.date && !closed.ticketSnapshots && closed.tickets) };
 }
 
-function dayPicker(state, date, {escape, icon}) {
+function dayPicker(state, date, {escape, icon}, commission = false) {
   const past = state.closedDays.filter((entry) => entry.date !== state.day.date);
   return `<div class="lr-day-picker"><label for="report-day">${icon('calendar', 17)}営業日</label>
-    <select id="report-day" data-report-date>
+    <select id="report-day" ${commission ? 'data-commission-field="date"' : 'data-report-date'}>
       <option value=""${date === state.day.date ? ' selected' : ''}>${escape(state.day.date)}（最新）</option>
       ${past.map((entry) => `<option value="${escape(entry.date)}"${date === entry.date ? ' selected' : ''}>${escape(entry.date)}</option>`).join('')}
     </select></div>`;
@@ -117,32 +118,38 @@ function receiptLink(ticket, date, {escape, icon}) {
     aria-label="会計内容 No. ${escape(ticket.number || ticket.id)}">${escape(ticket.number || ticket.id)}${icon('chevron-right', 14)}</button>`;
 }
 
-function renderCommission(state, api, period, result) {
-  const {yen, escape} = api;
-  const earned = result.commission ?? [];
-  const pending = result.pendingCommission ?? [];
-  const earnedByCast = new Map(earned.map((item) => [item.castId, item]));
-  const pendingByCast = new Map(pending.map((item) => [item.castId, item]));
-  const names = new Map([...(state.archivedCast ?? []), ...state.cast].map(({id, name}) => [id, name]));
-  const details = period.state.tickets
-    .filter(({status}) => ['open', 'paid', 'departed'].includes(status))
-    .sort((a, b) => asNumber(b.settledAt ?? b.createdAt) - asNumber(a.settledAt ?? a.createdAt))
-    .flatMap((ticket) => getTicketCommissionDetails(period.state, ticket.id).map((entry) => ({ ticket, entry })));
-  const historicalNames = new Map();
-  for (const {entry} of details) {
-    if (entry.castName && !historicalNames.has(entry.castId)) historicalNames.set(entry.castId, entry.castName);
-  }
-  const castName = (id) => (period.closed ? historicalNames.get(id) : names.get(id))
-    ?? names.get(id) ?? historicalNames.get(id) ?? id;
-  const activeCastIds = period.closed ? [] : state.cast.filter((person) => person.enabled !== false).map(({id}) => id);
-  const ids = new Set([...activeCastIds, ...earnedByCast.keys(), ...pendingByCast.keys()]);
-  const selected = ids.has(api.commissionCast) ? api.commissionCast : null;
-  const castRows = [...ids].map((id) => {
-    const name = castName(id);
-    const final = earnedByCast.get(id) ?? {};
-    const estimate = pendingByCast.get(id) ?? {};
-    return `<tr><td><button type="button" class="lr-person lr-link lr-cast-filter" data-action="commission-cast" data-id="${escape(id)}"
-      aria-label="${escape(name)}の明細" aria-pressed="${id === selected}"><span class="lr-avatar" aria-hidden="true">${escape(Array.from(name).at(0) ?? '')}</span>${escape(name)}</button></td>
+function commissionControls(state, filters, report, api) {
+  const {escape,icon} = api;
+  const {period,details,roster} = report;
+  const month = state.day.date.slice(0,7);
+  const dateInput = (key,label,type,defaultValue) => `<label class="lr-period-field"><span>${label}</span>
+    <input type="${type}" data-commission-field="${key}" value="${escape(filters[key] ?? defaultValue)}"></label>`;
+  const periodFields = period.mode === 'day' ? dayPicker(state,period.start,api,true) : period.mode === 'month'
+    ? dateInput('month','対象月','month',month)
+    : dateInput('start','開始日','date',`${month}-01`) + dateInput('end','終了日','date',state.day.date);
+  const outputButton = (id,label,glyph,enabled) => `<button type="button" class="btn btn-secondary" data-action="commission-export" data-id="${id}"${enabled ? '' : ' disabled'}>${icon(glyph,16)}${label}</button>`;
+  return `<section class="lr-period-tools" aria-label="歩合の集計期間と出力"><div class="lr-period-controls">
+    <div class="lr-period-modes" role="group" aria-label="歩合の集計期間">${[['day','日別'],['month','月別'],['range','任意期間']].map(([id,label]) =>
+      `<button type="button" data-action="commission-period" data-id="${id}" aria-pressed="${period.mode === id}">${label}</button>`).join('')}</div>
+    <div class="lr-period-dates">${periodFields}</div></div><div class="lr-period-exports">
+    ${outputButton('summary','成績CSV','download',roster.length)}
+    ${outputButton('details','明細CSV','download',details.length)}
+    ${outputButton('print','A4で印刷','printer',roster.length)}</div></section>`;
+}
+
+function renderCommission(state, api) {
+  const {yen,escape,print = false} = api;
+  const filters = api.commissionPeriod ?? {mode:'day',date:api.reportDate};
+  const report = getCommissionReport(state,filters,api.commissionCast);
+  const {period,roster,earned,pending,details,selected,selectedName,includesOpenDay,hasMissingDetails} = report;
+  const {start,end} = period;
+  const periodLabel = start === end ? escape(start) : `${escape(start)} 〜 ${escape(end)}`;
+  const controls = print ? `<h1>歩合・成績</h1><p>営業日 ${periodLabel}${selectedName ? ` · ${escape(selectedName)}` : ''}</p>` : commissionControls(state,filters,report,api);
+  if (!period.valid || !period.days.length) return `<div class="lr-view">${controls}<p class="notice" role="status">${escape(period.error || 'この期間の営業データはありません。')}</p></div>`;
+  const castRows = roster.filter(({id}) => !print || !selected || id === selected).map(({id,name,final = {},estimate = {}}) => {
+    const castLabel = print ? escape(name) : `<button type="button" class="lr-person lr-link lr-cast-filter" data-action="commission-cast" data-id="${escape(id)}"
+      aria-label="${escape(name)}の明細" aria-pressed="${id === selected}"><span class="lr-avatar" aria-hidden="true">${escape(Array.from(name).at(0) ?? '')}</span>${escape(name)}</button>`;
+    return `<tr><td>${castLabel}</td>
       <td class="lr-numeric">${yen(asNumber(final.sales))}</td><td class="lr-numeric"><strong class="${final.amount ? 'lr-positive' : 'lr-quiet-value'}">${yen(asNumber(final.amount))}</strong></td>
       <td class="lr-numeric ${estimate.amount ? 'lr-estimate' : 'lr-quiet-value'}">${yen(asNumber(estimate.amount))}</td><td class="lr-numeric">${number.format(asNumber(final.points))}<span class="lr-unit"> pt</span></td></tr>`;
   });
@@ -150,22 +157,25 @@ function renderCommission(state, api, period, result) {
     { name: '確定歩合の明細', pending: false, empty: '会計を確定すると、対象の注文明細がここに表示されます。' },
     { name: '見込み歩合の明細', pending: true, empty: '未会計の注文にキャストを割り当てると、見込み歩合が表示されます。' },
   ];
-  const detailPanels = detailSets.filter((set) => !set.pending || !period.closed).map((set) => {
+  const detailPanels = detailSets.filter((set) => !set.pending || includesOpenDay).map((set) => {
     const rows = details
-      .filter(({ticket, entry}) => (ticket.status === 'open') === set.pending && (!selected || selected === entry.castId))
-      .map(({ticket, entry}) => `<tr><td>${set.pending ? ticketLink(ticket, api) : receiptLink(ticket, period.date, api)}</td>
-        <td><strong>${escape(entry.name)}</strong>${entry.adjustmentReason ? `<span class="lr-row-note">${escape(entry.adjustmentReason)}</span>` : ''}</td><td>${escape(entry.castName ?? castName(entry.castId))}</td>
-        <td class="lr-muted">${timeLabel(set.pending ? (entry.createdAt ?? ticket.createdAt) : ticket.settledAt)}</td>
+      .filter(({isPending}) => isPending === set.pending)
+      .map(({date,ticket,entry,at,name}) => `<tr><td>${print ? escape(ticket.number ?? ticket.id) : set.pending ? ticketLink(ticket, api) : receiptLink(ticket, date, api)}</td>
+        <td><strong>${escape(entry.name)}</strong>${entry.adjustmentReason ? `<span class="lr-row-note">${escape(entry.adjustmentReason)}</span>` : ''}</td><td>${escape(name)}</td>
+        <td class="lr-muted">${period.mode === 'day' ? '' : `${escape(date)} `}${timeLabel(at)}</td>
         <td class="lr-numeric"><span class="lr-mobile-label" aria-hidden="true">個人売上</span>${yen(entry.sales)}</td>
         <td class="lr-numeric"><span class="lr-mobile-label" aria-hidden="true">歩合</span><strong class="${set.pending ? 'lr-estimate' : 'lr-positive'}">${yen(entry.amount)}</strong>
         <span class="lr-unit"> · ${number.format(entry.points)} pt</span></td></tr>`);
-    return panel(set.name, rows.length ? table(api, ['伝票', '注文明細', 'キャスト', set.pending ? '注文時刻' : '会計時刻', '個人売上', '歩合'],
+    return panel(set.name, rows.length ? table(api, ['伝票', '注文明細', 'キャスト', period.mode !== 'day' ? '営業日・時刻' : set.pending ? '注文時刻' : '会計時刻', '個人売上', '歩合'],
       rows, 'lr-payment-table lr-commission-detail') : empty(api, 'ticket', '該当する明細はありません',
-      period.legacy ? 'この営業日の保存済み歩合はキャスト別成績で確認できます。' : set.empty), panelCount(rows.length, '件'));
+      set.empty), panelCount(rows.length, '件'));
   }).join('');
-  const selectedControl = selected ? `<div class="lr-commission-filter"><strong>${escape(castName(selected))}の明細</strong>
+  const selectedControl = !print && selected ? `<div class="lr-commission-filter"><strong>${escape(selectedName)}の明細</strong>
     <button type="button" class="btn btn-secondary" data-action="commission-cast" data-id="">すべてのキャスト</button></div>` : '';
-  return `<div class="lr-view lr-commission">${dayPicker(state, period.date, api)}${commissionOverview(api, earned, pending)}
+  const overview = !print ? commissionOverview(api,earned,pending) : selected ? ''
+    : `<p>確定歩合 ${yen(total(earned,'amount'))} · 見込み歩合 ${yen(total(pending,'amount'))}</p>`;
+  return `<div class="lr-view lr-commission">${controls}${!print && period.mode !== 'day' ? `<p class="lr-period-caption">${periodLabel}</p>` : ''}${overview}
+    ${hasMissingDetails ? '<p class="notice">会計明細が保存されていない営業日を含みます。保存済み歩合はキャスト別成績で確認できます。</p>' : ''}
     ${panel('キャスト別成績', castRows.length
       ? table(api, ['キャスト', '個人売上', '確定歩合', '見込み歩合', '確定ポイント'], castRows, 'lr-commission-roster')
       : empty(api, 'users', '該当する成績はありません', 'キャストの歩合が計上された営業日を選べます。'), panelCount(castRows.length, '名'))}
@@ -264,6 +274,11 @@ function moneyRows(values, {yen}) {
     `<div><dt>${label}</dt><dd>${amount == null ? '—' : signedYen(asNumber(amount),yen)}</dd></div>`).join('')}</dl>`;
 }
 
+function registerAuditButton(date, api) {
+  return api.canAuditRegister ? `<button type="button" class="btn" data-action="audit-log" data-register-audit="true"
+    data-id="${api.escape(date)}">締めの操作履歴</button>` : '';
+}
+
 function describeClosing(period, current, api) {
   const {icon, yen, escape} = api;
   const close = period.closed;
@@ -282,7 +297,9 @@ function describeClosing(period, current, api) {
     </dl>${close?.reason ? `<p class="lr-report-note"><strong>差額理由</strong> ${escape(close.reason)}</p>` : ''}
     ${countDetails ? `<details class="lr-cash-count"><summary>金種別の内訳</summary>${countRows
       ? `<dl class="lr-money-list">${countRows}</dl>` : '<p>現金なし</p>'}</details>` : ''}
-    ${close && api.canCorrectRegister ? `<button type="button" class="btn" data-action="correct-register-count" data-id="${escape(close.date)}">実残高を訂正</button>` : ''}</section>`;
+    ${close && (api.canCorrectRegister || api.canAuditRegister) ? `<div class="ops-actions">
+      ${api.canCorrectRegister ? `<button type="button" class="btn" data-action="correct-register-count" data-id="${escape(close.date)}">実残高を訂正</button>` : ''}
+      ${registerAuditButton(close.date,api)}</div>` : ''}</section>`;
 }
 
 function registerBreakdown(state, period, current, api) {
@@ -372,7 +389,9 @@ function renderDaily(state, api, period, current, controls) {
        <strong>${dateLabel(entry.date)}</strong><span class="lr-muted lr-day-time">${timeLabel(entry.openedAt)} – ${timeLabel(entry.closedAt)}</span>
        <strong class="lr-day-sales">${yen(entry.sales)}</strong><span class="lr-day-chevron" aria-hidden="true">${icon('chevron-down', 17)}</span></summary>
        <div class="lr-day-details">${moneyRows([['釣銭準備金', entry.openingCash], ['理論残高', entry.expectedCash], ['実残高', entry.actualCash], ['差額', entry.discrepancy]], api)}
-       ${entry.reason ? `<p class="lr-day-note">差額理由　${escape(entry.reason)}</p>` : ''}</div></details>`).join('');
+       ${entry.reason ? `<p class="lr-day-note">差額理由　${escape(entry.reason)}</p>` : ''}
+       <div class="ops-actions"><button type="button" class="btn" data-action="report-day" data-id="${escape(entry.date)}"
+         aria-label="${escape(entry.date)}の日報を表示">日報を表示</button>${registerAuditButton(entry.date,api)}</div></div></details>`).join('');
   const receiptRows = settled.slice().sort((a, b) => asNumber(b.settledAt) - asNumber(a.settledAt)).map((ticket) => {
     const amount = typeof api.quote === 'function' ? api.quote(period.state, ticket.id).total : 0;
     const seats = getTicketTableLabels(state, ticket).join('・');
@@ -430,6 +449,7 @@ function renderReportControls(state, interval, period, api) {
   const needsDetails = salesDays.some(({ticketDataComplete}) => !ticketDataComplete);
   const canExportSales = period.valid && salesDays.length > 0 && !needsDetails;
   const canExportReport = period.valid && period.days.length > 0;
+  const canExportRegister = period.valid && period.days.some(({closed}) => closed);
   const exportButton = (id, label, enabled) => `<button type="button" class="btn btn-secondary" data-action="report-export"
     data-id="${id}"${enabled ? '' : ' disabled'}>${icon('download',16)}${label}</button>`;
   return `<section class="lr-period-tools" aria-label="日報の期間とCSV出力">
@@ -441,7 +461,10 @@ function renderReportControls(state, interval, period, api) {
       ${reportDateFields(state, interval, period, api)}
     </div>
     <div class="lr-period-exports">
-      ${exportButton('report','日報CSV',canExportReport)}
+      <div class="lr-period-freee" role="group" aria-label="日報と閉店のCSV">
+        ${exportButton('report','日報CSV',canExportReport)}
+        ${exportButton('register','レジ締めCSV',canExportRegister)}
+      </div>
       <div class="lr-period-freee" role="group" aria-label="freee向けCSV">
         <span>freee向け</span>
         ${exportButton('daily','日次集計CSV',canExportSales)}
@@ -504,10 +527,11 @@ function renderMultipleDays(period, api, controls) {
 
 export function renderReport(page, state, api) {
   if (page === 'stock') return renderStock(state, api);
-  if (page === 'commission' || page === 'cash') {
+  if (page === 'commission') return renderCommission(state,api);
+  if (page === 'cash') {
     const period = reportPeriod(state, api);
     const result = period.closed ?? api.summary(state);
-    return page === 'commission' ? renderCommission(state, api, period, result) : renderCash(state, api, period, result);
+    return renderCash(state, api, period, result);
   }
   const currentMonth = state.day.date.slice(0,7);
   const interval = {mode:'day',month:currentMonth,start:`${currentMonth}-01`,end:state.day.date,...api.reportInterval};

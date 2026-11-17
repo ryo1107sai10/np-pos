@@ -696,6 +696,80 @@ test('development engine rules execute server-side and only one conflicting seat
   assert.equal((await readState(db, owner, tenant, null)).revision, 2);
 });
 
+test('five devices can append plain orders to one of 30 occupied tables without losing or duplicating orders', async () => {
+  const db = database();
+  const tenant = await store(db);
+  const operators = [owner, ...Array.from({length:4},(_,index) => ({uid:`device-${index}`,email:`device-${index}@example.test`}))];
+  for (const operator of operators.slice(1)) {
+    await inviteMember(db,owner,tenant,operator.email,'staff');
+    await listStores(db,operator);
+  }
+
+  const now = Date.now();
+  let initial = apply(createDemo('closed',now),{type:'open',openingCash:0},now);
+  initial.layoutAreas = ['フロア1','フロア2','フロア3'];
+  initial.tables = Array.from({length:30},(_,i) => ({
+    id:`table-${crypto.randomUUID()}`,name:`卓${i + 1}`,area:initial.layoutAreas[Math.floor(i / 10)],
+    capacity:4,x:i % 10 % 4 * 3,y:Math.floor(i % 10 / 4) * 2,
+  }));
+  for (const table of initial.tables) initial = apply(initial,{type:'seat',tableIds:[table.id],guests:1,setId:'set60'},now);
+  await migrateState(db,owner,tenant,{operationId:'concurrent-order-fixture',snapshot:initial});
+
+  const ticketId = initial.tickets[0].id;
+  const order = {type:'order',ticketId,items:[{menuId:'highball',quantity:1,castIds:[]}]};
+  const payload = (index) => ({operationId:`parallel-order-device-${index}`,expectedRevision:1,command:order,allowConcurrentOrder:true});
+  await Promise.all(operators.map((operator,index) => applyCommand(db,operator,tenant,payload(index))));
+
+  const saved = await readState(db,owner,tenant);
+  assert.equal(saved.revision,6);
+  assert.equal(saved.state.tickets.length,30);
+  const lines = saved.state.tickets[0].lines.filter(({menuId}) => menuId === 'highball');
+  assert.equal(lines.length,5);
+  assert.equal(new Set(lines.map(({id}) => id)).size,5);
+  for (const {stockId,quantity} of initial.menu.find(({id}) => id === 'highball').recipe) {
+    assert.equal(saved.state.stock.find(({id}) => id === stockId).quantity,
+      initial.stock.find(({id}) => id === stockId).quantity - 5 * quantity);
+  }
+
+  // Strict transport replay must keep a stale revision. Exact idempotent replay remains safe.
+  await assert.rejects(applyCommand(db,operators[1],tenant,{...payload('offline'),allowConcurrentOrder:undefined}),{code:'revision-conflict'});
+  const reacknowledged = await applyCommand(db,operators[1],tenant,{...payload(1),allowConcurrentOrder:undefined});
+  assert.equal(reacknowledged.revision,6);
+  assert.equal(reacknowledged.state.tickets[0].lines.length,lines.length + 1);
+
+  const checkout = {type:'settle',ticketId,payments:[{method:'cash',amount:quote(saved.state,ticketId).total}]};
+  await assert.rejects(applyCommand(db,owner,tenant,{...payload('stale-checkout'),command:checkout}),{code:'revision-conflict'});
+  await command(db,owner,tenant,6,'concurrent-actual-checkout',checkout);
+  await assert.rejects(applyCommand(db,owner,tenant,payload('after-checkout')),{code:'revision-conflict'});
+  assert.equal((await readState(db,owner,tenant)).revision,7);
+});
+
+test('an online order retries against current inventory and blocks across a stock correction', async () => {
+  const db = database();
+  const tenant = await store(db);
+  let state = apply(createDemo('closed'),{type:'open',openingCash:0});
+  state = apply(state,{type:'seat',tableIds:['a1'],guests:1,setId:'set60'});
+  const stockId = state.menu.find(({id}) => id === 'highball').recipe[0].stockId;
+  const stock = state.stock.find(({id}) => id === stockId);
+  const quantity = state.menu.find(({id}) => id === 'highball').recipe[0].quantity;
+  Object.assign(stock,{quantity,value:quantity * stock.unitCost});
+  await migrateState(db,owner,tenant,{operationId:'concurrent-order-stock-fixture',snapshot:state});
+  const ticketId = state.tickets[0].id;
+  const order = {type:'order',ticketId,items:[{menuId:'highball',quantity:1}]};
+  const send = (label) => applyCommand(db,owner,tenant,{operationId:`online-stock-order-${label}`,expectedRevision:1,command:order,allowConcurrentOrder:true});
+  const results = await Promise.allSettled([send('first'),send('second')]);
+  assert.equal(results.filter(({status}) => status === 'fulfilled').length,1);
+  const {reason} = results.find(({status}) => status === 'rejected');
+  assert.equal(reason.code,'rejected-command');
+  assert.match(reason.message,/在庫が不足しています/);
+  const replenished = await command(db,owner,tenant,2,'concurrent-stock-adjust',{type:'stockAdjust',stockId,quantity:1,reason:'追加入庫'});
+  assert.equal(replenished.revision,3);
+  await assert.rejects(send('after-replenishment'),{code:'revision-conflict'});
+  const latest = await readState(db,owner,tenant);
+  assert.equal(latest.revision,3);
+  assert.equal(latest.state.tickets[0].lines.filter(({menuId}) => menuId === 'highball').length,1);
+});
+
 test('an exact checkout retry survives changed write permissions and honors current read access', async () => {
   const db = database();
   const storeId = await store(db);
@@ -844,6 +918,36 @@ test('cloud audits are separate from browser data, tenant-scoped, paged, and tie
   assert.equal((await listAudit(db, helper, tenant)).events.length, 2);
   await changeMember(db, owner, tenant, helper.uid, 'manager');
   await assert.rejects(listAudit(db, helper, tenant), { code: 'forbidden' });
+});
+
+test('register audit filters original close and count corrections by business day, and preserves audit scope', async () => {
+  const db = database();
+  const tenant = await store(db);
+  const otherTenant = await store(db);
+  await migrateState(db, owner, tenant, {operationId:'register-test-migrate',snapshot:createDemo('closed')});
+  await inviteMember(db, owner, tenant, helper.email, 'manager');
+  await listStores(db, helper);
+  const date = '2026-11-16';
+  const otherDate = '2026-11-17';
+  await command(db,helper,tenant,1,'register-test-open-1',{type:'open',date,openingCash:5000});
+  await command(db,helper,tenant,2,'register-test-close-1',{type:'close',actualCash:5000,cashDenominations:{5000:1}});
+  await command(db,helper,tenant,3,'register-test-open-2',{type:'open',date:otherDate,openingCash:8000});
+  await command(db,helper,tenant,4,'register-test-close-2',{type:'close',actualCash:8000});
+  await command(db,owner,tenant,5,'register-test-correct',{type:'correctRegisterCount',date,actualCash:4000,
+    cashDenominations:{1000:4},reason:'金種別の数え直し'});
+  const correction = await listAudit(db,owner,tenant,{registerDate:date,limit:1});
+  assert.equal(correction.events[0].action,'correctRegisterCount');
+  assert.equal(correction.events[0].actor.id,owner.uid);
+  assert.deepEqual(correction.events[0].before.cashDenominations,{5000:1});
+  assert.deepEqual(correction.events[0].after.cashDenominations,{1000:4});
+  const original = await listAudit(db,owner,tenant,{registerDate:date,limit:1,before:correction.nextBefore});
+  assert.deepEqual(original.events.map(({action,actor,businessDate}) => [action,actor.id,businessDate]),[['close',helper.uid,date]]);
+  assert.equal(original.nextBefore,null);
+  assert.deepEqual((await listAudit(db,owner,tenant,{registerDate:otherDate})).events.map(({action}) => action),['close']);
+  assert.deepEqual(await listAudit(db,owner,otherTenant,{registerDate:date}),{events:[],nextBefore:null});
+  await assert.rejects(listAudit(db,helper,tenant,{registerDate:date}),{code:'forbidden'});
+  await assert.rejects(listAudit(db,owner,tenant,{registerDate:'2026-02-30'}),{code:'invalid-audit-target'});
+  await assert.rejects(listAudit(db,owner,tenant,{registerDate:date,ticketId:'other'}),{code:'invalid-audit-target'});
 });
 
 test('cloud stocktaking is manager-only, preserves the physical count, and records one audited movement per request', async () => {

@@ -110,7 +110,8 @@ function auditPage(search) {
   requireCondition(limit === null || /^\d+$/.test(limit), 400, 'invalid-audit-limit', '監査ログの表示件数を確認してください。');
   requireCondition(ticketId === null || /^[a-zA-Z0-9_.:-]{1,128}$/.test(ticketId),
     400,'invalid-audit-target','伝票の操作履歴を確認してください。');
-  return { before: before === null ? undefined : Number(before), limit: limit === null ? undefined : Number(limit), ticketId };
+  return { before: before === null ? undefined : Number(before), limit: limit === null ? undefined : Number(limit),
+    ticketId, registerDate:search.get('registerDate') };
 }
 
 function validPathId(value) {

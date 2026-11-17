@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { apply, createDemo, exportStoreConfiguration, getTicketCommissionDetails, quote, summary, yen } from '../docs/engine.mjs';
 import { renderReport } from '../docs/reports.mjs';
+import { buildCommissionCsv, getCommissionReport } from '../docs/commission-report.mjs';
 import { getStoreSettings } from '../docs/store-settings.mjs';
 
 const now = Date.parse('2026-11-16T20:00:00+09:00');
@@ -141,4 +142,32 @@ test('the detail of a legacy settled ticket uses its stored totals when recalcul
   const [row] = getTicketCommissionDetails(state, ticket.id);
   assert.equal(row.name, '伝票合計');
   assert.equal(row.amount, 310);
+});
+
+test('period commission reports add preserved daily totals and export open and confirmed lines separately', () => {
+  let state = app(dayClosed(),{type:'open',date:nextDate,openingCash:0});
+  state = seat(state,'a2');
+  const pending = state.tickets[0].id;
+  state = add(state,pending,'castDrink',['cast2']);
+  state = add(state,pending,'nomination',['cast3']);
+  state = seat(state,'b1');
+  const second = state.tickets[1].id;
+  state = add(state,second,'castDrink',['cast2']);
+  state = app(state,{type:'settle',ticketId:second,payments:[{method:'card',amount:quote(state,second).remaining}]});
+  const filters = {mode:'range',start:date,end:nextDate};
+  const model = getCommissionReport(state,filters,'cast2');
+  const p = model.roster.find(({id}) => id === 'cast2');
+  assert.deepEqual(p.final,{sales:3000,amount:600,points:2});
+  assert.deepEqual(p.estimate,{sales:1500,amount:300,points:1});
+  assert.equal(model.details.filter(({isPending}) => isPending).length,1);
+  assert.equal(model.details.filter(({isPending}) => !isPending).length,2);
+  const csv = buildCommissionCsv(model,'details');
+  assert.match(csv,/2026-11-16,確定,[^\n]*キャストドリンク,凛,1500,300,1/);
+  assert.match(csv,/2026-11-17,見込み,[^\n]*キャストドリンク,凛,1500,300,1/);
+  assert.match(buildCommissionCsv(model,'summary'),/2026-11-16,2026-11-17,凛,3000,600,300,2/);
+  assert.doesNotMatch(csv,/本指名|結衣/);
+  assert.equal(getCommissionReport(state,{mode:'month',month:'2026-11'}).period.days.length,2);
+  const print = report('commission',state,{commissionPeriod:filters,commissionCast:'cast2',print:true});
+  assert.match(print,/営業日 2026-11-16 〜 2026-11-17 · 凛/);
+  assert.doesNotMatch(print,/<button|本指名/);
 });

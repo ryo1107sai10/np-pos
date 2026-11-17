@@ -1,7 +1,8 @@
 import { apply, createDemo } from '../docs/engine.mjs';
 import { getNextAutoExtensionAt } from '../docs/auto-extension.mjs';
-import { getMonthlyReportSales, getReportDay } from '../docs/report-period.mjs';
+import { getMonthlyReportSales, getReportDay, isReportDate } from '../docs/report-period.mjs';
 import { getCustomRole, isCustomRoleId } from '../docs/role-policy.mjs';
+import { isConcurrentOrder, orderConcurrencyWindow } from '../docs/order-concurrency.mjs';
 import { ApiError, canOperate, projectState, requireCondition, roles, validateSnapshot, verifyCommand } from './policy.mjs';
 import { emailAddress, prepared, readRows, resultRow } from './db-queries.mjs';
 import { groupInviteAcceptance } from './store-groups.mjs';
@@ -9,6 +10,7 @@ import { captureLineJobs } from './line-notifications.mjs';
 
 const chunkLength = 200_000;
 const maxSnapshotBytes = 7 * 1024 * 1024;
+const maxOrderWriteRetries = 4;
 const textEncoder = new TextEncoder();
 
 function storeResponse(row) {
@@ -299,19 +301,23 @@ export async function readState(db, actor, storeId, since) {
   return visibleSnapshot(current, actor.uid);
 }
 
-export async function listAudit(db, actor, storeId, { before = null, limit = 50, ticketId = null } = {}) {
+export async function listAudit(db, actor, storeId, { before = null, limit = 50, ticketId = null, registerDate = null } = {}) {
   requireCondition(before === null || (Number.isSafeInteger(before) && before > 0),
     400, 'invalid-audit-cursor', '監査ログの表示位置を確認してください。');
   requireCondition(Number.isInteger(limit) && limit >= 1 && limit <= 100,
     400, 'invalid-audit-limit', '監査ログの表示件数を確認してください。');
   requireCondition(ticketId === null || typeof ticketId === 'string' && /^[a-zA-Z0-9_.:-]{1,128}$/.test(ticketId),
     400,'invalid-audit-target','伝票の操作履歴を確認してください。');
+  requireCondition(registerDate === null || ticketId === null && isReportDate(registerDate),
+    400,'invalid-audit-target','レジの操作履歴を確認する営業日を指定してください。');
   const rows = await readRows(db, `SELECT m.role, e.revision, e.payload FROM np_store_access m
     LEFT JOIN np_audit_events e ON e.store_id = m.store_id AND m.role = 'admin'
       AND (? IS NULL OR e.revision < ?)
       AND (? IS NULL OR (json_extract(e.payload,'$.target.kind') = 'ticket' AND json_extract(e.payload,'$.target.id') = ?))
+      AND (? IS NULL OR (json_extract(e.payload,'$.businessDate') = ?
+        AND json_extract(e.payload,'$.action') IN ('close','correctRegisterCount')))
     WHERE m.store_id = ? AND m.uid = ? ORDER BY e.revision DESC LIMIT ?`,
-  before, before, ticketId, ticketId, storeId, actor.uid, limit + 1);
+  before, before, ticketId, ticketId, registerDate, registerDate, storeId, actor.uid, limit + 1);
   adminRequired(memberRequired(rows[0]));
   const page = rows.slice(0, limit).filter((row) => row.payload !== null);
   return {
@@ -428,8 +434,17 @@ async function revokeCastMembership(db,actor,storeId,memberUid,role,profileId,pr
   return {ok:true};
 }
 
-async function saveOperation(db, actor, storeId, command, observed, observedAt) {
-  const { operationId, operation, value, expectedRevision = 0 } = command;
+async function hasOnlyInterveningOrders(db, storeId, expectedRevision, latestRevision) {
+  const distance = latestRevision - expectedRevision;
+  if (distance <= 0 || distance > orderConcurrencyWindow) return false;
+  // The log has one unique row per store revision. A gap or any non-order mutation prevents a rebase.
+  const { count } = await resultRow(db, `SELECT COUNT(*) AS count FROM np_operations
+    WHERE store_id = ? AND revision > ? AND revision <= ? AND operation = 'order'`, storeId, expectedRevision, latestRevision);
+  return count === distance;
+}
+
+async function saveOperation(db, actor, storeId, command, observed, observedAt, orderRetries = maxOrderWriteRetries) {
+  const { operationId, operation, value, expectedRevision = 0, allowConcurrentOrder } = command;
   requireCondition(typeof operationId === 'string' && /^[a-zA-Z0-9_-]{16,100}$/.test(operationId),
     400, 'invalid-operation-id', '操作番号が無効です。');
   requireCondition(Number.isSafeInteger(expectedRevision) && expectedRevision >= 0,
@@ -446,11 +461,14 @@ async function saveOperation(db, actor, storeId, command, observed, observedAt) 
     return readVisibleState(db, actor, storeId);
   }
   const syncExtensions = operation === 'command' && value.type === 'syncAutoExtensions';
+  const canRebaseOrder = operation === 'command' && allowConcurrentOrder === true && expectedRevision > 0 && isConcurrentOrder(value);
   const now = observedAt ?? Date.now();
   const due = operation === 'command' && current.role !== 'cast' && autoExtensionDue(current.state, now);
   if (syncExtensions && (!due || current.revision !== expectedRevision)) return visibleSnapshot(current, actor.uid);
-  const checkRevision = (revision, role, profileId) => {
+  const checkAccess = (role, profileId) => {
     requireCondition(role === current.role && profileId === current.profileId, 403, 'forbidden', '操作の権限が変更されました。');
+  };
+  const checkRevision = (revision) => {
     if (operation === 'migrate') {
       requireCondition(revision === 0, 409, 'migration-not-empty', '営業データがすでにある店舗には移行できません。');
     } else {
@@ -458,7 +476,8 @@ async function saveOperation(db, actor, storeId, command, observed, observedAt) 
         '別の端末が更新しました。最新の内容を確認してからもう一度操作してください。');
     }
   };
-  checkRevision(current.revision, current.role, current.profileId);
+  if (!canRebaseOrder || current.revision === expectedRevision
+    || !await hasOnlyInterveningOrders(db,storeId,expectedRevision,current.revision)) checkRevision(current.revision);
   if (due && !syncExtensions) {
     await saveAutoExtensionSync(db, actor, storeId, current, now);
     throw new ApiError(409, 'auto-extension-updated', '自動延長で伝票が更新されました。伝票を開き直して金額を確認してください。');
@@ -496,8 +515,8 @@ async function saveOperation(db, actor, storeId, command, observed, observedAt) 
   }
   delete next.auditLog;
   const chunks = snapshotChunks(next);
-  const revision = expectedRevision + 1;
-  const conditionArgs = [storeId, operationId, actor.uid, revision, expectedRevision];
+  const revision = current.revision + 1;
+  const conditionArgs = [storeId, operationId, actor.uid, revision, current.revision];
   const rolePolicyChange = operation === 'command' && value.type === 'saveRolePolicy';
   const declaredProfiles = rolePolicyChange ? JSON.stringify(Object.entries(next.rolePolicy.custom ?? {})
     .map(([id,{base}]) => id + '=' + base)) : null;
@@ -515,7 +534,7 @@ async function saveOperation(db, actor, storeId, command, observed, observedAt) 
         EXCEPT SELECT value FROM json_each(?)
       ))
       ON CONFLICT DO NOTHING`,
-    operationId, operation === 'migrate' ? 'migrate' : value.type, fingerprint, revision, now, storeId, expectedRevision, actor.uid, current.role,
+    operationId, operation === 'migrate' ? 'migrate' : value.type, fingerprint, revision, now, storeId, current.revision, actor.uid, current.role,
     current.profileId ?? null,bindingUid,bindingUid,declaredProfiles,declaredProfiles),
   ];
   if (event) {
@@ -533,7 +552,14 @@ async function saveOperation(db, actor, storeId, command, observed, observedAt) 
       return readVisibleState(db, actor, storeId);
     }
     const fresh = memberRequired(await findMembership(db, actor, storeId));
-    checkRevision(fresh.revision, fresh.role, fresh.profile_id ?? undefined);
+    checkAccess(fresh.role,fresh.profile_id ?? undefined);
+    if (canRebaseOrder && orderRetries > 0 && fresh.revision > current.revision
+      && fresh.revision - expectedRevision <= orderConcurrencyWindow) {
+      const latest = await snapshot(db,actor,storeId);
+      checkAccess(latest.role,latest.profileId);
+      return saveOperation(db,actor,storeId,command,latest,undefined,orderRetries - 1);
+    }
+    checkRevision(fresh.revision);
     await requireBindableMember();
     requireCondition(!rolePolicyChange,409,'role-in-use','メンバーや招待に使われているカスタム役職は削除・基本役職の変更ができません。');
     throw new ApiError(409, 'revision-conflict', '更新が重なりました。最新の内容を確認してください。');
@@ -541,9 +567,9 @@ async function saveOperation(db, actor, storeId, command, observed, observedAt) 
   return readVisibleState(db, actor, storeId);
 }
 
-export function applyCommand(db, actor, storeId, { operationId, command, expectedRevision }) {
+export function applyCommand(db, actor, storeId, { operationId, command, expectedRevision, allowConcurrentOrder }) {
   requireCondition(expectedRevision !== undefined, 400, 'invalid-revision', '保存番号が無効です。');
-  return saveOperation(db, actor, storeId, { operationId, operation: 'command', value: command, expectedRevision });
+  return saveOperation(db, actor, storeId, { operationId, operation: 'command', value: command, expectedRevision, allowConcurrentOrder });
 }
 
 export function migrateState(db, actor, storeId, { operationId, snapshot: value }) {

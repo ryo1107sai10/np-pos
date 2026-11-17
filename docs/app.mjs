@@ -3,14 +3,16 @@ import { icon } from './icons.mjs';
 import { orderTaxOverrideRates, previewSettledContents } from './engine.mjs';
 import { readSettledContents, renderSettledContents } from './settled-edit-ui.mjs';
 import { renderReport } from './reports.mjs';
+import { buildCommissionCsv, getCommissionReport } from './commission-report.mjs';
 import { getAutoExtensionNotices, getAutoExtensionPlans, getAutoExtensionSettings, getAutomaticExtensionPlan,
   getNextAutoExtensionAt, getTableAutoExtensionEnabled, getTicketAutoExtensionAt, isVisitAutoExtensionPaused } from './auto-extension.mjs';
 import { formatAutoExtensionCountdown, renderAutoExtensionBadge, renderAutoExtensionWarnings, renderTableAutoExtensionControl,
   renderTableAutoExtensionSettings, renderVisitAutoExtensionPaused } from './auto-extension-ui.mjs';
+import { formatVisitEndCountdown, getVisitEndNotices, recordVisitEndAnnouncements, renderVisitEndNotices, visitEndNoticesKey } from './visit-end-notices.mjs';
 import { canWaivePaymentFee, depositGrossAmount, getCardFee, getCardFeeSettings, getDepositPaymentTerms } from './card-fee.mjs';
 import { getSettlementPaymentFees } from './engine.mjs';
 import { getMonthlyReportSales, getReportDates, getReportPeriod } from './report-period.mjs';
-import { buildDailyReportCsv } from './report-export.mjs';
+import { buildDailyReportCsv, buildRegisterCloseCsv } from './report-export.mjs';
 import { buildFreeeCsv } from './freee-export.mjs';
 import { accountingCsvColumns, accountingCsvEditor, accountingCsvPreview, buildCustomAccountingCsv, readAccountingCsvEditor } from './accounting-csv.mjs';
 import { bindLayoutEditor, commitLayoutFields, floorLayoutStage, handleLayoutEditorAction, layoutAreaTabs, newLayoutDraft, renderLayoutEditor } from './floor-layout.mjs';
@@ -68,6 +70,7 @@ const dialog = document.querySelector('#dialog');
 const workspaceMenu = document.querySelector('#workspace-menu');
 const notifications = document.querySelector('#notifications');
 const autoExtensionLive = document.querySelector('#auto-extension-live');
+const visitEndLive = document.querySelector('#visit-end-live');
 const printOutput = document.querySelector('#print-output');
 const deviceLockScreen = document.querySelector('#device-lock-screen');
 const storageKey = 'np-pos.demo.v1';
@@ -139,6 +142,7 @@ let shiftDate = '';
 let shiftMode = 'week';
 let reportExportError = '';
 let commissionCast = '';
+let commissionPeriod = {mode:'day'};
 let customersQuery = '';
 let customerFilters = {};
 let mobileDetails = false;
@@ -147,8 +151,11 @@ let modal = null;
 let priorFocus = null;
 let lastStatuses = '';
 let lastAutoExtensionNotices = '';
+let lastVisitEndNotices = '';
 let pendingVisitAutoExtensionTicket = null;
 const announcedAutoExtensions = new Map();
+const announcedVisitEnds = new Map();
+let announcedVisitEndDate = '';
 let lastMinute = '';
 let saveAvailable = true;
 let pendingStorage = false;
@@ -202,7 +209,7 @@ function syncDeviceLockScreen() {
       modal = null;
       priorFocus = null;
       workspaceMenuContent = '';
-      for (const root of [app,dialog,workspaceMenu,notifications,autoExtensionLive]) root.replaceChildren();
+      for (const root of [app,dialog,workspaceMenu,notifications,autoExtensionLive,visitEndLive]) root?.replaceChildren();
       clearPrintOutput();
       document.body.classList.add('device-screen-locked');
       deviceLockScreen.innerHTML = renderDeviceLockScreen({sample:controller === sampleDeviceLock,providers:cloudConfig.providers});
@@ -419,7 +426,7 @@ const offlineWorkspaceActions = new Set([
   'dismiss','navigate','open-workspace-menu','close-workspace-menu','floor-view','layout-view-area','table','filter','hide-detail','open','seat','order',
   'move','extend','settle','depart','serve','receipt','category','product','order-line-stage','order-line-edit',
   'order-line-remove','order-line-reset','add-payment','remove-payment','cloud-sync-review','cloud-sync-retry',
-  'cloud-sync-discard','cloud-sync-close',
+  'cloud-sync-discard','cloud-sync-close','visit-end-focus',
 ]);
 
 function permittedAction(action) {
@@ -603,6 +610,17 @@ function announceAutoExtensionNotices(notices, now) {
   else if (!notices.length) autoExtensionLive.textContent = '';
 }
 
+function announceVisitEndNotices(notices) {
+  if (!visitEndLive) return;
+  if (announcedVisitEndDate !== state.day.date) {
+    announcedVisitEnds.clear();
+    announcedVisitEndDate = state.day.date;
+  }
+  const labels = recordVisitEndAnnouncements(notices,announcedVisitEnds,tableName);
+  if (labels.length) visitEndLive.textContent = `${labels.join('、')}は終了まで10分以内です。`;
+  else if (!notices.length) visitEndLive.textContent = '';
+}
+
 function renderTable(table, warning = false) {
   const ticket = getTicketForTable(state, table.id);
   const status = tableStatus(state, table.id);
@@ -620,7 +638,7 @@ function renderTable(table, warning = false) {
   </button>`;
 }
 
-function renderFloor(notices, now) {
+function renderFloor(notices, visitEndNotices, now) {
   const warnedTables = new Set(notices.flatMap(({tableIds}) => tableIds));
   const renderSeat = (table) => renderTable(table,warnedTables.has(table.id));
   const isOpen = state.day.status === 'open';
@@ -652,7 +670,7 @@ function renderFloor(notices, now) {
     escape,icon,tableName, pendingTicketId:pendingVisitAutoExtensionTicket,
     canCheckout:(id) => !state.tickets.find((ticket) => ticket.id === id)?.discountRequest,
     showPause:permittedAction('auto-extension-pause'),showCheckout:permittedAction('auto-extension-checkout'),
-  })}${renderMetrics()}
+  })}${renderVisitEndNotices(visitEndNotices,now,{escape,icon,tableName})}${renderMetrics()}
     ${isOpen && getCastDutyMode(state) !== 'all' && (permittedAction('order') || permittedAction('edit-ticket-line'))
       ? `<div class="notice" data-floor-duty>${renderFloorCastDuty(getAssignableCast(state,now))}</div>` : ''}
     <div class="floor-layout">
@@ -797,7 +815,7 @@ function renderDetail(notices, now) {
     ${button('値引きの承認','discount-review',{ id:ticket.id, tone:'secondary' })}</div>` : '';
   const quickItem = state.menu.find((item) => item.id === 'highball' && item.enabled !== false
     && ['ドリンク','ボトル','フード','指名'].includes(item.category));
-  return `<aside class="detail ${mobileDetails ? 'mobile-visible' : ''}" aria-label="伝票詳細" data-ticket="${escape(ticket.id)}">
+  return `<aside class="detail ${mobileDetails ? 'mobile-visible' : ''}" aria-label="伝票詳細" data-ticket="${escape(ticket.id)}" tabindex="-1">
     <div class="detail-head"><h2>${icon('ticket',17)}伝票詳細</h2><span class="detail-number">No. ${ticket.number}</span>${detailClose}</div>
     <div class="detail-inner"><div class="detail-title"><h3>${escape(tableName(selected))}</h3>${pill(status)}</div>
     <div class="detail-meta"><span>${icon('users',13)}${ticket.guests}名${customerName ? ` · ${escape(customerName)}` : ''}</span><span>${settled ? `${icon('check',13)}退店待ち` : `${icon('clock',13)}<time data-ends="${ticket.endsAt}">${timer(ticket.endsAt)}</time>`}</span></div>
@@ -871,6 +889,7 @@ function render({ preserveFocus = false } = {}) {
   const banner = renderCloudBanner(model, {escape, icon}) + offlineRestartNotice();
   const now = Date.now();
   let floorNotices = [];
+  let visitEndNotices = [];
   let content;
   if (currentRole() === 'cast') {
     const workspace = currentCastWorkspace();
@@ -887,7 +906,8 @@ function render({ preserveFocus = false } = {}) {
     let view;
     if (page === 'floor') {
       if (!cloudState.coldOffline) floorNotices = getAutoExtensionNotices(state,now);
-      view = renderFloor(floorNotices,now);
+      visitEndNotices = getVisitEndNotices(state,now,floorNotices);
+      view = renderFloor(floorNotices,visitEndNotices,now);
     }
     else if (page === 'customers') view = customerUI.renderCustomers(customerWorkspaceState(),
       {...customerUIApi(),query:customersQuery,filter:customerFilters});
@@ -901,10 +921,10 @@ function render({ preserveFocus = false } = {}) {
     else if (page === 'labor') view = renderLaborReport(state,laborRange,{escape,icon,yen});
     else if (page === 'team-performance') view = renderTeamPerformance(state,{escape,icon,yen,range:teamRange,role:teamRole});
     else view = renderReport(page,state,{yen,summary,quote,escape,icon,showHiddenStock,canAdjustStock:permittedAction('stock-adjust'),
-      canCorrectRegister:currentRole() === 'admin',canRecordCash:permittedAction('record-cash'),
+      canCorrectRegister:currentRole() === 'admin',canAuditRegister:permittedAction('audit-log'),canRecordCash:permittedAction('record-cash'),
       canEditCash:(item) => permittedAction('edit-cash-movement') && Boolean(editableCashMovement(state,item.id))
         && (currentRole() === 'admin' || (state.day.date === item.date && state.day.status === 'open')),
-      reportDate,commissionCast,reportInterval:currentReportInterval(),reportExportError,stockSearch,stockBarcodeExact,stockLowOnly,stockHistoryId});
+      reportDate,commissionCast,commissionPeriod,reportInterval:currentReportInterval(),reportExportError,stockSearch,stockBarcodeExact,stockLowOnly,stockHistoryId});
     if (currentRole() === 'admin' && (page === 'analytics' || page === 'reports')) {
       const filters = page === 'analytics' ? analyticsRange : getReportPeriod(state,currentReportInterval());
       if (page === 'analytics' || filters.valid) view += renderLaborHighlights(state,filters,{escape,icon,yen});
@@ -917,8 +937,16 @@ function render({ preserveFocus = false } = {}) {
   if (workspaceMenu.open) refreshWorkspaceMenu();
   document.title = `NP POS | ${pages[page].title}`;
   lastAutoExtensionNotices = autoNoticesKey(floorNotices);
+  lastVisitEndNotices = visitEndNoticesKey(visitEndNotices);
   announceAutoExtensionNotices(floorNotices,now);
-  if (focusAction) [...app.querySelectorAll('[data-action]')].find((el) => el.dataset.action === focusAction && el.dataset.id === focusId)?.focus({ preventScroll: true });
+  announceVisitEndNotices(visitEndNotices);
+  if (focusAction) {
+    const controls = [...app.querySelectorAll('[data-action]')];
+    const next = controls.find((el) => el.dataset.action === focusAction && el.dataset.id === focusId)
+      ?? (focusAction === 'visit-end-focus'
+        ? controls.find((el) => el.dataset.action === 'auto-extension-focus' && el.dataset.id === focusId) ?? app.querySelector('#workspace') : null);
+    next?.focus({preventScroll:true});
+  }
   if (searchFocus) {
     const control = app.querySelector(`[name=${searchFocus.name}]`);
     control?.focus({preventScroll:true});
@@ -1022,6 +1050,7 @@ function cloudUpdated(next) {
     activeBarcodeScan?.close();
     stockSearch = ''; stockBarcodeExact = false;
     announcedAutoExtensions.clear();
+    announcedVisitEnds.clear();
     cloudMembers = {members: [], invites: []};
     customersQuery = '';
     customerFilters = {};
@@ -1032,7 +1061,7 @@ function cloudUpdated(next) {
     if (dialog.open && modal?.type !== 'cloud') dialog.close();
     pendingStorage = false;
     selected = null; mobileDetails = false; area = null; filter = 'all'; reportDate = ''; commissionCast = '';
-    reportInterval = {mode:'day'}; reportExportError = '';
+    reportInterval = {mode:'day'}; commissionPeriod = {mode:'day'}; reportExportError = '';
     analyticsRange = {}; payrollMonth = ''; payrollCastId = '';
     laborRange = {};
     const view = next.store ? {view: 'list', area: null} : loadFloorView();
@@ -1683,15 +1712,17 @@ function currentReportInterval() {
 }
 
 function exportReport(kind) {
-  if (page !== 'reports' || !['report','daily','tickets','custom-daily','custom-tickets'].includes(kind)) return;
+  if (page !== 'reports' || !['report','register','daily','tickets','custom-daily','custom-tickets'].includes(kind)) return;
   const period = getReportPeriod(state,currentReportInterval());
   if (!period.valid || !period.days.length) return;
+  if (kind === 'register' && !period.days.some(({closed}) => closed)) return;
   const storeName = cloudState.store?.name ?? '銀座店';
   const suffix = period.start === period.end ? period.start : `${period.start}_${period.end}`;
   let csv;
   let encoding = 'utf-8';
   try {
     if (kind.startsWith('custom-')) ({data:csv,encoding} = buildCustomAccountingCsv(state,period,kind.slice(7),storeName));
+    else if (kind === 'register') csv = buildRegisterCloseCsv(period,storeName);
     else csv = kind === 'report' ? buildDailyReportCsv(period,storeName)
       : buildFreeeCsv(period,{mode:kind,storeName,storeId:cloudState.store?.id}).csv;
   } catch (error) {
@@ -1704,7 +1735,7 @@ function exportReport(kind) {
     reportExportError = '';
     render({preserveFocus:true});
   }
-  const prefix = kind === 'report' ? 'daily-report' : kind.startsWith('custom-') ? kind : `freee-${kind}`;
+  const prefix = {report:'daily-report',register:'register-close'}[kind] ?? (kind.startsWith('custom-') ? kind : `freee-${kind}`);
   downloadFile(`np-pos-${prefix}-${suffix}.csv`,csv,`text/csv;charset=${encoding}`);
   toast('CSVを書き出しました。');
 }
@@ -1751,14 +1782,17 @@ async function loadAuditPage() {
   paintDialog();
   try {
     if (cloudState.store) {
-      const { events, nextBefore } = await cloud.listAudit({before:active.before, limit:30,ticketId:active.ticketAuditId});
+      const { events, nextBefore } = await cloud.listAudit({before:active.before, limit:30,ticketId:active.ticketAuditId,
+        registerDate:active.registerAuditDate});
       if (modal !== active || !dialog.open) return;
       active.entries.push(...events);
       active.before = nextBefore;
       active.more = nextBefore != null;
     } else {
-      const entries = (state.auditLog ?? []).filter((entry)=> !active.ticketAuditId
-        || (entry.target?.kind === 'ticket' && entry.target.id === active.ticketAuditId));
+      const entries = (state.auditLog ?? []).filter((entry)=> (!active.ticketAuditId
+        || (entry.target?.kind === 'ticket' && entry.target.id === active.ticketAuditId))
+        && (!active.registerAuditDate || (entry.businessDate === active.registerAuditDate
+          && ['close','correctRegisterCount'].includes(entry.action))));
       active.entries.push(...entries.slice(active.entries.length, active.entries.length + 30));
       active.more = active.entries.length < entries.length;
     }
@@ -2072,7 +2106,9 @@ function paintDialog(layoutFileInput) {
       return;
     }
     case 'audit-log':
-      present(modal.ticketAuditId ? '伝票の操作履歴' : '監査ログ',renderAuditLog(modal,{escape,icon}),null,{style:'ops-modal'});
+      present(modal.registerAuditDate ? 'レジ締めの操作履歴' : modal.ticketAuditId ? '伝票の操作履歴' : '監査ログ',
+        (modal.registerAuditDate ? `<p class="form-copy">営業日 ${escape(modal.registerAuditDate)}</p>` : '')
+          + renderAuditLog(modal,{escape,icon}),null,{style:'ops-modal'});
       return;
     case 'ops-settings': {
       const register = getRegisterSettings(state);
@@ -3326,6 +3362,7 @@ function renderPracticeEntry() {
 
 function resetPracticeView() {
   announcedAutoExtensions.clear();
+  announcedVisitEnds.clear();
   selected = null;
   mobileDetails = false;
   area = null;
@@ -3411,7 +3448,9 @@ function clickAction(target) {
   if (action.startsWith('practice-')) { updatePractice(action); return; }
   if (action.startsWith('cloud-')) { void cloudAction(action, target); return; }
   if (action === 'audit-log') {
-    openDialog(action,{entries:[],more:false,ticketAuditId:target.dataset.ticketAudit ? id : undefined});
+    const registerAuditDate = target.dataset.registerAudit ? id : undefined;
+    if (registerAuditDate && !state.closedDays.some(({date}) => date === registerAuditDate)) return;
+    openDialog(action,{entries:[],more:false,ticketAuditId:target.dataset.ticketAudit ? id : undefined,registerAuditDate});
     void loadAuditPage();
     return;
   }
@@ -3558,6 +3597,13 @@ function clickAction(target) {
   }
   if (action === 'auto-extension-focus') {
     if (state.tickets.some((ticket) => ticket.id === id && ticket.status === 'open')) openTicket(id);
+    return;
+  }
+  if (action === 'visit-end-focus') {
+    if (state.tickets.some((ticket) => ticket.id === id && ticket.status === 'open')) {
+      openTicket(id);
+      app.querySelector(matchMedia('(max-width: 1050px)').matches ? '.detail-mobile-close' : '.detail[data-ticket]')?.focus();
+    }
     return;
   }
   if (action === 'billing-settings') { openDialog(action,{billingTab:id==='card'?'card':'auto'}); return; }
@@ -3827,9 +3873,20 @@ function clickAction(target) {
     void scanStockBarcode(action);
     return;
   }
-  if (action === 'commission-cast') {
-    commissionCast = id === commissionCast ? '' : id ?? '';
-    render({ preserveFocus: true });
+  if (action.startsWith('commission-') && page === 'commission' && canOpenPage(page)) {
+    if (action === 'commission-cast') commissionCast = id === commissionCast ? '' : id ?? '';
+    if (action === 'commission-period' && ['day','month','range'].includes(id)) commissionPeriod.mode = id;
+    if (action === 'commission-export') {
+      const result = getCommissionReport(state,commissionPeriod,commissionCast);
+      if (!result.period.valid || !result.period.days.length) return;
+      if (id === 'print') printWorkspace(renderReport('commission',state,{escape,icon,yen,commissionCast,commissionPeriod,print:true}));
+      else if (['summary','details'].includes(id)) {
+        const csv = buildCommissionCsv(result,id);
+        downloadFile(`np-pos-commission-${id}-${result.period.start}_${result.period.end}.csv`,csv,'text/csv;charset=utf-8');
+      }
+      return;
+    }
+    render({preserveFocus:true});
     return;
   }
   if (action === 'floor-view') {
@@ -3940,9 +3997,10 @@ function clickAction(target) {
     }
     saveState(sample);
     announcedAutoExtensions.clear();
+    announcedVisitEnds.clear();
     selected = fromOpening || cashSample || reportSample || analyticsSample ? null : 'a1';
     area=null; filter='all'; showHiddenStock=false; mobileDetails=false;
-    reportDate = ''; commissionCast = ''; customersQuery = ''; customerFilters = {};
+    reportDate = ''; commissionCast = ''; commissionPeriod = {mode:'day'}; customersQuery = ''; customerFilters = {};
     analyticsRange = analyticsSample ? {start:getReportDates(sample)[0],end:sample.day.date} : {};
     payrollMonth = ''; payrollCastId = '';
     teamRange = {}; teamRole = 'all'; shiftDate = ''; shiftMode = 'week';
@@ -4491,7 +4549,7 @@ function submitDialog(form) {
       if (actualCash === null) throw new Error('金種別の枚数と合計金額を確認してください。');
       commit({type:'close',actualCash,reason:value('reason'),...(cashDenominations ? {cashDenominations} : {})},
         '閉店しました。締め結果を日報に保存しました。',()=>{
-        selected = null; mobileDetails = false; reportDate = ''; commissionCast = '';
+        selected = null; mobileDetails = false; reportDate = ''; commissionCast = ''; commissionPeriod = {mode:'day'};
         reportInterval.mode = 'day'; reportExportError = '';
         page = 'reports'; history.replaceState(null, '', '#reports');
       });
@@ -4632,10 +4690,15 @@ app.addEventListener('change',(event)=> {
     return;
   }
   if (event.target.id==='area-filter') { area=event.target.value || null;render();app.querySelector('#area-filter')?.focus(); }
+  const commissionField = event.target.dataset.commissionField;
+  if (page === 'commission' && ['date','month','start','end'].includes(commissionField)) {
+    commissionPeriod[commissionField] = event.target.value;
+    render(); app.querySelector(`[data-commission-field="${commissionField}"]`)?.focus({preventScroll:true});
+    return;
+  }
   if (event.target.matches('[data-report-date]')) {
     reportDate = event.target.value;
     reportExportError = '';
-    commissionCast = '';
     render();
     app.querySelector('[data-report-date]')?.focus({ preventScroll: true });
   }
@@ -4959,8 +5022,11 @@ setInterval(()=> {
     if (clock) clock.textContent=minute;
     lastMinute=minute;
   }
-  if (page==='floor') {
-    const noticesChanged = autoNoticesKey(getAutoExtensionNotices(state,now)) !== lastAutoExtensionNotices;
+  if (page==='floor' && hasWorkspace()) {
+    const autoNotices = cloudState.coldOffline ? [] : getAutoExtensionNotices(state,now);
+    const visitEndNotices = getVisitEndNotices(state,now,autoNotices);
+    const noticesChanged = autoNoticesKey(autoNotices) !== lastAutoExtensionNotices
+      || visitEndNoticesKey(visitEndNotices) !== lastVisitEndNotices;
     if (noticesChanged || (!dialog.open && state.tables.map((table)=>tableStatus(state,table.id,now)).join('|')!==lastStatuses)) {
       render({preserveFocus:true});
       return;
@@ -4968,6 +5034,9 @@ setInterval(()=> {
     for (const time of app.querySelectorAll('[data-ends]')) time.textContent=timer(Number(time.dataset.ends),now);
     for (const countdown of app.querySelectorAll('[data-auto-extension-deadline]')) {
       countdown.textContent = formatAutoExtensionCountdown(Number(countdown.dataset.autoExtensionDeadline),now);
+    }
+    for (const countdown of app.querySelectorAll('[data-visit-ends]')) {
+      countdown.textContent = formatVisitEndCountdown(Number(countdown.dataset.visitEnds),now);
     }
   }
 },1000);

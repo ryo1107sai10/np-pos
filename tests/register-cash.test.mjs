@@ -3,7 +3,8 @@ import test from 'node:test';
 import {apply, createDemo, quote, summary} from '../docs/engine.mjs';
 import {getPrintTenderReceived} from '../docs/print-domain.mjs';
 import {renderPrintPreview} from '../docs/print-ui.mjs';
-import {getReportDay} from '../docs/report-period.mjs';
+import {getReportDay, getReportPeriod} from '../docs/report-period.mjs';
+import {buildRegisterCloseCsv} from '../docs/report-export.mjs';
 import {renderReport} from '../docs/reports.mjs';
 import {validateSnapshot, verifyCommand} from '../server/policy.mjs';
 
@@ -104,4 +105,29 @@ test('cash counts are validated and kept with the closed report, including zero 
   const tampered = structuredClone(zero);
   tampered.closedDays[0].cashDenominations[1] = 1;
   assert.throws(() => validateSnapshot(tampered),{code:'invalid-snapshot'});
+});
+
+test('register close export keeps the business date separate from the JST timestamp and distinguishes old records from zero counts', () => {
+  let state = step(open(),{type:'close',actualCash:20_000});
+  const zeroDate = '2026-11-17';
+  const closeAt = Date.parse('2026-11-18T01:02:03+09:00');
+  state = apply(state,{type:'open',date:zeroDate,openingCash:0},closeAt - 3_600_000);
+  state = apply(state,{type:'close',actualCash:0,cashDenominations:{}},closeAt);
+  state = apply(state,{type:'open',date:'2026-11-18',openingCash:0},closeAt + 1);
+  const reportInterval = {mode:'month',month:'2026-11'};
+  const period = getReportPeriod(state,reportInterval);
+  const [header,first,second,blank] = buildRegisterCloseCsv(period,'テスト店').slice(1).split('\r\n');
+  assert.match(header,/閉店日時（日本時間）.*10000円の枚数.*1円の枚数/);
+  assert.equal(first.split(',')[9],'未記録');
+  assert.deepEqual(first.split(',').slice(10),Array(10).fill(''));
+  assert.deepEqual(second.split(',').slice(0,4),[zeroDate,'テスト店','2026-11-18 00:02:03','2026-11-18 01:02:03']);
+  assert.deepEqual(second.split(',').slice(9),['記録あり',...Array(10).fill('0')]);
+  assert.equal(blank,'');
+
+  const month = renderReport('reports',state,{...api,reportInterval});
+  assert.match(month,/data-id="register">レジ締めCSV/);
+  const daily = renderReport('reports',state,{...api,reportInterval:{mode:'day',date:zeroDate},canAuditRegister:true});
+  assert.match(daily,new RegExp(`data-register-audit="true"\\s+data-id="${zeroDate}"`));
+  assert.match(daily,new RegExp(`data-action="report-day" data-id="${date}"`));
+  assert.doesNotMatch(renderReport('reports',state,api),/data-register-audit/);
 });

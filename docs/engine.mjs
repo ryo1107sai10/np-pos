@@ -222,12 +222,14 @@ export function getTicketForTable(state, tableId) {
   return state.tickets.find((ticket) => occupiedStatuses.has(ticket.status) && ticket.tableIds.includes(tableId)) ?? null;
 }
 
+export const visitEndNoticeLeadMs = 10 * minute;
+
 export function tableStatus(state, tableId, now = Date.now()) {
   const ticket = getTicketForTable(state, tableId);
   if (!ticket) return 'available';
   if (ticket.status === 'paid') return 'paid';
   if (ticket.endsAt <= now) return 'overtime';
-  return ticket.endsAt <= now + 10 * minute ? 'soon' : 'active';
+  return ticket.endsAt <= now + visitEndNoticeLeadMs ? 'soon' : 'active';
 }
 
 function findTicket(state, ticketId) {

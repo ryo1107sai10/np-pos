@@ -110,6 +110,65 @@
 
 .auto-extension-countdown time { color: #8d4712; }
 
+.visit-end-notices {
+  min-width: 0;
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border: 1px solid #e5dccc;
+  border-radius: 14px;
+  background: #fbf9f5;
+  color: #604724;
+}
+
+.visit-end-notices h2 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.visit-end-notices h2 small {
+  padding: 2px 5px;
+  border-radius: 6px;
+  background: #f1ebe2;
+  color: #66563b;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.visit-end-notices ul {
+  display: grid;
+  grid-template-columns: repeat(auto-fill,minmax(min(100%,13rem),1fr));
+  gap: 6px;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.visit-end-notices button {
+  display: grid;
+  grid-template-columns: minmax(0,1fr) auto auto;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  min-height: 44px;
+  padding: 6px 8px;
+  border: 1px solid #e7ded0;
+  border-radius: 9px;
+  background: #fff;
+  color: inherit;
+  cursor: pointer;
+  font-size: 12px;
+  text-align: start;
+}
+
+.visit-end-notices button:hover { background: #f6efe3; }
+.visit-end-notices button:focus-visible { outline: 2px solid #7251b4; outline-offset: 1px; }
+.visit-end-notices strong { overflow-wrap: anywhere; }
+.visit-end-countdown { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.visit-end-overdue { color: #9b3624; font-weight: 750; }
+
 .seat-auto-extension {
   display: inline-flex;
   flex: none;

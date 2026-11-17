@@ -401,6 +401,53 @@ test('server revision conflict refreshes the view without rebasing the queued op
   assert.throws(() => client.submit({ type: 'seat' }, 0), { code: 'revision-conflict' });
 });
 
+test('a fresh online order sends its original revision and omits the concurrency flag on uncertain replay', async (t) => {
+  const order = {type:'order',ticketId:'tab',items:[{menuId:'highball',quantity:1,castIds:[]}]};
+  let first;
+  const {client,setRevision} = service(t,{
+    command(payload,{setRevision:update}) {
+      assert.equal(payload.expectedRevision,1);
+      if (!first) {
+        assert.equal(payload.allowConcurrentOrder,true);
+        first = payload;
+        update(3);
+        throw new TypeError('connection dropped after commit');
+      }
+      assert.equal(payload.operationId,first.operationId);
+      assert.equal(payload.allowConcurrentOrder,undefined);
+      assert.deepEqual(payload.command,first.command);
+      return Response.json({state:{revision:3},revision:3,role:'admin'});
+    },
+  });
+  setRevision(2);
+  await client.start();
+  await client.enterStore('shop');
+  assert.throws(() => client.submit({type:'settle',ticketId:'tab'},1),{code:'revision-conflict'});
+  assert.throws(() => client.submit({...order,items:[{...order.items[0],taxRateOverride:800}]},1),{code:'revision-conflict'});
+  const outcome = await client.submit(order,1);
+  assert.equal(outcome.queued,true);
+  await client.retrySync();
+  assert.equal(client.snapshot.revision,3);
+  assert.equal(client.snapshot.pending,0);
+});
+
+test('an order first queued offline cannot opt in to online reconciliation on reconnect', async (t) => {
+  const {client,calls,setOnline,setRevision} = service(t);
+  setRevision(1);
+  await client.start();
+  await client.enterStore('shop');
+  setOnline(false);
+  const order = {type:'order',ticketId:'tab',items:[{menuId:'highball',quantity:1}]};
+  const outcome = await client.submit(order,1);
+  assert.equal(outcome.queued,true);
+  setRevision(2);
+  setOnline(true);
+  await assert.rejects(client.retrySync(),{code:'revision-conflict'});
+  const sent = calls.find(({path}) => path.endsWith('/commands')).payload;
+  assert.deepEqual(sent,{command:order,expectedRevision:1,operationId:outcome.operationId});
+  assert.equal(client.snapshot.pending,1);
+});
+
 test('restricted roles do not receive operational data and an upgraded role reloads the full snapshot', async (t) => {
   const { client, setRole } = service(t, { role: 'cast' });
   await client.start();

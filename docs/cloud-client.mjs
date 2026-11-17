@@ -3,6 +3,7 @@ import { offlineCommands, offlineLimit, openOperationQueue, orderCanWait } from 
 import { getCastDutyMode } from './cast-duty.mjs';
 import { createOfflineWorkspace, offlineWorkspaceLifetime, openOfflineWorkspaceCache, usableOfflineWorkspace } from './offline-snapshot.mjs';
 import { roleAllowsCommand } from './role-policy.mjs';
+import { isConcurrentOrder, orderConcurrencyWindow } from './order-concurrency.mjs';
 
 const authSDK = 'https://www.gstatic.com/firebasejs/13.3.0/';
 const conflictMessage = '別の端末でデータが更新されました。最新の内容を確認し、操作をやり直してください。';
@@ -534,7 +535,11 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
     takingOrder = true;
     const serial = ++scope.sequence;
     try {
-      const result = await request(`${storePath(scope)}/${operation.route}`, { method: 'POST', body: operation.body });
+      // Background and reconnect replay must keep its original strict revision check.
+      const allowConcurrentOrder = operation.body.operationId === immediateId && scope.queue.length === 1
+        && isOnline() && isConcurrentOrder(operation.body.command);
+      const body = allowConcurrentOrder ? {...operation.body,allowConcurrentOrder:true} : operation.body;
+      const result = await request(`${storePath(scope)}/${operation.route}`, { method: 'POST', body });
       assertScope(scope);
       acceptState(scope, result, serial);
       await removePending(scope,operation);
@@ -583,7 +588,7 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
       if (rows.length >= offlineLimit) throw new CloudError('queue-full','送信待ちが30件あります。同期後に操作してください。');
       if (!orderCanWait(rows,data.command)) throw new CloudError('sync-pending',offlineOrderMessage);
       const previous = rows.at(-1);
-      if (previous && previous.body.expectedRevision < data.expectedRevision) {
+      if (previous && (previous.body.expectedRevision < data.expectedRevision || data.expectedRevision < current.revision)) {
         throw new CloudError('sync-pending','先に送信待ちの操作を同期し、最新の内容を確認してください。');
       }
       return [...rows,{...operation,body:{...operation.body,expectedRevision:previous ? previous.body.expectedRevision + 1 : data.expectedRevision}}];
@@ -626,7 +631,9 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
   function submit(command, expectedRevision = current.revision) {
     assertScope(activeScope);
     if (current.restricted || !current.state) throw new CloudError('store-restricted', 'この権限では営業データを変更できません。');
-    if (!Number.isSafeInteger(expectedRevision) || expectedRevision !== current.revision) {
+    const canCheckNewerOrders = expectedRevision > 0 && expectedRevision < current.revision && !current.pending
+      && current.revision - expectedRevision <= orderConcurrencyWindow && isOnline() && !activeScope.cold && isConcurrentOrder(command);
+    if (!Number.isSafeInteger(expectedRevision) || (expectedRevision !== current.revision && !canCheckNewerOrders)) {
       throw new CloudError('revision-conflict', conflictMessage, 409);
     }
     if (activeScope.cold) validateColdCommand(command);
@@ -818,7 +825,7 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
     leaveStore,
     submit,
     migrate,
-    async listAudit({ before, limit, ticketId } = {}) {
+    async listAudit({ before, limit, ticketId, registerDate } = {}) {
       const scope = activeScope;
       assertScope(scope);
       const roleSerial = scope.roleSerial;
@@ -832,6 +839,7 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
       if (before != null) query.set('before', before);
       if (limit != null) query.set('limit', limit);
       if (ticketId != null) query.set('ticketId',ticketId);
+      if (registerDate != null) query.set('registerDate',registerDate);
       const suffix = query.size ? `?${query}` : '';
       const result = await request(`${storePath(scope)}/audit${suffix}`);
       assertScope(scope);
