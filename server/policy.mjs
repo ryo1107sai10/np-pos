@@ -2,7 +2,7 @@ import { exportStoreConfiguration, isOrderTaxRateOverride, maxOverdueExtensionCo
 import { isAutoExtensionPauseSource, isValidAutoExtensionSettings, isValidVisitAutoExtensionPause } from '../docs/auto-extension.mjs';
 import { canWaivePaymentFee, depositGrossAmount, normalizeCardFeeSettings } from '../docs/card-fee.mjs';
 import { getMonthlyReportSales } from '../docs/report-period.mjs';
-import { customerWeekdays, isAssignedCustomer, isCustomerAnniversaries, isCustomerPhoto } from '../docs/customers.mjs';
+import { customerWeekdays, isAssignedCustomer, isCustomerAnniversaries, isCustomerPhoto, isSeatCompanionSelection } from '../docs/customers.mjs';
 import { getRecoveryRows, isValidCashMovement } from '../docs/cash-ledger.mjs';
 import { getCashCountTotal, getCashPaymentAmount, isRegisterCashAmount } from '../docs/register-cash.mjs';
 import { isValidPrintDocument, normalizePrintSettings } from '../docs/print-domain.mjs';
@@ -16,18 +16,21 @@ import { getCastWorkspace, isCastSelfCommand, listCastAttendance, validateCastAt
 import { canApplyOrderLineDiscount, canExcludeOrderService, canOverrideOrderTax, isValidCalculationSettings, normalizeCalculationSettings, roundCalculationRate } from '../docs/calculation-settings.mjs';
 import { isValidOrderLineDiscount, isValidOrderLineDiscountSnapshot } from '../docs/order-line-discount.mjs';
 import { normalizeAttendanceItems } from '../docs/payroll-records.mjs';
-import { normalizeRolePolicy, roleAllowsCommand, roleGroupAllowed } from '../docs/role-policy.mjs';
+import { normalizeRolePolicy, roleAllowsAction, roleAllowsCommand, roleGroupAllowed } from '../docs/role-policy.mjs';
+import { isValidCastRotationCommand, isValidCastRotationSnapshot } from '../docs/cast-rotation.mjs';
 import { isPersonalSalesAmount, isPersonalSalesDiscountMode, isValidPersonalSalesHistory } from '../docs/personal-sales.mjs';
 import { normalizeCashAccounts, validCashAccountHistory } from '../docs/cash-accounts.mjs';
 import { normalizeStaffLabor } from '../docs/labor-workspace.mjs';
+import { getStaffOwnPayroll, getStaffPayrollDelegation, isStaffPayrollCommand, normalizeStaffPayrollSnapshot } from '../docs/staff-payroll.mjs';
+import { isValidAttendanceBatch } from '../docs/attendance-batch.mjs';
 
 export const roles = new Set(['admin', 'manager', 'staff', 'cast', 'trainee']);
 const staffCommands = ['seat', 'move', 'order', 'extend', 'extendOverdue', 'deposit', 'settle', 'depart', 'serve', 'issuePrintDocument', 'saveTicketNote',
-  'syncAutoExtensions', 'setTableAutoExtension', 'pauseVisitAutoExtension', 'resumeVisitAutoExtension', 'setTicketCustomer','setTicketCompanion'];
+  'syncAutoExtensions', 'setTableAutoExtension', 'pauseVisitAutoExtension', 'resumeVisitAutoExtension', 'setTicketCustomer','setTicketCompanion','changeCastRotation'];
 const managerCommands = [...staffCommands, 'open', 'close', 'discount', 'stockAdjust', 'recordStockOperation', 'cancelDeposit', 'cancelLine', 'void', 'adjustTicketEnd',
   'saveCustomer', 'recoverReceivable', 'recordCashMovement', 'saveShift', 'removeShift', 'reviewCastAttendance', 'saveManagedAttendance', 'adjustTicketGuests',
   'editTicketLine', 'cancelTicketExtension', 'editCashMovement','voidCashMovement','editDeposit','adjustPersonalSales',
-  'saveStaffAttendance','voidStaffAttendance'];
+  'saveStaffAttendance','voidStaffAttendance','saveAttendanceBatch','saveStaffRate','savePayrollRate'];
 const roleCommands = {
   cast: new Set(['castClockIn','castClockOut','castRequestShift','castRequestDailyPay']),
   staff: new Set(staffCommands),
@@ -35,10 +38,10 @@ const roleCommands = {
   admin: new Set([...managerCommands, 'saveLayout', 'importLayout', 'saveStoreSettings', 'importStoreConfiguration',
     'approveDiscount', 'rejectDiscount', 'saveControls', 'cancelSettlement', 'reopenTicket', 'correctSettledTicketPayments','correctSettledContents',
     'mergeCustomers', 'linkCustomer', 'correctSettledTicketCustomer', 'correctSettledTicketCompanion', 'importCustomers', 'savePrintSettings', 'saveAccountingCsv','correctRegisterCount',
-    'saveAutoExtensionSettings', 'saveCardFeeSettings', 'savePayrollDraft', 'finalizePayroll', 'savePayrollRate', 'savePayrollSettings',
+    'saveAutoExtensionSettings', 'saveCardFeeSettings', 'savePayrollDraft', 'finalizePayroll', 'savePayrollSettings',
     'savePayrollTemplate', 'assignPayrollTemplate', 'removePayrollTemplate', 'saveEmployeeProfile', 'saveAttendanceItems','savePayrollVariables',
     'requestDailyPay', 'reviewDailyPay', 'payDailyPay', 'saveInitialSetSchedule', 'bindCastAccount', 'saveCalculationSettings','saveRolePolicy','saveCashAccounts',
-    'saveStaffPerson','saveStaffRate']),
+    'saveStaffPerson','saveStaffPayrollDraft','finalizeStaffPayroll','bindStaffPayrollAccount']),
 };
 const reasonCommands = new Set(['discount', 'cancelSettlement', 'reopenTicket', 'cancelLine', 'recordCashMovement', 'recordStockOperation',
   'correctSettledTicketCustomer', 'correctSettledTicketCompanion', 'correctSettledTicketPayments', 'adjustTicketEnd', 'adjustTicketGuests', 'editTicketLine', 'cancelTicketExtension',
@@ -71,6 +74,15 @@ export function verifyCommand(role, command, state, profileId) {
   requireCondition(isRecord(command) && typeof command.type === 'string', 400, 'invalid-command', '操作を確認してください。');
   requireCondition(canOperate(role) && roleCommands[role].has(command.type), 403, 'forbidden', 'この操作には権限が必要です。');
   requireCondition(roleAllowsCommand(state,role,command,profileId),403,'forbidden','店舗設定でこの役職には操作が許可されていません。');
+  if (command.type === 'changeCastRotation') requireCondition(isValidCastRotationCommand(command),
+    400,'invalid-command','付け回しの操作内容を確認してください。');
+  if (isStaffPayrollCommand(command.type)) {
+    const validId = (value) => typeof value === 'string' && value.length > 0 && value.length <= 128 && value.trim() === value;
+    const valid = command.type === 'bindStaffPayrollAccount'
+      ? validId(command.memberUid) && (command.personId === null || validId(command.personId))
+      : validId(command.personId) && isPayrollMonth(command.month) && (command.type !== 'finalizeStaffPayroll' || Number.isSafeInteger(command.expectedNet));
+    requireCondition(valid,400,'invalid-command','勤務者と給与月を確認してください。');
+  }
   if (command.type === 'saveRolePolicy') {
     try { normalizeRolePolicy(command.policy); }
     catch (error) { throw new ApiError(400,'invalid-command',error.message); }
@@ -108,6 +120,8 @@ export function verifyCommand(role, command, state, profileId) {
     requireCondition(typeof command.attendanceId === 'string' && command.attendanceId.length > 0 && command.attendanceId.length <= 128
       && ['approve','reject'].includes(command.decision),400,'invalid-command','勤怠と確認結果を選択してください。');
   }
+  if (command.type === 'saveAttendanceBatch') requireCondition(isValidAttendanceBatch(command),
+    400,'invalid-command','対象者を50名まで選択し、勤務者ごとに1件の入力と理由を指定してください。');
   if (command.type === 'saveManagedAttendance') {
     const {attendanceId,castId,date,classification,reason} = command;
     const validId = (id)=>typeof id === 'string' && id.length > 0 && id.length <= 128;
@@ -132,13 +146,16 @@ export function verifyCommand(role, command, state, profileId) {
     else if (command.type === 'requestDailyPay') valid = typeof command.castId === 'string' && isPayrollMonth(command.month)
       && validYen(command.amount) && command.amount > 0;
     else if (isDailyPayCommand(command.type)) valid = typeof command.dailyPayId === 'string' && command.dailyPayId.length <= 128
-      && (command.type === 'reviewDailyPay' ? ['approve','reject'].includes(command.decision) : ['cash','bank'].includes(command.method));
+      && (command.type === 'reviewDailyPay' ? ['approve','reject'].includes(command.decision)
+        : command.method === 'vault' ? typeof command.vaultId === 'string' && /^cash-account-[a-z0-9-]{1,64}$/.test(command.vaultId)
+        : ['cash','bank'].includes(command.method) && command.vaultId === undefined);
     else valid = typeof command.castId === 'string' && isPayrollMonth(command.month);
     requireCondition(valid, 400, 'invalid-command', '給与の入力内容を確認してください。');
   }
   if (command.type === 'seat') {
     requireCondition(command.newCustomer == null, 400, 'invalid-command',
       '顧客の新規登録は顧客管理から行ってください。来店登録では登録済みの顧客を選べます。');
+    requireCondition(isSeatCompanionSelection(command),400,'invalid-command','代表のお客様と同席者を来店人数の範囲で選択してください。');
     requireCondition(command.arrivedAt === undefined || (Number.isSafeInteger(command.arrivedAt) && command.arrivedAt >= 0),
       400,'invalid-command','来店時刻を確認してください。');
   }
@@ -340,6 +357,10 @@ function clearCommissionDetails(state) {
 
 function restrictRoleData(next, role, profileId) {
   const allowed = (group) => roleGroupAllowed(next,role,group,profileId);
+  if (!roleAllowsAction(next,role,'rotation-board',profileId)) {
+    for (const ticket of allSnapshotTickets(next)) delete ticket.castRotation;
+    delete next.castRotationDutyProjection;
+  }
   if (!allowed('staffing')) {
     delete next.shifts;
     delete next.castAttendance;
@@ -380,9 +401,12 @@ function restrictRoleData(next, role, profileId) {
     next.archivedStock = [];
     next.movements = [];
     for (const item of next.menu) delete item.recipe;
-    for (const ticket of allSnapshotTickets(next)) for (const line of ticket.lines) {
-      line.stockUses = [];
-      delete line.stockRecipe;
+    for (const ticket of allSnapshotTickets(next)) {
+      for (const line of ticket.lines) {
+        line.stockUses = [];
+        delete line.stockRecipe;
+      }
+      for (const row of ticket.settlement?.commissionDetails ?? []) delete row.cost;
     }
   }
   if (!allowed('printing')) delete next.printDocuments;
@@ -397,11 +421,19 @@ export function projectState(state, role, actorUid, profileId) {
   if (role === 'staff' || !roleGroupAllowed(state,role,'staffing',profileId)) {
     const canAssign = ['order','editTicketLine'].some((type) => roleCommands[role].has(type)
       && roleAllowsCommand(state,role,{type},profileId));
-    const eligibility = canAssign ? getCastDutyProjection(state,Date.now()) : null;
-    if (eligibility) next.castDutyProjection = eligibility;
+    const canRotate = roleAllowsCommand(state,role,{type:'changeCastRotation'},profileId);
+    const eligibility = canAssign || canRotate ? getCastDutyProjection(state,Date.now()) : null;
+    if (eligibility) next[canAssign ? 'castDutyProjection' : 'castRotationDutyProjection'] = eligibility;
   }
   delete next.auditLog;
   delete next.payroll;
+  delete next.staffPayroll;
+  delete next.staffPayrollSelf;
+  delete next.staffPayrollDelegation;
+  const ownPayroll = getStaffOwnPayroll(state,actorUid,role);
+  if (ownPayroll) next.staffPayrollSelf = ownPayroll;
+  const delegatedPayroll = getStaffPayrollDelegation(state,role,profileId);
+  if (delegatedPayroll) next.staffPayrollDelegation = delegatedPayroll;
   delete next.attendances;
   delete next.dailyPayByDate;
   delete next.castAccounts;
@@ -773,6 +805,7 @@ export function validateSnapshot(state) {
   400, 'invalid-snapshot', message);
   const customers = state.customers ?? [];
   const receivables = state.receivables ?? [];
+  requireCondition(isValidCastRotationSnapshot(state,allSnapshotTickets(state)),400,'invalid-snapshot','付け回しの履歴を確認してください。');
   requireCondition(uniqueRecords(customers) && customers.every(validCustomer) && uniqueRecords(receivables),
     400, 'invalid-snapshot', message);
   const operatingDates = new Set([state.day.date, ...state.closedDays.map(({ date }) => date)]);
@@ -794,6 +827,7 @@ export function validateSnapshot(state) {
   let normalizedPayroll;
   let normalizedAttendances;
   let normalizedLabor;
+  let normalizedStaffPayroll;
   try {
     if (state.rolePolicy !== undefined) normalizeRolePolicy(state.rolePolicy);
     if (state.cashAccounts !== undefined) normalizeCashAccounts(state.cashAccounts);
@@ -812,6 +846,7 @@ export function validateSnapshot(state) {
     normalizedPayroll = normalizePayrollSnapshot(state);
     normalizedAttendances = normalizeAttendanceSnapshot(state);
     if (state.staffLabor !== undefined) normalizedLabor = normalizeStaffLabor(state.staffLabor);
+    normalizedStaffPayroll = normalizeStaffPayrollSnapshot(state);
     if (state.cardFeeSettings !== undefined) normalizedCardFeeSettings = normalizeCardFeeSettings(state.cardFeeSettings);
     if (state.printSettings !== undefined) normalizedPrintSettings = normalizePrintSettings(state.printSettings);
     parseStoreConfiguration(JSON.stringify(exportStoreConfiguration(state)));
@@ -827,9 +862,13 @@ export function validateSnapshot(state) {
   if (normalizedPayroll !== undefined) migrated.payroll = normalizedPayroll;
   if (normalizedAttendances !== undefined) migrated.attendances = normalizedAttendances;
   if (normalizedLabor !== undefined) migrated.staffLabor = normalizedLabor;
+  if (normalizedStaffPayroll !== undefined) migrated.staffPayroll = normalizedStaffPayroll;
+  delete migrated.staffPayrollSelf;
+  delete migrated.staffPayrollDelegation;
   if (migrated.castAttendance !== undefined) migrated.castAttendance = listCastAttendance(state);
   delete migrated.castAccounts;
   delete migrated.castDutyProjection;
+  delete migrated.castRotationDutyProjection;
   delete migrated.dailyPayByDate;
   delete migrated.auditLog;
   delete migrated.floorMonthSales;

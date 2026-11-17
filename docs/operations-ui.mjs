@@ -35,11 +35,14 @@ const auditLabels = {
   savePayrollTemplate: '給与テンプレートの保存', assignPayrollTemplate: '給与テンプレートの割り当て', removePayrollTemplate: '給与テンプレートの削除',
   savePayrollVariables:'給与の個人別変数の更新',
   saveEmployeeProfile:'従業員台帳の変更', saveAttendanceItems:'勤怠項目の変更', saveManagedAttendance:'勤怠の代理登録・訂正',
+  saveAttendanceBatch:'勤怠の一括登録・訂正',
   saveStaffPerson:'勤務者台帳の変更',saveStaffRate:'勤務者の時給変更',saveStaffAttendance:'役職別勤怠の記録・訂正',voidStaffAttendance:'役職別勤怠の取消',
+  saveStaffPayrollDraft:'従業員給与の下書き保存',finalizeStaffPayroll:'従業員給与の確定',bindStaffPayrollAccount:'従業員支給明細のアカウント連携',
   requestDailyPay: '日払いの申請', reviewDailyPay: '日払いの審査', payDailyPay: '日払いの支給',
   saveTicketNote: '伝票メモの変更', adjustTicketEnd: '終了時刻の調整', adjustTicketGuests: '利用人数の変更',
   extendOverdue:'一括延長', seat:'来店登録', order:'注文登録', move:'卓移動・連結', extend:'延長登録',
   depart:'退店', serve:'提供済み', editTicketLine:'注文訂正', cancelTicketExtension:'延長の取消',
+  changeCastRotation:'付け回しの変更',
   bindCastAccount:'キャストアカウントの設定', castClockIn:'出勤打刻', castClockOut:'退勤打刻', reviewCastAttendance:'勤怠の確認',
   castRequestShift:'勤務希望の申請', castRequestDailyPay:'本人の日払い申請',
   saveCalculationSettings:'税とサービス料の計算設定',
@@ -86,6 +89,9 @@ const valueLabels = {
   note: '伝票メモ', endsAt: '終了時刻', extensionCount:'延長回数', extensionPlan:'延長プラン',
   startsAt:'開始時刻', arrivedAt:'来店時刻', providedAt:'提供時刻', cancelledAt:'取消時刻', lines:'注文明細', castNames:'歩合対象者',
   guests:'滞在人数', admittedGuests:'来店人数の合計', guestChangeMode:'変更方法', correct:'人数の訂正', join:'途中合流', leave:'一部退店',
+  castRotation:'付け回し', assignment:'付け回し', ticketNumber:'伝票番号', queuedAt:'待機時刻', startedAt:'接客開始時刻', endedAt:'接客終了時刻', endReason:'終了区分', waitingOrder:'待機順',
+  attendanceTimeUnit:'設定の時間単位（分）',timeUnitMinutes:'記録時の時間単位（分）',clockInAt:'出勤時刻',clockOutAt:'退勤時刻',
+  breakMinutes:'休憩（分）',minutes:'勤務分数',rows:'対象の勤怠',record:'勤怠記録',
 };
 
 function inputLabel(label, control) {
@@ -135,7 +141,7 @@ function visibleAuditFields(value) {
 function readableValue(value, key) {
   if (value == null) return value;
   if (key === 'castDutyMode') return castDutyModes[value] ?? value;
-  if (['startsAt','endsAt','arrivedAt','providedAt','cancelledAt','voidedAt'].includes(key) && Number.isFinite(new Date(value).getTime())) return timestamp.format(value);
+  if (['startsAt','endsAt','arrivedAt','providedAt','cancelledAt','voidedAt','clockInAt','clockOutAt'].includes(key) && Number.isFinite(new Date(value).getTime())) return timestamp.format(value);
   if (['managerDiscountRateBps','rateBps','dailyPayLimitBps','serviceRateBps','cardFeeRateBps','waivedFeeRate',
     'taxRate','originalTaxRate','lineDiscountRateBps'].includes(key)) return `${value / 100}%`;
   if (typeof value === 'number' && moneyFields.has(key)) return `¥${japaneseNumber.format(value)}`;

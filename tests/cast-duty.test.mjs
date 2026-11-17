@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { apply, createDemo, previewSettledContents, quote } from '../docs/engine.mjs';
 import { getAssignableCast, getCastDutyMode } from '../docs/cast-duty.mjs';
+import { getRotationAssignableCast } from '../docs/cast-rotation.mjs';
 import { createCastDutyDemo } from '../docs/phase-two-demo.mjs';
 import { projectState, validateSnapshot, verifyCommand } from '../server/policy.mjs';
 
@@ -46,8 +47,16 @@ test('staff projection exposes eligibility and refresh deadline while preserving
   assert.deepEqual(eligible(filtered,filtered.castDutyProjection.refreshAt),[]);
   for (const key of ['shifts','castAttendance','attendances','staffLabor','payroll']) assert.equal(filtered[key],undefined);
   const restricted = {...state,rolePolicy:{staff:{label:'閲覧のみ',disabled:['orders']}}};
-  assert.equal(projectState(restricted,'staff','staff').castDutyProjection,undefined);
-  assert.equal(validateSnapshot({...state,castDutyProjection:{ids:['cast6'],refreshAt:null}}).castDutyProjection,undefined);
+  const rotation = projectState(restricted,'staff','staff');
+  assert.equal(rotation.castDutyProjection,undefined);
+  assert.deepEqual(getRotationAssignableCast(rotation,now).map(({id}) => id),['cast1']);
+  assert.deepEqual(getRotationAssignableCast(rotation,rotation.castRotationDutyProjection.refreshAt),[]);
+  restricted.rolePolicy.staff.disabled.push('floor');
+  assert.equal(projectState(restricted,'staff','staff').castRotationDutyProjection,undefined);
+  const spoofed = {ids:['cast6'],refreshAt:null};
+  const migrated = validateSnapshot({...state,castDutyProjection:spoofed,castRotationDutyProjection:spoofed});
+  assert.equal(migrated.castDutyProjection,undefined);
+  assert.equal(migrated.castRotationDutyProjection,undefined);
 });
 
 test('new and edited assignments use duty; ordinary unassigned orders and extension attribution continue', () => {

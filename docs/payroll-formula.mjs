@@ -2,9 +2,9 @@ const inputKeys = new Set(['hourlyPay','commission','pointPay','baseGross','minu
 const operators = new Set(['+','-','*','/']);
 export const advancedPayrollBases = new Set(['formula','threshold','progressive']);
 export const payrollActualNames = Object.freeze({
-  personalSales:'確定した個人売上（円）',workdays:'勤務日数',lateDays:'遅刻日数',absenceDays:'欠勤日数',noShowDays:'無断欠勤日数',
+  personalSales:'確定した個人売上（円）',personalCost:'確定した個人原価（円）',workdays:'勤務日数',lateDays:'遅刻日数',absenceDays:'欠勤日数',noShowDays:'無断欠勤日数',
 });
-export const payrollLineMetrics = Object.freeze({quantity:'数量',sales:'個人売上（円）',commission:'確定歩合（円）',points:'ポイント'});
+export const payrollLineMetrics = Object.freeze({quantity:'数量',sales:'個人売上（円）',cost:'個人原価（円）',commission:'確定歩合（円）',points:'ポイント'});
 export class PayrollFormulaError extends Error {}
 
 function check(condition, message) {
@@ -24,7 +24,7 @@ export function payrollLineKey(kind,metric,id) {
 export function parsePayrollActualKey(key) {
   if (typeof key !== 'string') return null;
   if (Object.hasOwn(payrollActualNames,key)) return {kind:'summary',id:key};
-  const match = /^(menu|category):(quantity|sales|commission|points):([^:]{1,1152})$/.exec(key);
+  const match = /^(menu|category):(quantity|sales|cost|commission|points):([^:]{1,1152})$/.exec(key);
   if (!match) return null;
   const [,kind,metric,encoded] = match;
   try {

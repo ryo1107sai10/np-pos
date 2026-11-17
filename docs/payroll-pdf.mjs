@@ -256,6 +256,10 @@ export function createPayrollZip(records,storeName) {
   return createStatementZip(records.map(monthlyStatement),storeName);
 }
 
+export function createPayrollPdf(record,storeName) {
+  return renderStatementPages(monthlyStatement(record),storeName);
+}
+
 export function createPayrollRangeZip(records,storeName) {
   return createStatementZip(records.map(rangeStatement),storeName);
 }

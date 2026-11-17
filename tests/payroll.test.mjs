@@ -8,6 +8,9 @@ import { renderPayroll, renderPayrollPrint, renderPayrollRange } from '../docs/p
 import { defaultPayrollStatementLayout, monthlyPayrollSections } from '../docs/payroll-statement-layout.mjs';
 import { bindCastAccount, getCastWorkspace } from '../docs/cast-self.mjs';
 import { createPayrollDemo } from '../docs/phase-two-demo.mjs';
+import { vaultBalance } from '../docs/cash-accounts.mjs';
+import { buildCashMovementCsv, getCashReport } from '../docs/cash-report.mjs';
+import { renderDailyPayReceipt } from '../docs/print-ui.mjs';
 import { buildDailyReportCsv } from '../docs/report-export.mjs';
 import { getReportDay, getReportPeriod } from '../docs/report-period.mjs';
 import { projectState, validateSnapshot, verifyCommand } from '../server/policy.mjs';
@@ -416,7 +419,7 @@ test('daily pay approval and payout adjust one register entry and the locked mon
   const bank = state.payroll.dailyPays.at(-1);
   state = run(state,{type:'reviewDailyPay',dailyPayId:bank.id,decision:'approve',reason:'本人から振込の希望'});
   state = run(state,{type:'payDailyPay',dailyPayId:bank.id,method:'bank'});
-  assert.deepEqual(getDailyPayTotals(state,date),{cash:9_000,bank:500});
+  assert.deepEqual(getDailyPayTotals(state,date),{cash:9_000,bank:500,vault:0});
   assert.equal(summary(state).expectedCash,11_000);
   assert.equal(state.cashMovements.length,1);
   state = run(state,finalize);
@@ -438,10 +441,50 @@ test('daily pay approval and payout adjust one register entry and the locked mon
   const report = getReportDay(masked,date);
   assert.equal(report.current.expectedCash,11_000);
   assert.equal(report.current.cashOut,9_000);
-  assert.deepEqual(report.current.dailyPayTotals,{cash:9_000,bank:500});
+  assert.deepEqual(report.current.dailyPayTotals,{cash:9_000,bank:500,vault:0});
   const monthly = getReportPeriod(masked,{mode:'month',month});
-  assert.deepEqual(monthly.totals.dailyPayTotals,{cash:9_000,bank:500});
+  assert.deepEqual(monthly.totals.dailyPayTotals,{cash:9_000,bank:500,vault:0});
   const csv = buildDailyReportCsv(monthly,'サンプル店舗');
-  assert.match(csv,/日払い支給（現金・出金に含む）,日払い支給（振込）\r\n/);
-  assert.match(csv,/,9000,500\r\n$/);
+  assert.match(csv,/日払い支給（現金・出金に含む）,日払い支給（振込）,日払い支給（金庫）\r\n/);
+  assert.match(csv,/,9000,500,0\r\n$/);
+});
+
+test('vault day pay updates the vault without touching the register and retains its receipt and history', () => {
+  let state = run(shop(),rate(3500));
+  state = run(state,payDraft());
+  const vault = {id:'cash-account-test',kind:'vault',name:'支給用金庫',openingBalance:2000,enabled:true};
+  state = run(state,{type:'saveCashAccounts',accounts:[vault]});
+  state = run(state,{type:'requestDailyPay',month,castId,amount:1000});
+  const [request] = getPayrollDailyPays(state);
+  state = run(state,{type:'reviewDailyPay',dailyPayId:request.id,decision:'approve'});
+  const pay = {type:'payDailyPay',dailyPayId:request.id,method:'vault',vaultId:vault.id};
+  assert.doesNotThrow(() => verifyCommand('admin',pay));
+  assert.throws(() => verifyCommand('manager',pay),{code:'forbidden'});
+  assert.throws(() => run(state,{...pay,vaultId:'cash-account-missing'}),/利用できる金庫/);
+  const underfunded = run(state,{type:'recordCashMovement',kind:'deposit',category:'safe',cashAccountId:vault.id,
+    amount:1500,reason:'レジへの移動'});
+  assert.throws(() => run(underfunded,pay),/金庫の残高/);
+  assert.throws(() => run(state,{type:'recordCashMovement',kind:'withdrawal',category:'dailyPayVault',cashAccountId:vault.id,
+    amount:500,reason:'直接登録不可'}),/理由区分/);
+  state = run(state,pay);
+  const [paid] = getPayrollDailyPays(state);
+  assert.equal(vaultBalance(state,vault),1000);
+  assert.equal(summary(state).expectedCash,20_000);
+  assert.equal(summary(state).cashOut,0);
+  assert.equal(previewPayroll(state,getPayrollDraft(state,month,castId)).paidDailyPay,1000);
+  assert.equal(getDailyPayTotals(state,date).vault,1000);
+  assert.equal(state.auditLog[0].after.vaultId,vault.id);
+  assert.throws(() => run(state,pay),/承認済み/);
+  assert.throws(() => run(state,{type:'voidCashMovement',movementId:paid.cashMovementId,correctionReason:'支給済み'}),/訂正できる入出金/);
+  const receipt = renderDailyPayReceipt(paid,{width:80,storeName:'銀座店'},{escape:String,yen:String});
+  assert.match(receipt,/data-paper-width="80"[\s\S]*日払い受領書[\s\S]*支給用金庫[\s\S]*1000/);
+  state = run(state,{type:'close',actualCash:20_000});
+  const migrated = validateSnapshot(state);
+  assert.deepEqual(getPayrollDailyPays(migrated),[paid]);
+  const cash = getCashReport(migrated);
+  assert.equal(cash.ledger[0].postedAmount,0);
+  assert.match(buildCashMovementCsv(cash,'銀座店'),/日払い（金庫）,-1000,0,計上済み/);
+  const orphan = structuredClone(migrated);
+  orphan.payroll.dailyPays = [];
+  assert.throws(() => validateSnapshot(orphan),{code:'invalid-snapshot'});
 });

@@ -2,6 +2,7 @@ import { apply, createDemo } from '../docs/engine.mjs';
 import { getNextAutoExtensionAt } from '../docs/auto-extension.mjs';
 import { getMonthlyReportSales, getReportDay, isReportDate } from '../docs/report-period.mjs';
 import { getCustomRole, isCustomRoleId } from '../docs/role-policy.mjs';
+import { staffPayrollMemberRoles } from '../docs/staff-payroll.mjs';
 import { isConcurrentOrder, orderConcurrencyWindow } from '../docs/order-concurrency.mjs';
 import { ApiError, canOperate, projectState, requireCondition, roles, validateSnapshot, verifyCommand } from './policy.mjs';
 import { emailAddress, prepared, readRows, resultRow } from './db-queries.mjs';
@@ -187,12 +188,23 @@ export async function changeMember(db, actor, storeId, uid, choice) {
   const member = adminRequired(memberRequired(await findMembership(db, actor, storeId)));
   requireCondition(uid !== member.owner_uid, 409, 'primary-member', '最初の管理者の所属と権限は変更できません。');
   const assignment = choice === undefined ? {} : await resolveStoreRole(db,actor,storeId,choice);
-  const {role,profileId,profileRevision = null} = assignment;
+  const {role,profileId} = assignment;
+  let profileRevision = assignment.profileRevision ?? null;
   const target = await resultRow(db,`SELECT a.role, a.source, p.profile_id FROM np_store_access a
     LEFT JOIN np_member_role_profiles p ON p.store_id = a.store_id AND p.uid = a.uid WHERE a.store_id = ? AND a.uid = ?`,storeId,uid);
   requireCondition(target,404,'member-not-found','所属メンバーが見つかりません。');
   requireCondition(role === undefined || target.source === 'direct',409,'group-role','グループ経由の権限は店舗グループで変更してください。');
-  if (target.role === 'cast' && role !== 'cast') return revokeCastMembership(db,actor,storeId,uid,role,profileId,profileRevision);
+  if (target.source === 'direct' && target.role === 'cast' && role !== 'cast') {
+    return revokePayrollMembership(db,actor,storeId,uid,target.role,role,profileId,profileRevision);
+  }
+  if (target.source === 'direct' && staffPayrollMemberRoles.includes(target.role) && role !== target.role) {
+    const current = adminRequired(await snapshot(db,actor,storeId));
+    requireCondition(profileRevision === null || current.revision === profileRevision,409,'membership-conflict','最新の役職設定を確認してください。');
+    if (current.state.staffPayroll?.links?.some((link) => link.uid === uid)) {
+      return revokePayrollMembership(db,actor,storeId,uid,target.role,role,profileId,current.revision);
+    }
+    profileRevision = current.revision;
+  }
   const selector = `SELECT t.store_id, t.uid, t.email FROM np_store_access t JOIN np_stores s ON s.id = t.store_id
     LEFT JOIN np_member_role_profiles p ON p.store_id = t.store_id AND p.uid = t.uid
     WHERE t.store_id = ? AND t.uid = ? AND t.uid <> s.owner_uid AND t.role = ? AND t.source = ?
@@ -375,14 +387,14 @@ function writeSnapshot(db, storeId, chunks, previousChunks, revision, conditionA
   return statements;
 }
 
-async function revokeCastMembership(db,actor,storeId,memberUid,role,profileId,profileRevision) {
+async function revokePayrollMembership(db,actor,storeId,memberUid,oldRole,role,profileId,profileRevision) {
   const current = adminRequired(await snapshot(db,actor,storeId));
   requireCondition(profileRevision === null || current.revision === profileRevision,409,'membership-conflict','最新の役職設定を確認してください。');
   if (current.revision === 0) {
-    const filter = `WHERE store_id = ? AND uid = ? AND role = 'cast'
+    const filter = `WHERE store_id = ? AND uid = ? AND role = ?
       AND EXISTS (SELECT 1 FROM np_stores s WHERE s.id = ? AND s.revision = 0)
       AND EXISTS (SELECT 1 FROM np_store_access m WHERE m.store_id = ? AND m.uid = ? AND m.role = 'admin')`;
-    const values = [storeId,memberUid,storeId,storeId,actor.uid];
+    const values = [storeId,memberUid,oldRole,storeId,storeId,actor.uid];
     let row;
     if (role === undefined) {
       row = await resultRow(db,`INSERT INTO np_store_access_blocks (store_id, uid, email)
@@ -399,28 +411,34 @@ async function revokeCastMembership(db,actor,storeId,memberUid,role,profileId,pr
   }
   const operationId = crypto.randomUUID();
   const revision = current.revision + 1;
-  const oldLink = current.state.castAccounts?.find(({uid}) => uid === memberUid);
-  const state = oldLink ? {...current.state,castAccounts:current.state.castAccounts.filter(({uid}) => uid !== memberUid)} : current.state;
+  const cast = oldRole === 'cast';
+  const links = cast ? current.state.castAccounts : current.state.staffPayroll?.links;
+  const oldLink = links?.find(({uid}) => uid === memberUid);
+  const remaining = oldLink ? links.filter(({uid}) => uid !== memberUid) : null;
+  const state = !oldLink ? current.state : cast ? {...current.state,castAccounts:remaining}
+    : {...current.state,staffPayroll:{...current.state.staffPayroll,links:remaining}};
   const now = Date.now();
-  const fingerprint = await getFingerprint('revokeCastMembership',{memberUid,role:role ?? null});
+  const operation = cast ? 'revokeCastMembership' : 'revokeStaffPayrollMembership';
+  const fingerprint = await getFingerprint(operation,{memberUid,role:role ?? null});
   const args = [storeId,operationId,actor.uid,revision,current.revision];
   const statements = [prepared(db, `INSERT INTO np_operations (store_id, operation_id, actor_uid, operation, fingerprint, revision, recorded_at)
-    SELECT s.id, ?, ?, 'revokeCastMembership', ?, ?, ? FROM np_stores s WHERE s.id = ? AND s.revision = ?
+    SELECT s.id, ?, ?, ?, ?, ?, ? FROM np_stores s WHERE s.id = ? AND s.revision = ?
     AND EXISTS (SELECT 1 FROM np_store_access m WHERE m.store_id = s.id AND m.uid = ? AND m.role = 'admin')
-    AND EXISTS (SELECT 1 FROM np_members t WHERE t.store_id = s.id AND t.uid = ? AND t.role = 'cast') ON CONFLICT DO NOTHING`,
-  operationId,actor.uid,fingerprint,revision,now,storeId,current.revision,actor.uid,memberUid)];
+    AND EXISTS (SELECT 1 FROM np_store_access t WHERE t.store_id = s.id AND t.uid = ? AND t.role = ? AND t.source = 'direct') ON CONFLICT DO NOTHING`,
+  operationId,actor.uid,operation,fingerprint,revision,now,storeId,current.revision,actor.uid,memberUid,oldRole)];
   if (oldLink) {
-    const payload = JSON.stringify({id:operationId,at:now,action:'bindCastAccount',businessDate:current.state.day.date,
-      actor:{id:actor.uid,label:actor.email,role:'admin'},target:{kind:'cast',id:oldLink.castId,label:'キャスト本人アカウント'},
-      before:{castId:oldLink.castId},after:null,reason:'アカウントの所属・権限変更により連携を解除'});
+    const payload = JSON.stringify({id:operationId,at:now,action:cast ? 'bindCastAccount' : 'bindStaffPayrollAccount',businessDate:current.state.day.date,
+      actor:{id:actor.uid,label:actor.email,role:'admin'},target:cast ? {kind:'cast',id:oldLink.castId,label:'キャスト本人アカウント'}
+        : {kind:'payroll',id:oldLink.personId,label:'従業員の支給明細アカウント'},
+      before:cast ? {castId:oldLink.castId} : {personId:oldLink.personId},after:null,reason:'アカウントの所属・権限変更により連携を解除'});
     statements.push(prepared(db,`INSERT INTO np_audit_events (store_id,operation_id,revision,payload)
       SELECT ?, ?, ?, ? WHERE ${currentOperation}`,storeId,operationId,revision,payload,...args));
   }
-  const memberFilter = `WHERE store_id = ? AND uid = ? AND role = 'cast' AND ${currentOperation}`;
+  const memberFilter = `WHERE store_id = ? AND uid = ? AND role = ? AND ${currentOperation}`;
   if (role === undefined) statements.push(prepared(db,`INSERT INTO np_store_access_blocks (store_id, uid, email)
-    SELECT store_id, uid, email FROM np_members ${memberFilter}`,storeId,memberUid,...args));
+    SELECT store_id, uid, email FROM np_members ${memberFilter}`,storeId,memberUid,oldRole,...args));
   else statements.push(
-    prepared(db,`UPDATE np_members SET role = ? ${memberFilter}`,role,storeId,memberUid,...args),
+    prepared(db,`UPDATE np_members SET role = ? ${memberFilter}`,role,storeId,memberUid,oldRole,...args),
     assignMemberProfile(db,storeId,memberUid,profileId,currentOperation,args),
   );
   // Advance the revision even when there was no link, so in-flight binds cannot target a membership that has been revoked and renewed.
@@ -483,13 +501,17 @@ async function saveOperation(db, actor, storeId, command, observed, observedAt, 
     throw new ApiError(409, 'auto-extension-updated', '自動延長で伝票が更新されました。伝票を開き直して金額を確認してください。');
   }
   const operator = { id: actor.uid, label: actor.email, role: current.role, ...(current.profileId && {profileId:current.profileId}) };
-  const binding = operation === 'command' && value.type === 'bindCastAccount';
-  if (binding) requireCondition(current.revision > 0,409,'store-not-initialized','店舗の営業データを準備してからキャストを連携してください。');
-  const bindingUid = binding && value.castId !== null ? value.memberUid : null;
+  const castBinding = operation === 'command' && value.type === 'bindCastAccount';
+  const staffBinding = operation === 'command' && value.type === 'bindStaffPayrollAccount';
+  if (castBinding || staffBinding) requireCondition(current.revision > 0,409,'store-not-initialized','店舗の営業データを準備してから従業員を連携してください。');
+  const bindingUid = castBinding && value.castId !== null || staffBinding && value.personId !== null ? value.memberUid : null;
+  const bindingRole = castBinding ? 'cast' : staffBinding && value.personId !== null
+    ? current.state.staffLabor?.people.find(({id}) => id === value.personId)?.role ?? null : null;
   const requireBindableMember = async () => {
     if (!bindingUid) return;
-    const target = await resultRow(db,'SELECT role FROM np_members WHERE store_id = ? AND uid = ?',storeId,bindingUid);
-    requireCondition(target?.role === 'cast',422,'invalid-cast-member','この店舗に参加済みのキャストアカウントを選択してください。');
+    const target = await resultRow(db,"SELECT role FROM np_store_access WHERE store_id = ? AND uid = ? AND source = 'direct'",storeId,bindingUid);
+    requireCondition(bindingRole && target?.role === bindingRole,422,castBinding ? 'invalid-cast-member' : 'invalid-staff-member',
+      castBinding ? 'この店舗に参加済みのキャストアカウントを選択してください。' : 'この店舗に直接参加していて、勤務者と役職が一致するアカウントを選択してください。');
   };
   await requireBindableMember();
   let next;
@@ -525,7 +547,7 @@ async function saveOperation(db, actor, storeId, command, observed, observedAt, 
       SELECT s.id, ?, m.uid, ?, ?, ?, ? FROM np_stores s JOIN np_store_access m ON m.store_id = s.id
       LEFT JOIN np_member_role_profiles p ON p.store_id = m.store_id AND p.uid = m.uid
       WHERE s.id = ? AND s.revision = ? AND m.uid = ? AND m.role = ? AND p.profile_id IS ?
-      AND (? IS NULL OR EXISTS (SELECT 1 FROM np_members c WHERE c.store_id = s.id AND c.uid = ? AND c.role = 'cast'))
+      AND (? IS NULL OR EXISTS (SELECT 1 FROM np_store_access c WHERE c.store_id = s.id AND c.uid = ? AND c.role = ? AND c.source = 'direct'))
       AND (? IS NULL OR NOT EXISTS (
         SELECT mp.profile_id || '=' || nm.role FROM np_member_role_profiles mp
           JOIN np_members nm ON nm.store_id = mp.store_id AND nm.uid = mp.uid WHERE mp.store_id = s.id
@@ -535,7 +557,7 @@ async function saveOperation(db, actor, storeId, command, observed, observedAt, 
       ))
       ON CONFLICT DO NOTHING`,
     operationId, operation === 'migrate' ? 'migrate' : value.type, fingerprint, revision, now, storeId, current.revision, actor.uid, current.role,
-    current.profileId ?? null,bindingUid,bindingUid,declaredProfiles,declaredProfiles),
+    current.profileId ?? null,bindingUid,bindingUid,bindingRole,declaredProfiles,declaredProfiles),
   ];
   if (event) {
     const payload = JSON.stringify({ ...event, id: operationId, at: now, actor: operator });

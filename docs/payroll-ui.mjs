@@ -67,12 +67,13 @@ function dailyPayRows(state, selection, {escape,icon,yen}, {finalized, missingRa
     guidance = `<p class="field-help">日払い目安 ${yen(limit)} ／ 申請・支給の合計 ${yen(committed)}</p>`;
   }
   return `${finalized || missingRate ? '' : `<div class="ops-actions">${button('日払いを申請登録','payroll-request-pay',icon,'wallet')}</div>`}${guidance}
-    ${rows.length ? `<ul class="payroll-advances">${rows.map(({id,amount,status,reason,paidDate,method}) =>
+    ${rows.length ? `<ul class="payroll-advances">${rows.map(({id,amount,status,reason,paidDate,method,vaultName}) =>
       `<li><div><strong>${yen(amount)}</strong> <span class="lr-badge">${labels[status]}</span>
-        ${paidDate ? `<small>${escape(paidDate)} ／ ${method === 'cash' ? '現金' : '振込'}</small>` : ''}
+        ${paidDate ? `<small>${escape(paidDate)} ／ ${method === 'vault' ? `金庫 ${escape(vaultName)}` : method === 'cash' ? 'レジ現金' : '振込'}</small>` : ''}
         ${reason ? `<small>${escape(reason)}</small>` : ''}</div><div class="ops-actions">${!finalized && !missingRate && status === 'requested'
         ? `<button type="button" class="btn" data-id="${escape(id)}" data-action="payroll-review-pay">申請を確認</button>`
-        : !finalized && status === 'approved' && state.day.status === 'open' ? `<button type="button" class="btn" data-id="${escape(id)}" data-action="payroll-pay">支給を記録</button>` : ''}</div></li>`).join('')}</ul>`
+        : !finalized && status === 'approved' && state.day.status === 'open' ? `<button type="button" class="btn" data-id="${escape(id)}" data-action="payroll-pay">支給を記録</button>`
+        : status === 'paid' ? `<button type="button" class="btn" data-id="${escape(id)}" data-action="payroll-pay-receipt">受領書を印刷</button>` : ''}</div></li>`).join('')}</ul>`
     : '<p class="field-help">登録された日払いはありません。</p>'}`;
 }
 
@@ -473,7 +474,7 @@ export function renderPayrollPrint(record, {escape,yen,storeName}) {
   const sections = pay.settings?.statementLayout ? monthlyPayrollSections(pay,yen).map(([title,rows]) =>
     panel(title,`<dl class="lr-money-list">${rows.map(([label,value]) => `<div><dt>${escape(label)}</dt><dd>${escape(value)}</dd></div>`).join('')}</dl>`)).join('')
     : `${panel('支給内訳',details(pay,{escape,yen}))}
-    ${panel('勤務の内訳',pay.work.length ? workDetails(pay,{escape,yen}) : '<p>勤務時間の登録なし</p>')}
+    ${pay.workWithheld ? '' : panel('勤務の内訳',pay.work.length ? workDetails(pay,{escape,yen}) : '<p>勤務時間の登録なし</p>')}
     ${pay.allowances.length ? panel('手当',listAmounts(pay.allowances.map(({label,amount}) => [label,amount]),{escape,yen})) : ''}
     ${pay.deductions.length ? panel('控除',listAmounts(pay.deductions.map(({label,amount}) => [label,amount]),{escape,yen})) : ''}
     ${pay.statementItems?.length ? panel('計算テンプレートの内訳',ruleAmounts(pay,{escape,yen})) : ''}

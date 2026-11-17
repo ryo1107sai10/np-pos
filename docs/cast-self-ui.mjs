@@ -28,6 +28,7 @@ function attendanceList(entries,api,people) {
       <small>${people ? `${escape(entry.date)} ／ ` : ''}${escape(displayTime(entry.clockInAt))} ～ ${escape(displayTime(entry.clockOutAt))}</small>
       ${entry.reviewReason ? `<small>${escape(entry.reviewReason)}</small>` : ''}</div><div class="cast-self-status">
       <span class="lr-badge">${attendanceNames[entry.status]}</span><small>${duration(entry.minutes)}</small>
+      ${entry.timeUnitMinutes > 1 ? `<small>${entry.timeUnitMinutes}分単位で集計</small>` : ''}
       ${entry.classification && entry.classification !== 'worked' ? `<small>${classes[entry.classification]}</small>` : ''}
       ${entry.breakMinutes ? `<small>休憩 ${entry.breakMinutes}分</small>` : ''}
       ${people && api.canEdit !== false ? button('訂正する','attendance-editor',api,'clock',{id:escape(entry.id)}) : ''}</div></li>`).join('')}</ul>`

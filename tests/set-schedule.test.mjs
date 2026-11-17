@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { apply, createDemo, exportStoreConfiguration, parseStoreConfiguration } from '../docs/engine.mjs';
-import { applySetSchedule, isValidInitialSetSchedule, suggestInitialSet } from '../docs/set-schedule.mjs';
+import { applySetSchedule, initialSetForSeat, isValidInitialSetSchedule, suggestInitialSet } from '../docs/set-schedule.mjs';
 import { readInitialSetSchedule, renderInitialSetSchedule } from '../docs/set-schedule-ui.mjs';
 
 const admin = { role: 'admin' };
@@ -36,6 +36,16 @@ test('uses half-open Tokyo intervals across midnight and preserves the fallback 
   assert.equal(suggestInitialSet(state, time('05:00', 17)), undefined);
   save(state, []);
   assert.equal(suggestInitialSet(state, time('20:30')), undefined);
+});
+
+test('initial seating recommends the recorded Tokyo arrival band and keeps an available VIP fallback', () => {
+  const state = {...shop(),tables:[{id:'vip',area:'VIP'},{id:'main',area:'フロアA'}]};
+  save(state,[evening,late]);
+  assert.deepEqual(initialSetForSeat(state,'main',time('22:01')),{id:'set90',suggested:true});
+  assert.deepEqual(initialSetForSeat(state,'main',time('21:55')),{id:'set60',suggested:true});
+  assert.deepEqual(initialSetForSeat(state,'vip',time('19:00')),{id:'vip60',suggested:false});
+  state.menu[2].enabled = false;
+  assert.deepEqual(initialSetForSeat(state,'vip',time('19:00')),{id:'set60',suggested:false});
 });
 
 test('rejects overlapping bands, invalid times and unavailable IDs atomically', () => {

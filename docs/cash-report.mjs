@@ -1,4 +1,5 @@
-import { cashMovementCategories, cashMovementKinds } from './cash-ledger.mjs';
+import { cashMovementCategoryLabel, cashMovementKinds } from './cash-ledger.mjs';
+import { isVaultDailyPay } from './cash-accounts.mjs';
 import { encodeCsv } from './csv-file.mjs';
 import { getReportPeriod } from './report-period.mjs';
 
@@ -18,8 +19,8 @@ export function getCashReport(state, filters = {}) {
       const {kind,voidedAt} = item;
       const voided = voidedAt != null;
       const signedAmount = kind === 'deposit' ? item.amount : -item.amount;
-      return {date,item,signedAmount,voided,postedAmount:voided ? 0 : signedAmount,
-        typeLabel:cashMovementKinds[kind] ?? '入出金',categoryLabel:cashMovementCategories[kind]?.[item.category] ?? 'その他',
+      return {date,item,signedAmount,voided,postedAmount:voided || isVaultDailyPay(item) ? 0 : signedAmount,
+        typeLabel:cashMovementKinds[kind] ?? '入出金',categoryLabel:cashMovementCategoryLabel(item),
         timestamp:movementDateTime(item.at),voidedTime:movementDateTime(voidedAt)};
     }));
   return {interval,period,ledger};

@@ -2,7 +2,7 @@ import { applyPayrollCommand, getDailyPayLimit, getPayrollDailyPays, getPayrollD
 import { applyShiftCommand } from './shifts.mjs';
 import { normalizeAttendanceItems, resolveAttendanceItems } from './payroll-records.mjs';
 import { getCastPerformance } from './cast-performance.mjs';
-import { operationBusinessDate, registerCutoff } from './register-config.mjs';
+import { attendanceTimeUnits, getAttendanceMinutes, getAttendanceTimeUnit, operationBusinessDate, registerCutoff } from './register-config.mjs';
 
 const minute = 60_000;
 const day = 24 * 60 * minute;
@@ -85,9 +85,10 @@ function listOwnRows(state, castId) {
 
 export function listCastAttendance(state) {
   return (state.castAttendance ?? []).map(({id,castId,date,clockInAt,clockOutAt,status,minutes,breakMinutes,reviewedAt,reviewReason,
-    breaks,classification,items}) =>
+    breaks,classification,items,timeUnitMinutes}) =>
     ({id,castId,date,clockInAt,clockOutAt,status,minutes,breakMinutes,reviewedAt,reviewReason,
-      ...(breaks && {breaks}),...(classification && {classification}),...(items && {items})}))
+      ...(breaks && {breaks}),...(classification && {classification}),...(items && {items}),
+      ...(timeUnitMinutes !== undefined && {timeUnitMinutes})}))
     .sort((first,second) => second.date.localeCompare(first.date) || (second.clockInAt ?? 0) - (first.clockInAt ?? 0));
 }
 
@@ -146,7 +147,8 @@ function clockIn(state, castId, now, allocateId) {
   const date = dateForPunch(state,now);
   check(!rows.some((row) => row.date === date && row.status === 'absent'), 'この営業日は欠勤が登録されています。マネージャーに確認してください。');
   check(getPayrollDraft(state,date.slice(0,7),castId)?.status !== 'final', '給与を確定した期間には打刻できません。');
-  (state.castAttendance ??= []).push({id:allocateId('attendance'),castId,date,clockInAt:now,clockOutAt:null,status:'open'});
+  (state.castAttendance ??= []).push({id:allocateId('attendance'),castId,date,clockInAt:now,clockOutAt:null,status:'open',
+    timeUnitMinutes:getAttendanceTimeUnit(state)});
 }
 
 function clockOut(state, castId, now, breakMinutes = 0) {
@@ -159,7 +161,7 @@ function clockOut(state, castId, now, breakMinutes = 0) {
     '休憩時間は出勤から退勤までの分数以内で入力してください。');
   row.clockOutAt = now;
   row.breakMinutes = breakMinutes;
-  row.minutes = elapsedMinutes - breakMinutes;
+  row.minutes = getAttendanceMinutes(row.clockInAt,now,breakMinutes,row.timeUnitMinutes);
   row.status = 'pending';
 }
 
@@ -249,8 +251,9 @@ function saveManagedAttendance(state, action, now, actor, allocateId) {
   const castRows = rows.filter((row)=>row.castId === castId && row !== prior);
   const absent = absenceTypes.has(classification);
   const dateStart = Date.parse(date) - japanOffset;
+  const timeUnitMinutes = prior ? prior.timeUnitMinutes ?? 1 : getAttendanceTimeUnit(state);
   const row = {id:prior?.id ?? allocateId('attendance'),castId,date,classification,
-    reviewedAt:now,reviewReason:reason};
+    reviewedAt:now,reviewReason:reason,timeUnitMinutes};
   if (absent) {
     check(!castRows.some((entry)=>entry.date === date && entry.status !== 'rejected'), '同じ営業日に勤務または欠勤の記録があります。');
     Object.assign(row,{clockInAt:null,clockOutAt:null,status:'absent'});
@@ -271,7 +274,8 @@ function saveManagedAttendance(state, action, now, actor, allocateId) {
       const breakData = calculateBreaks(action.breaks ?? [],clockInAt,clockOutAt);
       const breakMinutes = breakData.list.length ? breakData.minutes : (action.breakMinutes ?? 0);
       check(Number.isInteger(breakMinutes) && breakMinutes >= 0 && breakMinutes <= elapsedMinutes,'休憩時間を確認してください。');
-      Object.assign(row,{breakMinutes,minutes:elapsedMinutes-breakMinutes,...(breakData.list.length && {breaks:breakData.list})});
+      Object.assign(row,{breakMinutes,minutes:getAttendanceMinutes(clockInAt,clockOutAt,breakMinutes,timeUnitMinutes),
+        ...(breakData.list.length && {breaks:breakData.list})});
     }
   }
   const items = absent ? [] : resolveAttendanceItems(state,action.itemIds ?? [],prior?.items);
@@ -321,7 +325,7 @@ export function applyCastSelfCommand(state, action, now, actor, allocateId) {
 
 function validAttendance(row, castIds) {
   if (!isRecord(row) || !boundedText(row.id,128) || !row.id || !castIds.has(row.castId) || !isDate(row.date)
-    || !attendanceStatuses.has(row.status)) return false;
+    || !attendanceStatuses.has(row.status) || (row.timeUnitMinutes !== undefined && !attendanceTimeUnits.includes(row.timeUnitMinutes))) return false;
   if (row.items !== undefined) normalizeAttendanceItems(row.items);
   if (row.status === 'absent') return row.clockInAt === null && row.clockOutAt === null && absenceTypes.has(row.classification)
     && isTimestamp(row.reviewedAt) && boundedText(row.reviewReason,120) && Boolean(row.reviewReason.trim());
@@ -331,7 +335,7 @@ function validAttendance(row, castIds) {
     const elapsedMinutes = Math.floor((row.clockOutAt - row.clockInAt) / minute);
     const {breakMinutes = 0} = row;
     if (!Number.isInteger(breakMinutes) || breakMinutes < 0 || breakMinutes > elapsedMinutes
-      || row.minutes !== elapsedMinutes - breakMinutes) return false;
+      || row.minutes !== getAttendanceMinutes(row.clockInAt,row.clockOutAt,breakMinutes,row.timeUnitMinutes)) return false;
     if (row.breaks !== undefined && calculateBreaks(row.breaks,row.clockInAt,row.clockOutAt).minutes !== breakMinutes) return false;
   } else if (row.minutes !== undefined || row.breakMinutes !== undefined) return false;
   if (row.status === 'open' || row.status === 'pending') return (row.status === 'open') === (row.clockOutAt === null);

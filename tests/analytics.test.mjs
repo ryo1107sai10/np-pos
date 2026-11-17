@@ -94,6 +94,26 @@ test('confirmed visit analytics use actual departure and compare nomination grou
   assert.match(ui,/会計済み・退店未記録 1組/);
 });
 
+test('added analysis indicators use recorded departures, valid sales and permission-scoped wage estimates', () => {
+  const {state,nominated,other} = liveVisits();
+  const overdue = state.tickets.find(({id}) => id === nominated);
+  overdue.endsAt = overdue.departedAt - 12 * minute;
+  const onTime = state.tickets.find(({id}) => id === other);
+  onTime.endsAt = onTime.departedAt + 9 * minute;
+  overdue.settlement.discount = 1_000;
+  const data = getAnalytics(state,range);
+  assert.equal(data.partySize,2);
+  assert.equal(data.visits.averageOvertime,6);
+  assert.equal(data.visits.overtimeMeasured,2);
+  assert.equal(data.discountRate,Number((100_000 / data.days[0].subtotal).toFixed(1)));
+  const [csv] = csvRows(state,range);
+  assert.equal(csv['平均ロスタイム（分）'],'6');
+  assert.doesNotMatch(renderAnalytics('analytics',state,{...api,range}),/概算給率/);
+  const laborReport = {valid:true,hasKnownCost:true,partial:false,knownCost:data.period.totals.sales / 4};
+  assert.match(renderAnalytics('analytics',state,{...api,range,laborReport}),/概算給率（全体）[\s\S]*25\.0%/);
+  assert.doesNotMatch(renderAnalytics('analytics',state,{...api,range,laborReport:{...laborReport,partial:true}}),/25\.0%/);
+});
+
 test('legacy summaries preserve sales but do not invent a rate, duration, or cohort sales', () => {
   const {state} = liveVisits();
   state.closedDays.push({date:before,tickets:5,guests:8,sales:37_800});

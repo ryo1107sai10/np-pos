@@ -5,6 +5,7 @@ import { apply, createDemo, exportStoreConfiguration, parseStoreConfiguration, q
 import { buildFreeeCsv } from '../docs/freee-export.mjs';
 import { getReportPeriod } from '../docs/report-period.mjs';
 import { getStoreSettings } from '../docs/store-settings.mjs';
+import { projectState, validateSnapshot } from '../server/policy.mjs';
 
 const date = '2026-11-16';
 const now = Date.parse(`${date}T20:00:00+09:00`);
@@ -49,6 +50,36 @@ test('service and tax rounding use integer money and distinguish below-half and 
   const [{ id: ticketId }] = state.tickets;
   state = run(state, { type: 'order', ticketId, items: [{ menuId: 'highball', quantity: 1 }] });
   assert.deepEqual(quote(state, ticketId).taxBreakdown, [{ rate: 1_000, base: 30, tax: 3 }]);
+});
+
+test('snapshots keep coarse service rounding and independent cast allocations stable after configuration changes', () => {
+  let state = menuPrices(open(),{set60:{price:12_347},highball:{price:10_003,commission:{fixed:1000,rate:0,points:1}}});
+  state = configure(state,{serviceRoundingUnit:100,serviceRounding:'round',castAllocation:{
+    amount:{unit:10,mode:'round'},points:{unit:10,mode:'floor'},quantity:{unit:1000,mode:'floor'},
+    sales:{unit:100,mode:'ceil'},cost:{unit:10,mode:'ceil'},
+  }});
+  state = seat(state);
+  const [visit] = state.tickets;
+  assert.equal(quote(state,visit.id).service,2500);
+  state = run(state,{type:'order',ticketId:visit.id,items:[{menuId:'highball',quantity:1,castIds:['cast1','cast2','cast3']}]});
+  const {commissionDetails,total,service,discount,tax,subtotal} = quote(state,visit.id);
+  assert.equal(service,4500);
+  assert.equal(total,subtotal - discount + service + tax);
+  const line = state.tickets[0].lines.at(-1);
+  const cost = Math.round(line.stockUses.reduce((sum,use) => sum + use.quantity * use.unitCost,0));
+  for (const detail of commissionDetails) {
+    assert.equal(detail.sales,3400);
+    assert.equal(detail.amount,330);
+    assert.equal(detail.quantity,0.3);
+    assert.equal(detail.points,0.33);
+    assert.equal(detail.cost,Math.ceil(cost/30)*10);
+  }
+  state = run(state,{type:'settle',ticketId:visit.id,payments:[{method:'cash',amount:total}]});
+  state = configure(state,{serviceRoundingUnit:1,castAllocation:{}});
+  assert.deepEqual(quote(state,visit.id).commissionDetails,commissionDetails);
+  assert.deepEqual(validateSnapshot(state).tickets[0].settlement.commissionDetails,commissionDetails);
+  state.rolePolicy = {manager:{disabled:['inventory'],label:'マネージャー'}};
+  assert.ok(projectState(state,'manager',manager.id).tickets[0].settlement.commissionDetails.every((row) => !Object.hasOwn(row,'cost')));
 });
 
 test('service basis respects eligible items and chooses either their price or discounted amount', () => {

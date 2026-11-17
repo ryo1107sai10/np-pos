@@ -242,3 +242,16 @@ export function renderPrintPreview(context, api) {
   return renderPrintDocument(context,rules,false,api)
     + (rules.storeCopy ? renderPrintDocument(context,rules,true,api) : '');
 }
+
+export function renderDailyPayReceipt(record, settings, {escape,yen,storeName}) {
+  if (record?.status !== 'paid') return '';
+  const width = settings.width === 80 ? 80 : 58;
+  const source = record.method === 'vault' ? `金庫 ／ ${record.vaultName}` : record.method === 'cash' ? 'レジ現金' : '振込';
+  return `<article class="np-print-paper" data-paper-width="${width}" data-print-kind="daily-pay">
+    <header class="np-print-paper-header"><h3>日払い受領書</h3>
+      <p class="np-print-store-name">${escape(settings.storeName || storeName || 'NP POS')}</p></header>
+    <div class="np-print-meta"><span>支給日時 ${escape(dateLabel(record.paidAt,timestamp))}</span><span>営業日 ${escape(record.paidDate)}</span>
+      <span>給与月 ${escape(record.month)}</span><span>受領者 ${escape(record.castName)}</span><span>支給元 ${escape(source)}</span>
+      <span>記録番号 ${escape(record.id)}</span></div>
+    ${amountLine('支給額',record.amount,{escape,yen})}<p class="np-print-note">受領者署名 ____________________</p></article>`;
+}

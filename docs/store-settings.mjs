@@ -205,6 +205,9 @@ export function catalogDeletionBlocker(state, kind, id, menu = state.menu) {
   if (kind !== 'menu' && kind !== 'cast') return '削除する設定項目を確認してください。';
   const item = state[kind].find((entry) => entry.id === id);
   if (!item) return '削除する設定項目が見つかりません。';
+  if (kind === 'cast' && state.tickets.some((ticket) => ticket.castRotation?.some((entry) => entry.castId === id && entry.endedAt === null))) {
+    return `「${item.name}」の接客・待機を終了してから削除してください。`;
+  }
   const inUse = (state.tickets ?? []).some((ticket) => inUseTicketStatuses.has(ticket.status)
     && (ticket.lines ?? []).some((line) => line.cancelledAt == null
       && (kind === 'menu' ? line.menuId === id : line.castIds?.includes(id))));

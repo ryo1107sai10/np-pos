@@ -295,13 +295,25 @@ function firstVisit(customer, date) {
   if (date && (!customer.firstVisitDate || customer.firstVisitDate > date)) customer.firstVisitDate = date;
 }
 
+export function isSeatCompanionSelection({customerId, companionCustomerIds: ids, guests}) {
+  if (ids === undefined) return true;
+  const validId = (id) => typeof id === 'string' && id.length > 0 && id.length <= 128;
+  return Array.isArray(ids) && ids.length <= 20 && new Set(ids).size === ids.length
+    && Array.from(ids).every((id) => validId(id) && id !== customerId)
+    && (!ids.length || (validId(customerId) && Number.isInteger(guests) && guests > ids.length));
+}
+
 export function customerForSeat(state, action) {
   check(action.newCustomer == null, '新しいお客様は顧客管理から登録してください。');
+  check(isSeatCompanionSelection(action), '代表のお客様と同席者を来店人数の範囲で選択してください。');
   if (!action.customerId) return {customer:String(action.customer ?? '').trim().slice(0, 60)};
   const customer = findCustomer(state, action.customerId);
   check(customer, '顧客が見つかりません。選び直してください。');
-  firstVisit(customer, state.day.date);
-  return { customer: customer.name, customerId: customer.id };
+  const companions = (action.companionCustomerIds ?? []).map((id) => findCustomer(state,id));
+  check(companions.every(Boolean), '同席者が見つかりません。選び直してください。');
+  for (const person of [customer,...companions]) firstVisit(person,state.day.date);
+  return { customer: customer.name, customerId: customer.id,
+    ...(companions.length && {companionCustomerIds:companions.map(({id}) => id)}) };
 }
 
 function ticketCustomerTarget(state, customerId) {

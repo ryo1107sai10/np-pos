@@ -479,6 +479,35 @@ test('the arrival picker displays candidates only when searched and keeps the ch
   assert.match(selected, /data-action="seat-customer-clear"/);
 });
 
+test('initial seating stores registered selected customers together and keeps companion sales independent', () => {
+  let state = register(register(opened(),{name:'山本 花子',kana:'ヤマモト ハナコ',phone:'090-1234-5678'}),{name:'同席 山本'});
+  const [primary,companion] = state.customers;
+  const ids = [primary.id,companion.id];
+  const api = {role:'staff',escape:String,icon:()=>''};
+  assert.doesNotMatch(renderSeatCustomer(state,api,{selected:[]}),/山本|seatGuestChoice/);
+  assert.match(renderSeatCustomer(state,api,{query:'山本',selected:ids}),/name="seatGuestChoice"[^>]*checked/);
+  assert.match(renderSeatCustomer(state,api,{query:'山本',selected:ids}),/代表のお客様.*山本 花子[\s\S]*同席者.*同席 山本/);
+  const command = {type:'seat',tableIds:['a1'],setId:'set60',guests:2,customerId:primary.id,companionCustomerIds:[companion.id]};
+  verifyCommand('staff',command,state);
+  for (const delta of [{guests:1},{customerId:null},{companionCustomerIds:[companion.id,companion.id],guests:3},
+    {companionCustomerIds:[primary.id]}]) {
+    assert.throws(()=>verifyCommand('staff',{...command,...delta},state),{code:'invalid-command'});
+    assert.throws(()=>run(state,{...command,...delta},staff),/代表のお客様/);
+  }
+  assert.throws(()=>run(state,{...command,companionCustomerIds:['unregistered']},staff),/同席者が見つかりません/);
+  assert.deepEqual(state.customers.map(({firstVisitDate})=>firstVisitDate),['','']);
+  state = run(state,command,staff);
+  const [ticket] = state.tickets;
+  assert.deepEqual(ticket.companionCustomerIds,[companion.id]);
+  assert.deepEqual(state.customers.map(({firstVisitDate})=>firstVisitDate),[state.day.date,state.day.date]);
+  assert.deepEqual(projectState(state,'staff',staff.id).tickets[0].activeCompanionLinks,[{id:companion.id,name:companion.name}]);
+  assert.equal(state.customers.length,2);
+  const paid = departPaid(state,ticket.id);
+  assert.equal(getCustomerDetail(paid,companion.id).totalSales,0);
+  assert.equal(getCustomerDetail(paid,companion.id).visits[0].companion,true);
+  assert.doesNotThrow(()=>validateSnapshot(paid));
+});
+
 test('legacy linking and duplicate merging retain receipt totals and redirect active receivables', () => {
   let state = register(opened(), { name: '旧顧客', creditEnabled: true, creditLimit: 30_000 });
   state = register(state, { name: '統合先' });

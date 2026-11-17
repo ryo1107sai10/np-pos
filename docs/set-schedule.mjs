@@ -65,3 +65,12 @@ export function suggestInitialSet(state, at = Date.now()) {
   });
   return rule && getAvailableInitialSets(state).find(({id}) => id === rule.setId);
 }
+
+export function initialSetForSeat(state, tableId, at) {
+  const suggestion = suggestInitialSet(state,at);
+  if (suggestion) return {id:suggestion.id, suggested:true};
+  const available = getAvailableInitialSets(state);
+  const vip = state.tables.some((table) => table.id === tableId && table.area === 'VIP');
+  const fallback = vip ? available.find(({id}) => id === 'vip60') ?? available[0] : available[0];
+  return {id:fallback?.id, suggested:false};
+}

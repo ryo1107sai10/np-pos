@@ -54,6 +54,7 @@
 .cash-dialog .field-help { margin: 0; }
 .cash-dialog .result-bar { padding-inline: 11px; }
 .cash-denominations:not([hidden]) { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 12px; }
+.form-grid[data-attendance-batch-fields] { border: 0; padding: 0; margin: 0; min-width: 0; }
 #cash-tender:not([hidden]) { display: grid; gap: 8px; }
 .lr-cash-count { padding: 10px 14px; }
 .lr-cash-count summary { cursor: pointer; font-weight: 650; }
@@ -148,3 +149,13 @@
 .ops-practice-steps li { display:flex; gap:4px; align-items:center; border:1px solid var(--line,#d0d9e4); border-radius:1rem; padding:4px 9px; font-size:.78rem; }
 .ops-practice-steps li[aria-current="step"] { font-weight:700; border-color:#2763af; color:#194b8d; }
 .ops-practice-steps .is-complete { color:#185b4c; border-color:#bddbd3; }
+.rotation-section { display: grid; gap: 6px; margin-block: 9px; }
+.rotation-section h3 { margin: 0; font-size: .86rem; }
+.rotation-list { display: grid; gap: 6px; margin: 8px 0; padding: 0; list-style: none; }
+.rotation-list li { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px; border: 1px solid var(--line); border-radius: 9px; padding: 6px 8px; }
+.rotation-list li > span { display: grid; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
+.rotation-list small { color: var(--muted); }
+.rotation-list .ops-actions { margin: 0; }
+.rotation-list .btn { min-height: 44px; }
+.rotation-history { margin-block: 10px; }
+.rotation-history summary { cursor: pointer; padding-block: 8px; }

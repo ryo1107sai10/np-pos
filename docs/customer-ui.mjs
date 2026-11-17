@@ -321,8 +321,9 @@ export function renderSeatCustomerResults(state, query, selected, api) {
   const searchable = (state.customers ?? []).map((customer) => staff ? { id:customer.id, name:customer.name }
     : customer.restricted ? { id:customer.id, name:customer.name, kana:customer.kana } : customer);
   const candidates = searchCustomers({customers:searchable}, query).slice(0, 8);
+  const multi = Array.isArray(selected);
   return candidates.length ? candidates.map((customer) =>
-    `<label class="np-seat-customer-choice"><input type="radio" name="customerId" value="${escape(customer.id)}"${customer.id === selected ? ' checked' : ''}>
+    `<label class="np-seat-customer-choice"><input type="${multi ? 'checkbox' : 'radio'}" name="${multi ? 'seatGuestChoice' : 'customerId'}" value="${escape(customer.id)}"${(multi ? selected.includes(customer.id) : customer.id === selected) ? ' checked' : ''}>
       <span><strong>${escape(customer.name)}</strong>${!staff && customer.kana ? `<small>${escape(customer.kana)}</small>` : ''}</span></label>`).join('')
     : '<p role="status" class="field-help">検索に一致する顧客が見つかりません。</p>';
 }
@@ -348,6 +349,17 @@ export function renderSeatCustomerSelection(state, id, api) {
     ${action(api, '選択を解除', 'seat-customer-clear')}</div>${renderSeatCustomerSuggestion(state, id, api)}`;
 }
 
+export function renderSeatGuestSelection(state, selected, api) {
+  const {escape} = api;
+  const list = selected.map((id) => findCustomer(state,id)).filter(Boolean);
+  if (!list.length) return '';
+  return `<ul class="np-seat-guests" aria-label="選択中のお客様">${list.map(({id,name},index) =>
+    `<li class="np-seat-customer-current"><span>${index ? '同席者' : '代表のお客様'} <strong>${escape(name)}</strong></span>
+      <div class="ops-actions">${index ? action(api, '代表にする', 'seat-guest-primary', id) : ''}
+      <button type="button" class="btn btn-secondary" data-action="seat-guest-remove" data-id="${escape(id)}" aria-label="${escape(name)}の選択を解除">解除</button></div></li>`).join('')}</ul>
+    ${renderSeatCustomerSuggestion(state,list[0].id,api)}`;
+}
+
 function renderSeatCustomerPicker(state, api, {query, selected, label, help, selection}) {
   const {escape} = api;
   return `<fieldset class="np-seat-customer"><legend>${label}</legend>
@@ -359,8 +371,8 @@ function renderSeatCustomerPicker(state, api, {query, selected, label, help, sel
 
 export function renderSeatCustomer(state, api, {query = '', selected = ''} = {}) {
   return renderSeatCustomerPicker(state, api, {
-    query, selected, label: 'お客様（任意）', help: '登録済みのお客様を検索できます。顧客の指定は任意です。',
-    selection: renderSeatCustomerSelection(state, selected, api),
+    query, selected, label: 'お客様（任意）', help: '登録済みのお客様を検索します。最初に選んだ方が代表、以降は同席者になります。',
+    selection: Array.isArray(selected) ? renderSeatGuestSelection(state,selected,api) : renderSeatCustomerSelection(state, selected, api),
   });
 }
 

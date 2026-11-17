@@ -4,7 +4,7 @@ import { getDailyPayByDate } from './payroll.mjs';
 
 const tenderMethods = ['cash', 'card', 'qr'];
 const recoveryMethods = ['cash', 'card', 'bank'];
-const dailyPayMethods = ['cash', 'bank'];
+const dailyPayMethods = ['cash', 'bank', 'vault'];
 const settledStatuses = new Set(['paid', 'departed']);
 const additiveFields = ['sales', 'guests', 'tickets', 'receivableSales', 'depositsApplied', 'cashIn', 'cashOut', 'expenses'];
 

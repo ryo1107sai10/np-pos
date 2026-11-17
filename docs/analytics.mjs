@@ -5,6 +5,8 @@ import { getReportPeriod, isReportDate } from './report-period.mjs';
 const methods = [['cash','現金'],['card','カード'],['qr','QR決済']];
 const asYen = (amount) => Number.isFinite(amount) ? amount : 0;
 const average = (total, count) => count ? Math.round(total / count) : 0;
+const proportion = (value, total) => total > 0 ? Number((value / total * 100).toFixed(1)) : null;
+const averagePartySize = (guests, tickets) => tickets > 0 ? Number((guests / tickets).toFixed(1)) : null;
 const daysBetween = (start,end) => Math.round((Date.parse(end) - Date.parse(start)) / 86_400_000);
 const weekdayNames = ['日','月','火','水','木','金','土'];
 const comparisons = {previous:'直前の同じ日数',day:'前日',week:'前週',month:'前月',year:'前年'};
@@ -40,6 +42,7 @@ function emptyCohort() {
 
 function emptyVisitStats() {
   return {expected:0,details:0,complete:true,measured:0,duration:0,awaitingDeparture:0,missingTimes:0,
+    overtimeMeasured:0,overtimeDuration:0,
     cohorts:{nominated:emptyCohort(),other:emptyCohort()}};
 }
 
@@ -55,6 +58,10 @@ function addVisit(stats,ticket,lines,sales) {
   if (duration !== null) {
     stats.measured++;
     stats.duration += duration;
+    if (Number.isSafeInteger(ticket.endsAt) && ticket.endsAt >= ticket.createdAt) {
+      stats.overtimeMeasured++;
+      stats.overtimeDuration += Math.max(0,ticket.departedAt - ticket.endsAt);
+    }
   } else if (ticket.status === 'paid') stats.awaitingDeparture++;
   else stats.missingTimes++;
   const nominated = lines.some(({category,menuId}) => category === '指名' || menuId === 'nominationExtra');
@@ -76,7 +83,7 @@ function combineVisits(days) {
   for (const {visit} of days) {
     total.expected = total.expected === null || visit.expected === null ? null : total.expected + visit.expected;
     total.complete &&= visit.complete;
-    for (const key of ['details','measured','duration','awaitingDeparture','missingTimes']) total[key] += visit[key];
+    for (const key of ['details','measured','duration','awaitingDeparture','missingTimes','overtimeMeasured','overtimeDuration']) total[key] += visit[key];
     for (const key of Object.keys(nominationLabels)) {
       for (const field of Object.keys(total.cohorts[key])) total.cohorts[key][field] += visit.cohorts[key][field];
     }
@@ -99,6 +106,7 @@ function summarizeVisits(stats) {
   }]));
   return {expected:stats.expected,classified,unclassified,completeClassification,absentDetails,cohorts,
     measured:stats.measured,averageMinutes:stats.measured ? average(stats.duration / minute,stats.measured) : null,
+    overtimeMeasured:stats.overtimeMeasured,averageOvertime:stats.overtimeMeasured ? average(stats.overtimeDuration / minute,stats.overtimeMeasured) : null,
     awaitingDeparture:stats.awaitingDeparture,missingTimes:stats.missingTimes,
     nominationRate:classified ? Number((stats.cohorts.nominated.groups / classified * 100).toFixed(1)) : null};
 }
@@ -121,11 +129,13 @@ export function getAnalytics(state, range = {}) {
       ? current.tickets : null;
     visit.complete = ticketDataComplete;
     let discounts = 0;
+    let subtotal = 0;
     for (const ticket of settledTickets) {
       const lines = ticket.lines.filter(({cancelledAt}) => cancelledAt == null);
       const totals = quote(day.state,ticket.id);
       service += asYen(totals.service);
       discounts += asYen(totals.discount);
+      subtotal += asYen(totals.subtotal);
       cost += lines.flatMap(({stockUses}) => stockUses ?? []).reduce((sum,use) => sum + use.quantity * use.unitCost,0);
       addVisit(visit,ticket,lines,ticket.settlement?.total ?? (ticketDataComplete ? totals.total : null));
       for (const {menuId,name,category,quantity,total} of lines) {
@@ -147,7 +157,8 @@ export function getAnalytics(state, range = {}) {
       }
     }
     if (visit.expected !== null && visit.details > visit.expected) visit.expected = null;
-    return {date,sales:current.sales,tickets:current.tickets,guests:current.guests,discounts,visit,
+    return {date,sales:current.sales,tickets:current.tickets,guests:current.guests,discounts,subtotal,visit,
+      partySize:averagePartySize(current.guests,current.tickets),discountRate:ticketDataComplete ? proportion(discounts,subtotal) : null,
       averageSpend:average(current.sales,current.guests)};
   });
   const visits = summarizeVisits(combineVisits(recordedDays));
@@ -178,7 +189,8 @@ export function getAnalytics(state, range = {}) {
     return {label,days:samples.length,sales:samples.length ? average(samples.reduce((sum,day)=>sum + day.sales,0),samples.length) : null};
   });
   return {start,end,period,days,service,withNomination:visits.cohorts.nominated.groups ?? 0,previousSales,previousStart,previousEnd,comparison,complete,weekdays,
-    visits,
+    visits,partySize:averagePartySize(totals.guests,totals.tickets),
+    discountRate:complete ? proportion(days.reduce((sum,day) => sum + day.discounts,0),days.reduce((sum,day) => sum + day.subtotal,0)) : null,
     orderCost:Math.round(cost),perGroup:average(totals.sales,totals.tickets),
     averageSpend:average(totals.sales,totals.guests),
     products:[...products.values()].map(({tickets,...item}) => ({...item,tickets:tickets.size}))
@@ -279,12 +291,18 @@ export function renderAnalytics(page, state, api) {
   const tenderTotal = methods.reduce((total,[key])=>total + asYen(tender[key]),0) + (totals.hasCombinedOnlyPayments ? 0 : totals.depositsApplied);
   const tenderRows = methods.map(([key,label]) => [label,yen(tender[key]),percent(tender[key],tenderTotal)]);
   if (!totals.hasCombinedOnlyPayments) tenderRows.push(['前受金の充当',yen(totals.depositsApplied),percent(totals.depositsApplied,tenderTotal)]);
+  const labor = api.laborReport;
+  const wageShare = labor?.valid && labor.hasKnownCost && !labor.partial ? proportion(labor.knownCost,totals.sales) : null;
   return `<div class="lr-view analytics-view">${controls}${caveat}
     ${metrics([['確定売上',yen(totals.sales),comparison],['客単価',yen(averageSpend),`${totals.guests}名`],
       ['指名率',rateLabel(visits.nominationRate),visits.classified ? `指名区分が確認できた ${visits.classified}組`
         : visits.completeClassification ? '会計済みの来店なし' : '指名区分の記録なし'],
       ['平均滞在',minutesLabel(visits.averageMinutes),visits.expected === null ? `${visits.measured}組を計測`
         : `${visits.expected}組中 ${visits.measured}組を計測`],
+      ['1組あたりの人数',data.partySize === null ? '—' : `${data.partySize.toFixed(1)}名`],
+      ['平均ロスタイム',minutesLabel(visits.averageOvertime),`予定終了から退店まで・${visits.overtimeMeasured}組`],
+      ['値引率',rateLabel(data.discountRate),'値引額 ÷ 注文明細の値引き前小計'],
+      ...(labor?.valid ? [['概算給率（全体）',rateLabel(wageShare),labor.partial ? '時給・勤怠・伝票の一部が未確認' : '人件費参考額 ÷ 確定売上']] : []),
       ['サービス料比率',complete ? percent(data.service,totals.sales) : '—'],
       ['組単価',totals.tickets ? yen(data.perGroup) : '—',`${totals.tickets}組`],
       ['売上 − 注文原価',complete ? yen(totals.sales - data.orderCost) : '—',`注文原価 ${yen(data.orderCost)}`]])}
@@ -312,10 +330,11 @@ export function buildAnalyticsCsv(page,state,range) {
     ...products.map(({name,category,quantity,tickets,sales}) => [period.start,period.end,name,category,quantity,tickets,sales])]);
   const cohortLabels = Object.values(nominationLabels).flatMap((label) => ['組数','売上','客数','客単価','平均滞在（分）','計測組数']
     .map((column) => label + column));
-  return encodeCsv([['営業日','確定売上','組数','客数','客単価','平均滞在（分）','滞在計測組数','退店未記録組数',
+  return encodeCsv([['営業日','確定売上','組数','客数','客単価','1組あたりの人数','平均ロスタイム（分）','ロスタイム計測組数','値引率（%）','平均滞在（分）','滞在計測組数','退店未記録組数',
     '来店・退店時刻不足組数','会計明細の記録がない組数','指名区分確認組数','指名区分不明組数','指名率（%）',...cohortLabels],
-    ...days.map(({date,sales,tickets,guests,averageSpend,visits}) => [
-      date,sales,tickets,guests,averageSpend,visits.averageMinutes,visits.measured,visits.awaitingDeparture,visits.missingTimes,
+    ...days.map(({date,sales,tickets,guests,averageSpend,partySize,discountRate,visits}) => [
+      date,sales,tickets,guests,averageSpend,partySize,visits.averageOvertime,visits.overtimeMeasured,discountRate,
+      visits.averageMinutes,visits.measured,visits.awaitingDeparture,visits.missingTimes,
       visits.absentDetails,visits.classified,visits.unclassified,visits.nominationRate,
       ...Object.keys(nominationLabels).flatMap((key) => {
         const row = visits.cohorts[key];

@@ -1,6 +1,7 @@
 import { isPayrollActualValue, parsePayrollActualKey, payrollActualNames, payrollLineKey, payrollLineMetrics, PayrollFormulaError,
   usedPayrollActualKeys } from './payroll-formula.mjs';
 import { getOrderCategories } from './store-settings.mjs';
+import { castAllocationShare, castLineCost, commissionQuantityScale, getTicketCalculationSettings } from './calculation-settings.mjs';
 
 function payrollActualCatalog(state,keys) {
   const menu = new Map(state.menu.map(({id,name}) => [id,name]));
@@ -54,30 +55,28 @@ function attendanceDays(state,month,castId,work) {
   return {workdays:work.filter(({minutes}) => minutes > 0).length,lateDays:late.size,absenceDays:absent.size,noShowDays:noShow.size};
 }
 
-function shareUnits(total,count,index) {
-  return Math.floor(total / count) + Number(index < total % count);
-}
-
 function ticketValues(tickets,castId,entries,unavailableDates) {
   if (unavailableDates.length) {
     throw new PayrollFormulaError(`会計済みの実績データが不足しています（${unavailableDates.join('・')}）。`);
   }
-  const personal = entries.some(({kind}) => kind === 'summary');
+  const personalSales = entries.some(({key}) => key === 'personalSales');
+  const personalCost = entries.some(({key}) => key === 'personalCost');
   const targets = entries.filter(({kind}) => kind !== 'summary');
   const amounts = Object.fromEntries(entries.map(({key}) => [key,0]));
   for (const ticket of tickets) {
     const {settlement,legacyDate,legacyTicketCount} = ticket;
-    if (personal) {
+    if (personalSales) {
       const entry = settlement.commission.find((row) => row.castId === castId);
       if (entry && !Number.isSafeInteger(entry.sales)) throw new PayrollFormulaError('会計済みの個人売上が保存されていない伝票があります。');
       amounts.personalSales += entry?.sales ?? 0;
     }
-    if (!targets.length) continue;
+    if (!targets.length && !personalCost) continue;
     if (!Array.isArray(ticket.lines)) {
       if (legacyTicketCount === 0 && !settlement.commission.length) continue;
       throw new PayrollFormulaError(`商品・分類別の確定実績に必要な注文明細が不足しています${legacyDate ? `（${legacyDate}）` : ''}。`);
     }
     const details = new Map();
+    const rounding = getTicketCalculationSettings(ticket).castAllocation ?? {};
     for (const row of settlement.commissionDetails ?? []) {
       if (row.castId !== castId) continue;
       details.set(row.lineId,details.has(row.lineId) ? null : row);
@@ -86,10 +85,18 @@ function ticketValues(tickets,castId,entries,unavailableDates) {
       const index = line.castIds.indexOf(castId);
       if (line.cancelledAt != null || index < 0) continue;
       const detail = details.get(line.id);
+      const allocatedCost = detail?.cost ?? castLineCost(line,index,rounding.cost);
+      if (personalCost) {
+        if (!Number.isSafeInteger(allocatedCost) || allocatedCost < 0) throw new PayrollFormulaError(`確定済みの「${line.name}」の個人原価を確認できません。`);
+        amounts.personalCost += allocatedCost;
+      }
       for (const {key,kind,metric,id} of targets) {
         if (id !== (kind === 'menu' ? line.menuId : line.category)) continue;
-        const value = metric === 'quantity' ? shareUnits(line.quantity * 10_000,line.castIds.length,index)
-          : metric === 'commission' ? detail?.amount : metric === 'points' ? Math.round(detail?.points * 1000) : detail?.sales;
+        const value = metric === 'quantity' ? (detail?.quantity === undefined
+          ? castAllocationShare(line.quantity * commissionQuantityScale,line.castIds.length,index,rounding.quantity)
+          : Math.round(detail.quantity * commissionQuantityScale))
+          : metric === 'commission' ? detail?.amount : metric === 'points' ? Math.round(detail?.points * 1000)
+          : metric === 'cost' ? allocatedCost : detail?.sales;
         if (!Number.isSafeInteger(value) || value < 0) {
           throw new PayrollFormulaError(`確定済みの「${line.name}」の${payrollLineMetrics[metric]}が確認できません。注文明細を確認してください。`);
         }
@@ -98,7 +105,7 @@ function ticketValues(tickets,castId,entries,unavailableDates) {
     }
   }
   for (const {key,metric} of targets) {
-    if (metric === 'quantity') amounts[key] /= 10_000;
+    if (metric === 'quantity') amounts[key] /= commissionQuantityScale;
     if (metric === 'points') amounts[key] /= 1000;
   }
   return amounts;

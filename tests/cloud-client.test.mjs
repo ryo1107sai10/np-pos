@@ -145,6 +145,16 @@ test('duty mode requests an updated staff projection at a time boundary and requ
   assert.equal(queued.queued,true);
 });
 
+test('rotation staff eligibility requests fresh data at the earliest projected boundary',async (t) => {
+  const {client,calls,setRevision} = service(t,{role:'staff'});
+  setRevision(7,{castDutyProjection:{ids:['cast1'],refreshAt:Date.now() + 60_000},
+    castRotationDutyProjection:{ids:['cast1'],refreshAt:Date.now() - 1}});
+  await client.start();
+  await client.enterStore('shop');
+  await client.retrySync();
+  assert.equal(calls.at(-1).query.has('since'),false);
+});
+
 test('device lock pauses authenticated workspace requests and preserves queued orders through account verification', async (t) => {
   const {client, calls, setOnline} = service(t);
   await client.setWorkspaceLocked(true);
@@ -191,7 +201,8 @@ test('cold offline restores only the device-bound operational data and revalidat
   state.closedDays = [{date:'2026-11-15',sales:99_999,private:'private-day'}];
   state.stock[0].unitCost = 743;
   const ticket = state.tickets.find(({status}) => status === 'open');
-  Object.assign(ticket,{customer:'private-client-name',customerId:'private-customer',note:'private-guest-note'});
+  Object.assign(ticket,{customer:'private-client-name',customerId:'private-customer',note:'private-guest-note',castRotation:[{castName:'private-rotation'}]});
+  state.castRotationDutyProjection = {ids:['cast1'],refreshAt:fixedTime};
   setRevision(7,state);
   await online.start();
   await online.enterStore('shop');
@@ -215,6 +226,8 @@ test('cold offline restores only the device-bound operational data and revalidat
   assert.equal(client.snapshot.offlineExpiresAt,time + offlineWorkspaceLifetime);
   assert.equal(client.snapshot.state.stock[0].unitCost,0);
   assert.equal(client.snapshot.state.tickets.find(({id})=>id===ticket.id).customer,'');
+  assert.equal(client.snapshot.state.tickets.find(({id})=>id===ticket.id).castRotation,undefined);
+  assert.equal(client.snapshot.state.castRotationDutyProjection,undefined);
   assert(!JSON.stringify(client.snapshot).includes('private-'));
   assert.equal(calls.length,0);
   assert.throws(()=>client.submit({type:'seat',tableIds:['a3'],customer:'offline-name'}),{code:'offline-command'});

@@ -19,6 +19,7 @@ const movementTime = new Intl.DateTimeFormat('ja-JP', {
   month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'Asia/Tokyo',
 });
 const number = new Intl.NumberFormat('ja-JP', {maximumFractionDigits: 3});
+const commissionQuantity = new Intl.NumberFormat('ja-JP', {maximumFractionDigits: 4});
 const stockNumber = new Intl.NumberFormat('ja-JP', {maximumFractionDigits: 6});
 const asNumber = (value) => Number(value) || 0;
 const byId = (items) => new Map(items.map((item) => [item.id, item]));
@@ -129,7 +130,7 @@ function commissionControls(state, filters, report, api) {
 }
 
 function renderCommission(state, api) {
-  const {yen,escape,print = false} = api;
+  const {yen,escape,print = false,canViewCommissionCost = true} = api;
   const filters = api.commissionPeriod ?? {mode:'day',date:api.reportDate};
   const report = getCommissionReport(state,filters,api.commissionCast);
   const {period,roster,earned,pending,details,selected,selectedName,includesOpenDay,hasMissingDetails} = report;
@@ -154,7 +155,8 @@ function renderCommission(state, api) {
     const rows = details
       .filter(({isPending}) => isPending === set.pending)
       .map(({date,ticket,entry,at,name}) => `<tr><td>${print ? escape(ticket.number ?? ticket.id) : set.pending ? ticketLink(ticket, api) : receiptLink(ticket, date, api)}</td>
-        <td><strong>${escape(entry.name)}</strong>${entry.adjustmentReason ? `<span class="lr-row-note">${escape(entry.adjustmentReason)}</span>` : ''}</td><td>${escape(name)}</td>
+        <td><strong>${escape(entry.name)}</strong>${entry.adjustmentReason ? `<span class="lr-row-note">${escape(entry.adjustmentReason)}</span>` : ''}
+        ${Number.isFinite(entry.quantity) ? `<span class="lr-row-note">担当数量 ${commissionQuantity.format(entry.quantity)}${canViewCommissionCost && entry.cost > 0 ? ` ／ 個人原価 ${yen(entry.cost)}` : ''}</span>` : ''}</td><td>${escape(name)}</td>
         <td class="lr-muted">${period.mode === 'day' ? '' : `${escape(date)} `}${timeLabel(at)}</td>
         <td class="lr-numeric">${print ? '' : '<span class="lr-mobile-label" aria-hidden="true">個人売上</span>'}${yen(entry.sales)}</td>
         <td class="lr-numeric">${print ? '' : '<span class="lr-mobile-label" aria-hidden="true">歩合</span>'}<strong class="${set.pending ? 'lr-estimate' : 'lr-positive'}">${yen(entry.amount)}</strong>
@@ -351,21 +353,22 @@ function cashTotals(current, api) {
     ['経費', current.expenses ?? 0],
     ['日払い支給（現金）', dailyCash],
     ['日払い支給（振込）', asNumber(current.dailyPayTotals?.bank)],
+    ['日払い支給（金庫）', asNumber(current.dailyPayTotals?.vault)],
   ], api));
 }
 
 function cashReportDays(period, api, print = false) {
   const {escape, icon, yen} = api;
-  const headings = ['営業日','入金','その他の出金','経費','日払い（現金）','理論残高','実残高','差額'];
+  const headings = ['営業日','入金','その他の出金','経費','日払い（レジ）','日払い（金庫）','理論残高','実残高','差額'];
   const rows = period.days.slice().reverse().map(({date,current,closed}) => {
     const dailyCash = asNumber(current.dailyPayTotals?.cash);
-    const amounts = [current.cashIn,current.cashOut - current.expenses - dailyCash,current.expenses,dailyCash,
+    const amounts = [current.cashIn,current.cashOut - current.expenses - dailyCash,current.expenses,dailyCash,current.dailyPayTotals?.vault ?? 0,
       current.expectedCash,closed?.actualCash,closed?.discrepancy];
     const day = `<time datetime="${escape(date)}">${escape(date)}</time>`;
     return `<tr><td>${print ? day : `<button type="button" class="lr-link" data-action="report-day" data-id="${escape(date)}"
       aria-label="${escape(date)}の入出金を表示">${day}${icon('chevron-right',14)}</button>`}</td>
       ${amounts.map((value,index) => `<td class="lr-numeric"><span class="lr-mobile-label" aria-hidden="true">${headings[index + 1]}</span>
-        <strong>${value == null ? '—' : signedYen(value,yen,index === 6)}</strong></td>`).join('')}</tr>`;
+        <strong>${value == null ? '—' : signedYen(value,yen,index === 7)}</strong></td>`).join('')}</tr>`;
   });
   return panel('営業日別の入出金・レジ照合',table(api,headings,rows,print ? 'lr-cash-period-print-table' : 'lr-period-table'),panelCount(rows.length,'営業日'));
 }

@@ -3,6 +3,12 @@ const labels = {vault:'金庫',payee:'出金先'};
 const validId = (id) => typeof id === 'string' && /^cash-account-[a-z0-9-]{1,64}$/.test(id);
 const validBalance = (value) => Number.isSafeInteger(value) && value >= 0 && value <= 100_000_000;
 const active = (entry) => entry.enabled !== false;
+export const vaultDailyPayCategory = 'dailyPayVault';
+export const isVaultDailyPay = (entry) => entry?.category === vaultDailyPayCategory;
+
+function vaultChange(entry) {
+  return entry.kind === 'withdrawal' && !isVaultDailyPay(entry) ? entry.amount : -entry.amount;
+}
 
 export function cashAccounts(state, kind) {
   return (state.cashAccounts ?? []).filter((entry) => (kind === undefined || entry.kind === kind));
@@ -39,7 +45,7 @@ export function vaultBalance(state, vault) {
   let balance = vault.openingBalance;
   for (const entry of storedMovements(state)) {
     if (entry.cashAccountId !== vault.id || entry.voidedAt != null) continue;
-    balance += entry.kind === 'withdrawal' ? entry.amount : -entry.amount;
+    balance += vaultChange(entry);
   }
   return balance;
 }
@@ -62,15 +68,20 @@ export function cashCounterparty(state, action) {
   const entry = cashAccountOptions(state).find(({id})=>id === action.cashAccountId);
   if (!entry) throw new Error('利用できる金庫・出金先を選択してください。');
   if (entry.kind === 'vault') {
-    if (!['deposit','withdrawal'].includes(action.kind) || action.category !== 'safe') {
+    const payout = action.kind === 'withdrawal' && isVaultDailyPay(action);
+    if (!payout && (!['deposit','withdrawal'].includes(action.kind) || action.category !== 'safe')) {
       throw new Error('金庫移動には入金または出金の金庫区分を選択してください。');
     }
-    if (action.kind === 'deposit' && vaultBalance(state,entry) < action.amount) throw new Error('金庫の残高を超えてレジに移動できません。');
-  } else if (action.kind !== 'expense' && action.kind !== 'withdrawal') throw new Error('出金・経費で出金先を選択できます。');
+    if ((payout || action.kind === 'deposit') && vaultBalance(state,entry) < action.amount) {
+      throw new Error(payout ? '日払い額が金庫の残高を超えています。' : '金庫の残高を超えてレジに移動できません。');
+    }
+  } else if (isVaultDailyPay(action)) throw new Error('支給元の金庫を選択してください。');
+  else if (action.kind !== 'expense' && action.kind !== 'withdrawal') throw new Error('出金・経費で出金先を選択できます。');
   return {cashAccountId:entry.id,cashAccountKind:entry.kind,destination:entry.name};
 }
 
 export function validCashAccountMetadata(entry) {
+  if (isVaultDailyPay(entry)) return validId(entry.cashAccountId) && entry.cashAccountKind === 'vault' && entry.kind === 'withdrawal';
   if (entry.cashAccountKind === undefined && entry.cashAccountId === undefined) return true;
   return validId(entry.cashAccountId) && (entry.cashAccountKind === 'vault'
     ? ['deposit','withdrawal'].includes(entry.kind) && entry.category === 'safe'
@@ -84,7 +95,7 @@ export function validCashAccountHistory(state) {
   for (const entry of movements) {
     if (known.get(entry.cashAccountId)?.kind !== entry.cashAccountKind) return false;
     if (entry.cashAccountKind !== 'vault' || entry.voidedAt != null) continue;
-    const total = balances.get(entry.cashAccountId) + (entry.kind === 'withdrawal' ? entry.amount : -entry.amount);
+    const total = balances.get(entry.cashAccountId) + vaultChange(entry);
     if (!Number.isSafeInteger(total) || total < 0) return false;
     balances.set(entry.cashAccountId,total);
   }

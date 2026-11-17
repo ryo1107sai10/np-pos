@@ -4,7 +4,7 @@ import { roleLabel } from './role-policy.mjs';
 
 const timestamp = new Intl.DateTimeFormat('ja-JP',{timeZone:'Asia/Tokyo',month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit',hourCycle:'h23'});
 const time = (value) => value ? timestamp.format(value) : '—';
-const timeInput = (value) => value ? new Date(value + 32_400_000).toISOString().slice(0,16) : '';
+const timeInput = (value) => value ? new Date(value + 32_400_000).toISOString().slice(0,23) : '';
 const placeholder = '—';
 
 function button(label,action,{escape,icon},{id,glyph = 'plus',tone = ''} = {}) {
@@ -35,7 +35,7 @@ function laborTotals(report,api) {
 }
 
 export function renderLaborHighlights(state,filters,api) {
-  const report = getLaborReport(state,filters);
+  const report = api.report ?? getLaborReport(state,filters);
   if (!report.valid) return '';
   return panel('役職別の勤怠・人件費',`<p class="field-help">${api.escape(report.start)}${report.start === report.end ? '' : ` 〜 ${api.escape(report.end)}`}</p>
     ${laborTotals(report,api)}${report.partial ? '<p class="field-help">時給・勤怠・伝票の不足があるため、一部は参考額に反映されていません。</p>' : ''}
@@ -106,7 +106,8 @@ export function renderStaffAttendance(state,api) {
     <div class="ops-actions">${canEdit && people.some(({enabled})=>enabled) ? button('勤務を記録','attendance-staff-editor',api) : ''}</div>
     ${!people.length ? '<p class="field-help">店舗管理者が「勤怠・人件費」で勤務者を登録すると、ここで勤怠を記録できます。</p>' : ''}
     ${rows.length ? `<ul class="cast-self-list">${rows.map((row)=>`<li><div><strong>${escape(row.personName)}</strong>
-      <small>${escape(row.roleName)} ／ ${escape(row.date)}</small><small>${time(row.clockInAt)} 〜 ${time(row.clockOutAt)} ／ 休憩 ${row.breakMinutes}分</small>
+      <small>${escape(row.roleName)} ／ ${escape(row.date)}</small><small>${time(row.clockInAt)} 〜 ${row.clockOutAt === null ? '勤務中' : time(row.clockOutAt)} ／ 休憩 ${row.breakMinutes}分</small>
+      ${row.clockOutAt !== null && row.timeUnitMinutes > 1 ? `<small>集計 ${row.minutes}分 ／ ${row.timeUnitMinutes}分単位</small>` : ''}
       ${row.voidedAt ? `<small>取消済み　${escape(row.voidReason)}</small>` : ''}</div>
       ${canEdit && !row.voidedAt ? `<div class="ops-actions">${button('勤務を訂正','attendance-staff-editor',api,{id:row.id,glyph:'edit'})}
         ${button('勤務を取消','attendance-staff-void',api,{id:row.id,glyph:'x'})}</div>` : ''}</li>`).join('')}</ul>` : ''}`)}</div>`;
@@ -137,8 +138,9 @@ export function renderStaffAttendanceForm(state,row,{escape}) {
   return `<div class="form-grid">${field('勤務者',`<select name="staffAttendancePerson" required>${choices.map((person)=>
     `<option value="${escape(person.id)}">${escape(person.name)} ／ ${escape(roleLabel(state,person.role,person.profileId))}</option>`).join('')}</select>`)}
     ${field('営業日',`<input name="staffAttendanceDate" type="date" value="${escape(row?.date ?? state.day.date)}" required>`)}
-    ${field('出勤日時',`<input name="staffClockIn" type="datetime-local" value="${timeInput(row?.clockInAt)}" required>`)}
-    ${field('退勤日時',`<input name="staffClockOut" type="datetime-local" value="${timeInput(row?.clockOutAt)}" required>`)}
+    ${field('出勤日時',`<input name="staffClockIn" type="datetime-local" step="0.001" value="${timeInput(row?.clockInAt)}" required>`)}
+    ${field('退勤日時',`<input name="staffClockOut" type="datetime-local" step="0.001" value="${timeInput(row?.clockOutAt)}">`)}
     ${field('休憩分数',`<input name="staffBreak" type="number" min="0" max="1440" step="1" inputmode="numeric" value="${row?.breakMinutes ?? 0}" required>`)}</div>
+    <p class="field-help">出勤のみを記録する場合は、退勤を空欄・休憩を0分にします。</p>
     ${field('記録・訂正の理由','<textarea name="staffAttendanceReason" maxlength="120" rows="2" required></textarea>')}`;
 }

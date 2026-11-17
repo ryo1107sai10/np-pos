@@ -10,11 +10,12 @@ export const editableRoles = Object.freeze({
 
 const groups = {
   floor:{
-    title:'卓の操作', detail:'開店・来店、卓移動、延長、退店、閉店',
+    title:'卓の操作', detail:'開店・来店、卓移動、付け回し、延長、退店、閉店',
     commands:['open','close','seat','move','extend','extendOverdue','depart','saveTicketNote','setTableAutoExtension',
-      'pauseVisitAutoExtension','resumeVisitAutoExtension','adjustTicketEnd','adjustTicketGuests','cancelTicketExtension'],
+      'pauseVisitAutoExtension','resumeVisitAutoExtension','adjustTicketEnd','adjustTicketGuests','cancelTicketExtension','changeCastRotation'],
     actions:['open','close','seat','move','extend','extend-overdue','depart','ticket-note','table-auto-extension',
-      'auto-extension-pause','auto-extension-resume','auto-extension-checkout','ticket-end','ticket-set-time','ticket-guests','cancel-ticket-extension'],
+      'auto-extension-pause','auto-extension-resume','auto-extension-checkout','ticket-end','ticket-set-time','ticket-guests','cancel-ticket-extension',
+      'rotation-board','rotation-ticket','rotation-change','rotation-transfer'],
   },
   orders:{
     title:'注文の操作', detail:'注文の追加・訂正・取消、提供済みの記録',
@@ -53,7 +54,7 @@ const groups = {
   },
   staffing:{
     title:'シフト・勤怠', detail:'シフト一覧、勤務希望と打刻の確認・訂正',
-    commands:['saveShift','removeShift','reviewCastAttendance','saveManagedAttendance','saveStaffAttendance','voidStaffAttendance'],
+    commands:['saveShift','removeShift','reviewCastAttendance','saveManagedAttendance','saveStaffAttendance','voidStaffAttendance','saveAttendanceBatch'],
     actions:[], pages:['shifts','attendance'],
   },
 };
@@ -65,6 +66,7 @@ const permissions = {
   serviceHours:{title:'開店・閉店',commands:['open','close'],actions:['open','close']},
   seatGuests:{title:'来店・人数の登録',commands:['seat','adjustTicketGuests'],actions:['seat','ticket-guests']},
   moveGuests:{title:'卓移動・退店',commands:['move','depart'],actions:['move','depart']},
+  castRotation:{title:'付け回し',commands:['changeCastRotation'],actions:['rotation-board','rotation-ticket','rotation-change','rotation-transfer']},
   extendVisits:{title:'延長・終了時刻の変更',commands:['extend','extendOverdue','adjustTicketEnd','cancelTicketExtension',
     'setTableAutoExtension','pauseVisitAutoExtension','resumeVisitAutoExtension'],
     actions:['extend','extend-overdue','ticket-end','ticket-set-time','cancel-ticket-extension','table-auto-extension',
@@ -87,13 +89,16 @@ const permissions = {
   registerCash:{title:'レジの入出金を記録・訂正',commands:['recordCashMovement','editCashMovement','voidCashMovement'],
     actions:['record-cash','edit-cash-movement','void-cash-movement']},
   personalSales:{title:'キャストの個人売上を調整',commands:['adjustPersonalSales'],actions:['personal-sales-adjustment']},
+  viewPayslips:{title:'確定支給明細の閲覧',commands:[],actions:[]},
+  viewHourlyRates:{title:'勤務者・キャストの時給履歴を閲覧',commands:[],actions:[]},
+  editHourlyRates:{title:'勤務者・キャストの時給を登録・訂正',commands:['saveStaffRate','savePayrollRate'],actions:[]},
   staffing:{...groups.staffing,commands:[],actions:[]},
   editStaffing:{title:'シフト・勤怠の登録・承認',commands:groups.staffing.commands,
     actions:['shift-new','shift-edit','shift-remove','attendance-editor','attendance-review','attendance-break-add','attendance-break-remove',
-      'attendance-staff-editor','attendance-staff-void']},
+      'attendance-staff-editor','attendance-staff-void','attendance-batch','attendance-batch-back']},
 };
 const managerOnly = new Set(['serviceHours','editOrders','discounts','voidTickets','editCustomers','editInventory',
-  'registerCash','personalSales','staffing','editStaffing']);
+  'registerCash','personalSales','staffing','editStaffing','viewPayslips','viewHourlyRates','editHourlyRates']);
 export const isCustomRoleId = (value) => typeof value === 'string' && profileKey.test(value);
 export const getCustomRole = (state,id) => isCustomRoleId(id) ? state?.rolePolicy?.custom?.[id] : undefined;
 
@@ -147,6 +152,10 @@ function activeProfile(state,role,profileId) {
   return profile?.base === role && Array.isArray(profile.allowed) ? profile : null;
 }
 
+export function canDelegatePayroll(state,role,profileId,permission) {
+  return role === 'admin' || role === 'manager' && Boolean(activeProfile(state,role,profileId)?.allowed.includes(permission));
+}
+
 export function roleGroupAllowed(state, role, group, profileId) {
   return !state?.rolePolicy?.[role]?.disabled?.includes(group)
     && (!profileId || Boolean(activeProfile(state,role,profileId)?.allowed.includes(group)));
@@ -161,6 +170,9 @@ function roleAllows(state, role, kind, value, profileId) {
 }
 
 export function roleAllowsCommand(state, role, command, profileId) {
+  if (command.type === 'saveStaffRate' || command.type === 'savePayrollRate') {
+    return canDelegatePayroll(state,role,profileId,'editHourlyRates');
+  }
   // The date makes the same print command a report operation on past dates.
   if (command.type === 'issuePrintDocument' && command.date !== state?.day?.date && !roleGroupAllowed(state,role,'reports',profileId)) {
     return false;

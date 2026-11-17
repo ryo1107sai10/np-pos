@@ -372,10 +372,12 @@ export function createCloudClient({ firebase, apiBase, authEmulatorUrl } = {}, {
   async function refreshStore(scope = activeScope) {
     assertScope(scope);
     const serial = ++scope.sequence;
+    const at = Date.now();
     const deadline = current.state?.day ? getNextAutoExtensionAt(current.state) : null;
-    const autoDue = deadline != null && deadline <= Date.now();
-    const dutyRefresh = current.state?.castDutyProjection?.refreshAt;
-    const since = scope.cold || current.revision === null || current.restricted || !current.state || autoDue || (dutyRefresh != null && dutyRefresh <= Date.now())
+    const autoDue = deadline != null && deadline <= at;
+    const dutyDue = [current.state?.castDutyProjection,current.state?.castRotationDutyProjection]
+      .some((projection) => projection?.refreshAt != null && projection.refreshAt <= at);
+    const since = scope.cold || current.revision === null || current.restricted || !current.state || autoDue || dutyDue
       ? '' : `?since=${current.revision}`;
     const result = await request(`${storePath(scope)}/state${since}`);
     if (acceptState(scope, result, serial)) return refreshStore(scope);

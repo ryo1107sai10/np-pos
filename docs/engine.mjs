@@ -1,12 +1,15 @@
 import { addCardFeeTax, canWaivePaymentFee, depositGrossAmount, getDepositPaymentTerms, getPaymentFeeGroups, normalizeCardFeeSettings } from './card-fee.mjs';
 import { calculationTaxGroup, canApplyOrderLineDiscount, canExcludeOrderService, canOverrideOrderTax, defaultItemTaxRateBps, getCalculationSettings, getTicketCalculationSettings,
-  normalizeCalculationSettings, roundCalculationRate } from './calculation-settings.mjs';
+  castAllocationShare, castLineCost, commissionQuantityScale, normalizeCalculationSettings, roundCalculationRate, roundedCastIncentive } from './calculation-settings.mjs';
 import { getOrderLineDiscountAmount, getTicketDiscountableSubtotal, isValidOrderLineDiscount } from './order-line-discount.mjs';
 import { getStoreSettings, normalizeStoreSettings, replaceStoreSettings } from './store-settings.mjs';
 import { buildOperationAudit } from './operational-audit.mjs';
+import { applyAttendanceBatch } from './attendance-batch.mjs';
 import { assertCastOnDuty, normalizeCastDutyMode } from './cast-duty.mjs';
+import { applyCastRotation, endTicketCastRotation, endUnavailableCastRotations } from './cast-rotation.mjs';
 import { applyPayrollCommand, isPayrollCommand } from './payroll.mjs';
 import { applyStaffLaborCommand, isStaffLaborCommand } from './labor-workspace.mjs';
+import { applyStaffPayrollCommand, isStaffPayrollCommand } from './staff-payroll.mjs';
 import { applyCustomerCommand, customerForSeat, findCustomer, findSettledCustomerTicket, isAssignedCustomer, setTicketCompanion, setTicketCustomer } from './customers.mjs';
 import { correctSettledTicketReceivable, getCustomerReceivableBalance, getReceivableBalance, getReceivableRecoveryTotals,
   receivableCollectionMethods } from './receivables.mjs';
@@ -301,10 +304,6 @@ export function getItemCommission(item, person) {
   return { rate: 0, fixed: 0, points: 0, ...item.commission, ...person?.commissionOverride };
 }
 
-function equalShare(total, count, index) {
-  return Math.floor(total / count) + (index < total % count ? 1 : 0);
-}
-
 function addCommission(map, castId, sales, amount, pointsInUnits) {
   const current = map.get(castId) ?? { castId, sales: 0, amount: 0, pointsInUnits: 0 };
   current.sales += sales;
@@ -346,7 +345,7 @@ function calculateQuote(ticket, frozenFee = null) {
   const serviceBase = settings.serviceBase === 'beforeDiscount' ? listedAmounts : netByLine;
   const serviceWeights = lines.map((line, index) => line.serviceEligible && line.serviceExcluded !== true ? serviceBase[index] : 0);
   const service = roundCalculationRate(serviceWeights.reduce((sum, weight) => sum + weight, 0),
-    settings.serviceRateBps, settings.serviceRounding);
+    settings.serviceRateBps, settings.serviceRounding, 10_000, settings.serviceRoundingUnit ?? 1);
   const serviceByLine = allocate(service, serviceWeights);
   const byTaxRate = new Map();
   lines.forEach(({ taxRate }, index) => {
@@ -372,16 +371,22 @@ function calculateQuote(ticket, frozenFee = null) {
   lines.forEach((line, index) => {
     if (line.castIds.length === 0) return;
     const count = line.castIds.length;
+    const rounding = settings.castAllocation ?? {};
     line.castIds.forEach((castId, castIndex) => {
       const rule = line.castCommissions?.[castIndex] ?? line.commission;
-      const commissionBase = equalShare(commissionSalesByLine[index], count, castIndex);
-      const sales = keepPersonalSales ? equalShare(personalSalesByLine[index], count, castIndex) : commissionBase;
-      const fixed = equalShare(rule.fixed * line.quantity, count, castIndex);
-      const points = equalShare(Math.round(rule.points * pointsScale) * line.quantity, count, castIndex);
-      const amount = fixed + exactRate(commissionBase, Math.round(rule.rate * 100));
+      const commissionBase = castAllocationShare(commissionSalesByLine[index],count,castIndex);
+      const sales = castAllocationShare(personalSalesByLine[index],count,castIndex,rounding.sales);
+      const quantity = castAllocationShare(line.quantity * commissionQuantityScale,count,castIndex,rounding.quantity) / commissionQuantityScale;
+      const allocatedCost = castLineCost(line,castIndex,rounding.cost);
+      const points = castAllocationShare(Math.round(rule.points * pointsScale) * line.quantity,count,castIndex,rounding.points);
+      const fixed = rule.fixed * line.quantity;
+      const rate = Math.round(rule.rate * 100);
+      const amount = count > 1 && rounding.amount ? roundedCastIncentive(fixed,commissionBase,rate,count,rounding.amount)
+        : castAllocationShare(fixed,count,castIndex) + exactRate(commissionBase,rate);
       addCommission(commission, castId, sales, amount, points);
       commissionDetails.push({ castId, castName: line.castNames?.[castIndex] ?? null,
-        lineId: line.id, name: line.name, createdAt: line.createdAt, sales, amount, points: points / pointsScale });
+        lineId: line.id, name: line.name, createdAt: line.createdAt, sales, amount, points: points / pointsScale, quantity,
+        ...(allocatedCost !== undefined && {cost:allocatedCost}) });
     });
   });
   for (const { castId, amount } of ticket.personalSalesAdjustments ?? []) {
@@ -1423,9 +1428,11 @@ function decideDiscount(ticket, action, now, actor) {
 }
 
 export function apply(state, action, now = Date.now(), actor = demoActor) {
-  assert(roleAllowsCommand(state,actor.role,action,actor.profileId),'店舗設定でこの役職には操作が許可されていません。');
-  const authenticatedActor = { id: actor.id, label: actor.label, role: actor.role };
+  assert(roleAllowsCommand(state,actor.role,action,actor.profileId),['saveStaffRate','savePayrollRate'].includes(action.type)
+    ? '時給を変更する権限がありません。' : '店舗設定でこの役職には操作が許可されていません。');
+  const authenticatedActor = {id:actor.id,label:actor.label,role:actor.role,...(actor.profileId && {profileId:actor.profileId})};
   const next = reduce(state, action, now, authenticatedActor);
+  if (['saveStoreSettings','importStoreConfiguration'].includes(action.type)) endUnavailableCastRotations(next,now);
   const addedMovements = next.movements.length - state.movements.length;
   for (const movement of next.movements.slice(0,addedMovements)) {
     movement.actorLabel = authenticatedActor.label;
@@ -1438,6 +1445,10 @@ export function apply(state, action, now = Date.now(), actor = demoActor) {
 
 function reduce(state, action, now, actor) {
   const next = structuredClone(state);
+  if (action.type === 'changeCastRotation') {
+    applyCastRotation(next,action,now,actor,(prefix) => createId(next,prefix));
+    return next;
+  }
   if (action.type === 'saveRolePolicy') {
     assert(actor.role === 'admin','役職・権限の設定には店舗管理者の権限が必要です。');
     next.rolePolicy = normalizeRolePolicy(action.policy);
@@ -1449,6 +1460,10 @@ function reduce(state, action, now, actor) {
   }
   if (action.type === 'bindCastAccount') {
     bindCastAccount(next, action, actor);
+    return next;
+  }
+  if (action.type === 'saveAttendanceBatch') {
+    applyAttendanceBatch(next,action,now,actor,(prefix) => createId(next,prefix));
     return next;
   }
   if (isCastSelfCommand(action.type) || isCastAttendanceReview(action.type) || isManagedAttendanceCommand(action.type)) {
@@ -1466,18 +1481,23 @@ function reduce(state, action, now, actor) {
   if (isPayrollCommand(action.type)) {
     applyPayrollCommand(next, action, now, actor, {
       allocateId: (prefix = 'daily-pay') => createId(next, prefix),
-      recordCashPayout: (amount) => {
-        assert(summary(next).expectedCash >= amount, '日払い額がレジの理論残高を超えています。');
+      recordCashPayout: (amount,vaultId) => {
+        if (!vaultId) assert(summary(next).expectedCash >= amount, '日払い額がレジの理論残高を超えています。');
         const movement = createCashMovement(next,{kind:'withdrawal',category:'other',amount,
-          reason:'日払いの現金支給',destination:'給与前払い'},now,actor,() => createId(next,'cash'));
+          reason:'日払いの現金支給',destination:'給与前払い',cashAccountId:vaultId},now,actor,() => createId(next,'cash'),
+        {dailyPayFromVault:Boolean(vaultId)});
         (next.cashMovements ??= []).push(movement);
-        return movement.id;
+        return movement;
       },
     });
     return next;
   }
   if (isStaffLaborCommand(action.type)) {
     applyStaffLaborCommand(next,action,now,actor,(prefix)=>createId(next,prefix));
+    return next;
+  }
+  if (isStaffPayrollCommand(action.type)) {
+    applyStaffPayrollCommand(next,action,now,actor);
     return next;
   }
   if (action.type === 'saveAutoExtensionSettings') {
@@ -1510,7 +1530,9 @@ function reduce(state, action, now, actor) {
     assert(Number.isInteger(limit) && limit >= 0 && limit <= 10_000, '値引き上限を0から100%の範囲で入力してください。');
     next.controls = { ...next.controls, managerDiscountRateBps: limit,
       ...(action.castDutyMode !== undefined && {castDutyMode:normalizeCastDutyMode(action.castDutyMode)}),
-      ...(action.register !== undefined && {register:normalizeRegisterSettings(action.register)}) };
+      ...(action.register !== undefined && {register:normalizeRegisterSettings({
+        attendanceTimeUnit:state.controls?.register?.attendanceTimeUnit,...action.register,
+      })}) };
     return next;
   }
   if (action.type === 'saveCardFeeSettings') {
@@ -1523,7 +1545,9 @@ function reduce(state, action, now, actor) {
   }
   if (action.type === 'saveCalculationSettings') {
     assert(actor.role === 'admin', '会計の計算設定は店舗管理者が変更できます。');
-    next.calculationSettings = normalizeCalculationSettings(action.settings);
+    const previous = getCalculationSettings(state);
+    next.calculationSettings = normalizeCalculationSettings({serviceRoundingUnit:previous.serviceRoundingUnit,
+      castAllocation:previous.castAllocation,...action.settings});
     return next;
   }
   if (action.type === 'saveLayout') {
@@ -1609,6 +1633,7 @@ function reduce(state, action, now, actor) {
   }
   if (action.type === 'depart') {
     assert(ticket.status === 'paid', '会計を確定してから退店してください。');
+    endTicketCastRotation(ticket,now,'departed');
     recordTableAssignment(ticket, [], now);
     ticket.status = 'departed';
     ticket.departedAt = now;
@@ -1769,6 +1794,7 @@ function reduce(state, action, now, actor) {
       else delete ticket.cashTender;
       delete ticket.paymentsCorrectedAt;
       ticket.settlement = quote(next, ticket.id);
+      endTicketCastRotation(ticket,now,'checkout');
       ticket.status = 'paid';
       ticket.settledAt = now;
       ticket.settledBy = { ...actor };
@@ -1811,6 +1837,7 @@ function reduce(state, action, now, actor) {
         }
       }
       recordTableAssignment(ticket, [], now);
+      endTicketCastRotation(ticket,now,'voided');
       ticket.status = 'void';
       break;
     default:

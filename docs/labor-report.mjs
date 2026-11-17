@@ -10,7 +10,7 @@ const localTime = (at) => at ? new Date(at + 32_400_000).toISOString().slice(0,1
 function staffWork(state,start,end) {
   const {attendance,rates} = getStaffLabor(state);
   const sorted = rates.slice().sort((a,b) => a.effectiveDate.localeCompare(b.effectiveDate));
-  return attendance.filter(({date,voidedAt})=>voidedAt === undefined && date >= start && date <= end).map((row)=>{
+  return attendance.filter(({date,voidedAt,clockOutAt})=>voidedAt === undefined && clockOutAt !== null && date >= start && date <= end).map((row)=>{
     const {date,personId,minutes} = row;
     const rate = sorted.findLast((entry)=>entry.personId === personId && entry.effectiveDate <= date)?.hourlyRate;
     return {...row,source:'staff',roleKey:roleKey(row),hourlyRate:rate ?? null,basePay:rate == null && minutes > 0 ? null : Math.round(minutes * (rate ?? 0) / 60)};
@@ -97,7 +97,9 @@ export function getLaborReport(state,filters = {}) {
     roles.set(key,group);
   }
   const castUncertain = (!selectedRole || selectedRole === 'cast') && cast.unavailableDates.length > 0;
-  const partial = castUncertain || people.some(({issues})=>issues.length > 0);
+  const staffPending = getStaffLabor(state).attendance.some((row) => row.voidedAt === undefined && row.clockOutAt === null
+    && row.date >= start && row.date <= end && includesRole({roleKey:roleKey(row)}));
+  const partial = castUncertain || staffPending || people.some(({issues})=>issues.length > 0);
   const knownCost = people.reduce((sum,row)=>sum+row.knownCost,0);
   const sales = getReportPeriod(state,{mode:'range',start,end}).totals.sales;
   const castRow = roles.get('cast');

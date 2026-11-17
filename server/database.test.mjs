@@ -62,6 +62,41 @@ async function store(db, user = owner) {
 const command = (db, actor, storeId, expectedRevision, operationId, action) =>
   applyCommand(db, actor, storeId, { expectedRevision, operationId, command: action });
 
+test('cloud bulk attendance applies one audited revision and leaves no partial rows on error', async () => {
+  const db = database();
+  const tenant = await store(db);
+  await inviteMember(db,owner,tenant,helper.email,'manager');
+  await listStores(db,helper);
+  const opened = await command(db,owner,tenant,0,'bulk-attendance-open',{type:'open',openingCash:0});
+  const roster = await command(db,owner,tenant,opened.revision,'bulk-attendance-person',
+    {type:'saveStaffPerson',name:'テスト勤務者',role:'staff',enabled:true});
+  const date = new Date(Date.parse(opened.state.day.date) - 86_400_000).toISOString().slice(0,10);
+  const clockInAt = Date.parse(`${date}T20:00:00+09:00`);
+  const clockOutAt = clockInAt + 60 * 60_000;
+  const staff = {kind:'staff',personId:roster.state.staffLabor.people[0].id,clockInAt,clockOutAt,breakMinutes:0};
+  const cast = {kind:'cast',personId:'cast1',classification:'worked',clockInAt,clockOutAt,breakMinutes:0};
+  const operation = {type:'saveAttendanceBatch',date,reason:'勤怠日報と照合',rows:[staff,cast]};
+  await assert.rejects(command(db,helper,tenant,roster.revision,'bulk-attendance-invalid',{
+    ...operation,rows:[staff,{...cast,clockOutAt:clockInAt}],
+  }),/退勤/);
+  const clean = await readState(db,owner,tenant,null);
+  assert.deepEqual(clean.state.staffLabor.attendance,[]);
+  assert.equal(clean.revision,roster.revision);
+
+  const saved = await command(db,helper,tenant,roster.revision,'bulk-attendance-commit',operation);
+  const retried = await command(db,helper,tenant,roster.revision,'bulk-attendance-commit',operation);
+  assert.equal(saved.revision,roster.revision + 1);
+  assert.equal(retried.revision,saved.revision);
+  assert.equal(retried.state.staffLabor.attendance[0].minutes,60);
+  assert.equal(retried.state.castAttendance[0].minutes,60);
+  const audit = await listAudit(db,owner,tenant);
+  const batches = audit.events.filter(({action}) => action === 'saveAttendanceBatch');
+  assert.equal(batches.length,1);
+  assert.equal(batches[0].businessDate,date);
+  assert.equal(batches[0].actor.id,helper.uid);
+  assert.equal(batches[0].after.rows.length,2);
+});
+
 const lineTarget = 'C' + '1'.repeat(32);
 const lineConfig = (tenant,target=lineTarget) => ({
   LINE_CHANNEL_ACCESS_TOKEN:'synthetic-test-token',LINE_DESTINATIONS_JSON:JSON.stringify({[tenant]:target}),
@@ -608,6 +643,41 @@ test('changing or revoking cast membership atomically invalidates links and old 
   await listStores(db,helper);
   assert.deepEqual(await read(helper),{state:null,scope:'cast',role:'cast',revision:5,restricted:true});
   assert.equal((await listAudit(db,owner,tenant)).events.filter(({reason}) => /所属・権限変更/.test(reason)).length,2);
+});
+
+test('staff payroll account ownership is verified and revoked atomically from the cloud workspace', async (t) => {
+  const now = Date.parse('2026-11-16T22:00:00+09:00');
+  t.mock.method(Date,'now',() => now);
+  const db = database();
+  const tenant = await store(db);
+  await inviteMember(db,owner,tenant,helper.email,'staff');
+  await listStores(db,helper);
+  const read = (actor) => readState(db,actor,tenant,null);
+  const run = (actor,revision,name,action) => command(db,actor,tenant,revision,`staff-payroll-test-${name}`,action);
+  await run(owner,0,'initialize',{type:'open',openingCash:0});
+  const added = await run(owner,1,'staff-person',{type:'saveStaffPerson',name:'伊藤',role:'staff',enabled:true});
+  const personId = added.state.staffLabor.people[0].id;
+  const binding = {type:'bindStaffPayrollAccount',memberUid:helper.uid,personId};
+  await assert.rejects(run(owner,2,'bind-wrong-member',{...binding,memberUid:owner.uid}),{code:'invalid-staff-member'});
+  await assert.rejects(run(helper,2,'bind-by-staff',binding),{code:'forbidden'});
+  await run(owner,2,'bind-staff',binding);
+  await run(owner,3,'staff-wage',{type:'saveStaffRate',personId,effectiveDate:'2026-11-01',hourlyRate:2000});
+  await run(owner,4,'staff-attendance',{type:'saveStaffAttendance',personId,date:'2026-11-16',clockInAt:now - 7200000,
+    clockOutAt:now,breakMinutes:30,reason:'通常勤務'});
+  await run(owner,5,'staff-draft',{type:'saveStaffPayrollDraft',personId,month:'2026-11',allowances:[{label:'交通費',amount:500}]});
+  assert.equal((await read(helper)).state.staffPayrollSelf.records.length,0);
+  await run(owner,6,'staff-final',{type:'finalizeStaffPayroll',personId,month:'2026-11',expectedNet:3500});
+  const paid = (await read(helper)).state;
+  assert.equal(paid.staffPayroll,undefined);
+  assert.equal(paid.staffPayrollDelegation,undefined);
+  assert.equal(paid.staffPayrollSelf.records[0].snapshot.net,3500);
+  await changeMember(db,owner,tenant,helper.uid);
+  await assert.rejects(read(helper),{code:'store-access'});
+  await inviteMember(db,owner,tenant,helper.email,'staff');
+  await listStores(db,helper);
+  assert.equal((await read(helper)).state.staffPayrollSelf,undefined);
+  assert.equal((await read(owner)).state.staffPayroll.links.length,0);
+  assert.ok((await listAudit(db,owner,tenant)).events.some(({action,reason}) => action === 'bindStaffPayrollAccount' && /解除/.test(reason)));
 });
 
 test('multi-store overview returns only administrator aggregates and caps the initial list', async (t) => {
@@ -2137,4 +2207,38 @@ test('cloud honors card surcharge settings only for owners and freezes exact car
     {code:'invalid-snapshot'});
   const migrated = await migrateState(db, owner, migratedTenant, {operationId:'correct-fee-migration',snapshot:full.state});
   assert.equal(migrated.state.tickets[0].settlement.cardFee,460);
+});
+
+test('cloud initial companion seating and cast rotation persist in one revision without stale cross-table writes', async () => {
+  const db = database();
+  const tenant = await store(db);
+  await inviteMember(db,owner,tenant,helper.email,'staff');
+  await listStores(db,helper);
+  const run = (actor,revision,name,action) => command(db,actor,tenant,revision,`rotation-companions-${name}`,action);
+  const opened = await run(owner,0,'opened',{type:'open',openingCash:0});
+  const one = await run(owner,opened.revision,'primary',{type:'saveCustomer',customer:{name:'代表',phone:'090-1111-2222'}});
+  const two = await run(owner,one.revision,'companion',{type:'saveCustomer',customer:{name:'同席',phone:'090-3333-4444'}});
+  const [primary,companion] = two.state.customers;
+  const first = await run(helper,two.revision,'first-table',{type:'seat',tableIds:['a1'],setId:'set60',guests:2,
+    customerId:primary.id,companionCustomerIds:[companion.id]});
+  assert.deepEqual(first.state.tickets[0].activeCompanionLinks,[{id:companion.id,name:'同席'}]);
+  assert.equal(first.state.customers[1].phone,undefined);
+  assert.deepEqual((await readState(db,owner,tenant)).state.tickets[0].companionCustomerIds,[companion.id]);
+  const second = await run(helper,first.revision,'second-table',{type:'seat',tableIds:['a2'],guests:1,setId:'set60'});
+  const [a,b] = second.state.tickets;
+  const change = (ticketId,mode,fields) => ({type:'changeCastRotation',ticketId,mode,...fields});
+  const queuedA = await run(helper,second.revision,'queue-a',change(a.id,'enqueue',{castId:'cast1'}));
+  const [source] = queuedA.state.tickets[0].castRotation;
+  const startA = await run(helper,queuedA.revision,'start-a',change(a.id,'start',{assignmentId:source.id}));
+  const queuedB = await run(helper,startA.revision,'queue-b',change(b.id,'enqueue',{castId:'cast1'}));
+  const [destination] = queuedB.state.tickets[1].castRotation;
+  await assert.rejects(run(helper,startA.revision,'stale-transfer',change(b.id,'start',{assignmentId:destination.id,sourceId:source.id})),{code:'revision-conflict'});
+  await assert.rejects(run(helper,queuedB.revision,'unconfirmed-transfer',change(b.id,'start',{assignmentId:destination.id})),{code:'rejected-command'});
+  const result = await run(helper,queuedB.revision,'verified-transfer',change(b.id,'start',{assignmentId:destination.id,sourceId:source.id}));
+  assert.equal(result.revision,queuedB.revision + 1);
+  assert.equal(result.state.tickets[0].castRotation[0].endReason,'moved');
+  assert.equal(result.state.tickets[1].castRotation[0].endedAt,null);
+  const audit = (await listAudit(db,owner,tenant)).events.find(({reason})=>reason === '接客先を移動');
+  assert.equal(audit.after.length,2);
+  await assert.rejects(readState(db,outsider,tenant),{code:'store-access'});
 });

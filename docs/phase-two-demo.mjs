@@ -66,6 +66,13 @@ export function createCashDemo(now = Date.now()) {
     reason:'レジロールを購入',destination:'文具店'},14);
   step({type:'recoverReceivable',receivableId:state.receivables[0].id,amount:4_000,
     method:'cash',date:state.day.date},9);
+  step({type:'saveStaffPerson',name:'佐伯',role:'manager',enabled:true},8);
+  const personId = state.staffLabor.people.at(-1).id;
+  const clockInAt = Math.max(Date.parse(`${latestDate}T06:00:00+09:00`),now - 7 * minute);
+  state = apply(state,{type:'saveStaffAttendance',personId,date:latestDate,clockInAt,clockOutAt:null,breakMinutes:0,
+    reason:'閉店前確認のサンプル'},now,demoAdmin);
+  state = apply(state,{type:'saveManagedAttendance',castId:'cast1',date:latestDate,clockInAt,clockOutAt:null,
+    classification:'worked',reason:'閉店前確認のサンプル'},now,demoAdmin);
   return state;
 }
 
@@ -139,6 +146,7 @@ export function createPayrollDemo(now = Date.now()) {
   const month = date.slice(0,7);
   const castId = 'cast1';
   const step = (action) => { state = apply(state,action,now,demoAdmin); };
+  step({type:'saveCashAccounts',accounts:[{id:'cash-account-payroll-demo',kind:'vault',name:'日払い用金庫',openingBalance:30_000,enabled:true}]});
   step({type:'savePayrollRate',castId,effectiveDate:`${month}-01`,hourlyRate:3500});
   step({type:'savePayrollDraft',month,castId,work:[{date,minutes:180}],
     allowances:[{label:'交通費',amount:500}],deductions:[]});
@@ -173,6 +181,14 @@ export function createLaborDemo(now = Date.now()) {
       const clockInAt = Date.parse(`${date}T20:00:00+09:00`);
       step({type:'saveStaffAttendance',personId,date,clockInAt,clockOutAt:clockInAt + (5+index) * 60 * 60_000,
         breakMinutes:30,reason:'勤怠・人件費サンプル'});
+    }
+    if (role === 'staff') {
+      const month = dates[1].slice(0,7);
+      const amount = 500;
+      const hourlyPay = dates.filter((date) => date.startsWith(month)).length * (5 + index - .5) * hourlyRate;
+      step({type:'saveStaffPayrollDraft',month,personId,allowances:[{label:'業務手当',amount}]});
+      step({type:'finalizeStaffPayroll',month,personId,expectedNet:hourlyPay + amount});
+      step({type:'bindStaffPayrollAccount',memberUid:'demo-staff',personId});
     }
   }
   return state;

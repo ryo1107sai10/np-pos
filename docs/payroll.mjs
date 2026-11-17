@@ -3,6 +3,8 @@ import { advancedPayrollBases, calculateAdvancedPayrollRule, ensurePayrollVariab
   normalizeAdvancedPayrollRule, normalizeFormulaContext, normalizePayrollVariables, savePayrollVariables } from './payroll-formula.mjs';
 import { getPayrollActualContext } from './payroll-actuals.mjs';
 import { normalizePayrollStatementLayout } from './payroll-statement-layout.mjs';
+import { canDelegatePayroll } from './role-policy.mjs';
+import { isVaultDailyPay } from './cash-accounts.mjs';
 
 const dailyPayActions = new Set(['requestDailyPay', 'reviewDailyPay', 'payDailyPay']);
 const payrollActions = new Set(['savePayrollDraft', 'finalizePayroll', 'savePayrollRate', 'savePayrollSettings',
@@ -151,14 +153,14 @@ export function getDailyPayByDate(state) {
   const totals = Object.create(null);
   for (const record of state.payroll?.dailyPays ?? []) {
     if (record.status !== 'paid') continue;
-    const row = (totals[record.paidDate] ??= {cash:0,bank:0});
+    const row = (totals[record.paidDate] ??= {cash:0,bank:0,vault:0});
     row[record.method] += record.amount;
   }
   return totals;
 }
 
 export function getDailyPayTotals(state, date) {
-  return getDailyPayByDate(state)[date] ?? {cash:0,bank:0};
+  return getDailyPayByDate(state)[date] ?? {cash:0,bank:0,vault:0};
 }
 
 function normalizeWork(input, month) {
@@ -469,14 +471,17 @@ function applyDailyPayCommand(state, action, now, { allocateId, recordCashPayout
   }
   check(record.status === 'approved', '承認済みの日払い申請を選択してください。');
   check(state.day.status === 'open', '営業中に日払いの支給を記録してください。');
-  check(['cash','bank'].includes(action.method), '日払いの支給方法を選択してください。');
-  const cashMovementId = action.method === 'cash' ? recordCashPayout(record.amount) : undefined;
+  check(['cash','vault','bank'].includes(action.method) && (action.method === 'vault' ? typeof action.vaultId === 'string' && action.vaultId
+    : action.vaultId === undefined), '日払いの支給元を選択してください。');
+  const cash = action.method === 'bank' ? undefined : recordCashPayout(record.amount,action.vaultId);
   Object.assign(record,{status:'paid', paidAt:now, paidDate:state.day.date, method:action.method,
-    ...(cashMovementId && {cashMovementId})});
+    ...(cash && {cashMovementId:cash.id}),
+    ...(action.method === 'vault' && {vaultId:cash.cashAccountId,vaultName:cash.destination})});
 }
 
 export function applyPayrollCommand(state, action, now, actor, services) {
-  check(actor.role === 'admin', '給与の操作には店舗管理者の権限が必要です。');
+  check(actor.role === 'admin' || action.type === 'savePayrollRate' && canDelegatePayroll(state,actor.role,actor.profileId,'editHourlyRates'),
+    '給与の操作には店舗管理者の権限が必要です。');
   state.payroll ??= { settings:getPayrollSettings(state), rates:[], records:[] };
   if (action.type === 'saveEmployeeProfile') {
     saveEmployeeProfile(state,action.castId,action.profile);
@@ -595,22 +600,30 @@ function normalizeDailyPay(state, row, cashById) {
   if (status === 'rejected') check(record.reviewReason, '却下理由を確認してください。');
   if (status !== 'paid') return record;
 
-  check(isDate(row.paidDate) && ['cash','bank'].includes(row.method), '日払いの支給記録を確認してください。');
+  check(isDate(row.paidDate) && ['cash','vault','bank'].includes(row.method), '日払いの支給記録を確認してください。');
   record.method = row.method;
   record.paidAt = integer(row.paidAt,record.reviewedAt,Number.MAX_SAFE_INTEGER,'支給日時');
   record.paidDate = row.paidDate;
-  if (row.method === 'cash') {
+  if (row.method !== 'bank') {
     const cash = cashById.get(row.cashMovementId);
-    check(cash?.amount === record.amount && cash.date === record.paidDate && cash.kind === 'withdrawal' && cash.at === record.paidAt,
+    check(cash?.amount === record.amount && cash.date === record.paidDate && cash.kind === 'withdrawal' && cash.at === record.paidAt
+      && cash.voidedAt == null && (row.method === 'vault' ? isVaultDailyPay(cash) && row.vaultId === cash.cashAccountId
+        && row.vaultName === cash.destination : !cash.cashAccountId),
       '現金の日払いを入出金履歴で確認してください。');
     record.cashMovementId = cash.id;
+    if (row.method === 'vault') Object.assign(record,{vaultId:cash.cashAccountId,vaultName:cash.destination});
   }
   return record;
 }
 
 export function normalizePayrollSnapshot(state) {
   const payroll = state.payroll;
-  if (payroll === undefined) return undefined;
+  const cashById = new Map(state.closedDays.flatMap((day) => day.cashMovements ?? []).concat(state.cashMovements ?? [])
+    .map((row) => [row.id,row]));
+  if (payroll === undefined) {
+    check(![...cashById.values()].some(isVaultDailyPay),'日払いの支給記録が見つかりません。');
+    return undefined;
+  }
   check(isRecord(payroll) && Array.isArray(payroll.rates) && Array.isArray(payroll.records)
     && (payroll.dailyPays === undefined || Array.isArray(payroll.dailyPays)), '給与データを読み込めません。');
   const rates = payroll.rates.map((row) => normalizeRate(state, row));
@@ -624,12 +637,13 @@ export function normalizePayrollSnapshot(state) {
     }
     return record;
   });
-  const cashById = new Map(state.closedDays.flatMap((day) => day.cashMovements ?? []).concat(state.cashMovements ?? [])
-    .map((row) => [row.id,row]));
   const dailyPays = (payroll.dailyPays ?? []).map((row) => normalizeDailyPay(state,row,cashById));
   const cashIds = dailyPays.flatMap((row) => row.cashMovementId ? [row.cashMovementId] : []);
   check(new Set(dailyPays.map(({id}) => id)).size === dailyPays.length && new Set(cashIds).size === cashIds.length,
     '日払いの申請または出金が重複しています。');
+  const vaultCashIds = new Set(dailyPays.filter(({method}) => method === 'vault').map(({cashMovementId}) => cashMovementId));
+  check([...cashById.values()].every((row) => !isVaultDailyPay(row) || vaultCashIds.has(row.id)),
+    '日払いの支給記録が見つかりません。');
   for (const {month,castId,snapshot} of records) {
     if (!snapshot) continue;
     const linked = dailyPays.filter((row) => row.month === month && row.castId === castId && row.status !== 'rejected');

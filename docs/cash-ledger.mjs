@@ -1,4 +1,4 @@
-import { cashCounterparty, validCashAccountMetadata } from './cash-accounts.mjs';
+import { cashCounterparty, isVaultDailyPay, validCashAccountMetadata, vaultDailyPayCategory } from './cash-accounts.mjs';
 
 export const cashMovementKinds = Object.freeze({ deposit: '入金', withdrawal: '出金', expense: '経費' });
 
@@ -7,6 +7,10 @@ export const cashMovementCategories = Object.freeze({
   withdrawal: Object.freeze({ safe: '金庫への移動', bank: '銀行への預け入れ', other: 'その他' }),
   expense: Object.freeze({ supplies: '消耗品', purchase: '仕入れ', transport: '交通費', other: 'その他' }),
 });
+
+export function cashMovementCategoryLabel(entry) {
+  return isVaultDailyPay(entry) ? '日払い（金庫）' : cashMovementCategories[entry.kind]?.[entry.category] ?? 'その他';
+}
 
 const cashOperators = new Set(['admin', 'manager']);
 const currencyLimit = 100_000_000;
@@ -34,7 +38,7 @@ function validDate(date) {
 
 export function isValidCashMovement(entry) {
   return entry != null && validText(entry.id, 128, true) && validDate(entry.date) && Number.isSafeInteger(entry.at) && entry.at >= 0
-    && validKind(entry.kind) && validCategory(entry.kind, entry.category) && validAmount(entry.amount)
+    && validKind(entry.kind) && (isVaultDailyPay(entry) || validCategory(entry.kind, entry.category)) && validAmount(entry.amount)
     && validText(entry.reason, 120, true) && validText(entry.destination, 80)
     && validCashAccountMetadata(entry)
     && (entry.stockPurchaseId === undefined || (validText(entry.stockPurchaseId, 128, true)
@@ -43,18 +47,20 @@ export function isValidCashMovement(entry) {
     && validText(entry.actor?.id, 256, true) && validText(entry.actor?.label, 320, true) && cashOperators.has(entry.actor?.role);
 }
 
-export function createCashMovement(state, action, at, actor, allocateId) {
+export function createCashMovement(state, action, at, actor, allocateId, {dailyPayFromVault = false} = {}) {
   if (!cashOperators.has(actor.role)) throw new Error('入出金の登録にはマネージャー以上の権限が必要です。');
   if (state.day.status !== 'open') throw new Error('営業中に入出金を登録できます。');
   if (!validKind(action.kind)) throw new Error('入出金の種類を選択してください。');
-  if (!validCategory(action.kind, action.category)) throw new Error('理由区分を選択してください。');
+  if (dailyPayFromVault && (!action.cashAccountId || action.kind !== 'withdrawal')) throw new Error('支給元の金庫を選択してください。');
+  const category = dailyPayFromVault ? vaultDailyPayCategory : action.category;
+  if (!dailyPayFromVault && !validCategory(action.kind,category)) throw new Error('理由区分を選択してください。');
   if (!validAmount(action.amount)) throw new Error('入出金額を1円以上の円単位で入力してください。');
   if (!validText(action.reason, 120, true)) throw new Error('入出金の理由を120文字以内で入力してください。');
   const destination = action.destination ?? '';
   if (!validText(destination, 80)) throw new Error('移動先・支払先は80文字以内で入力してください。');
   return { id: allocateId(), date: state.day.date, at, kind: action.kind, amount: action.amount,
-    category: action.category, reason: action.reason.trim(), destination: destination.trim(), actor: { ...actor },
-    ...cashCounterparty(state,action) };
+    category, reason: action.reason.trim(), destination: destination.trim(), actor: { ...actor },
+    ...cashCounterparty(state,{...action,category}) };
 }
 
 export function getCashMovements(state, date) {
@@ -70,7 +76,7 @@ export function getCashMovement(state, id) {
 export function totalCashMovements(entries) {
   const totals = { cashIn: 0, cashOut: 0, expenses: 0 };
   for (const entry of entries) {
-    if (entry.voidedAt != null) continue;
+    if (entry.voidedAt != null || isVaultDailyPay(entry)) continue;
     if (entry.kind === 'deposit') totals.cashIn += entry.amount;
     else totals.cashOut += entry.amount;
     if (entry.kind === 'expense') totals.expenses += entry.amount;

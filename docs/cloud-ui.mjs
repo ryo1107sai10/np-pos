@@ -136,10 +136,17 @@ function memberControls(member, api, cloud) {
       ${link && !choices.some(({id})=>id === link.castId) ? `<option value="${escape(link.castId)}" selected>対象外のキャスト</option>` : ''}
       ${choices.map(({id,name})=>`<option value="${escape(id)}"${id === link?.castId ? ' selected' : ''}>${escape(name)}</option>`).join('')}</select></label>
     ${button('ひもづけを保存','cloud-bind-cast',api,{id:member.uid,disabled:cloud.busy})}</div>` : '';
+  const staffLink = cloud.staffPayrollLinks?.find(({uid}) => uid === member.uid);
+  const staffChoices = (cloud.staffPayrollPeople ?? []).filter(({role}) => role === member.role);
+  const staffControls = cloud.store?.hasState && ['manager','staff'].includes(member.role) ? `<div class="np-cloud-cast-link">
+    <label class="field"><span>支給明細を渡す勤務者</span><select data-cloud-staff-payroll${cloud.busy ? ' disabled' : ''}>
+      <option value="">未設定</option>${staffLink && !staffChoices.some(({id}) => id === staffLink.personId) ? '<option value="" selected>対象外の勤務者</option>' : ''}
+      ${staffChoices.map(({id,name}) => `<option value="${escape(id)}"${id === staffLink?.personId ? ' selected' : ''}>${escape(name)}</option>`).join('')}</select></label>
+    ${button('勤務者のひもづけを保存','cloud-bind-staff-payroll',api,{id:member.uid,disabled:cloud.busy})}</div>` : '';
   return `<div class="np-cloud-member-controls"><label class="field"><span class="sr-only">${escape(member.email)}の権限</span>
     <select name="cloud-member-role" data-cloud-member-role${cloud.busy ? ' disabled' : ''}>${roleOptions(cloud,escape,member.profileId ?? member.role)}</select></label>
     ${button('更新', 'cloud-member-save', api, { id: member.uid, disabled: cloud.busy })}
-    ${button('アクセスを解除', 'cloud-member-revoke', api, { id: member.uid, tone: 'danger', disabled: cloud.busy })}${castControls}</div>`;
+    ${button('アクセスを解除', 'cloud-member-revoke', api, { id: member.uid, tone: 'danger', disabled: cloud.busy })}${castControls}${staffControls}</div>`;
 }
 
 function membersPanel(cloud, api) {

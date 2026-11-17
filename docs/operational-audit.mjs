@@ -7,6 +7,8 @@ import { cashMovementCategories, cashMovementKinds, getCashMovement } from './ca
 import { getPrintSettings, printDocumentKinds } from './print-domain.mjs';
 import { getPayrollDraft, getPayrollRates, getPayrollSettings, getPayrollTemplateAssignment, getPayrollTemplates, isDailyPayCommand, isPayrollCommand } from './payroll.mjs';
 import { getStaffLabor, isStaffLaborCommand } from './labor-workspace.mjs';
+import { getStaffPayrollDraft, isStaffPayrollCommand } from './staff-payroll.mjs';
+import { attendanceBatchSnapshot } from './attendance-batch.mjs';
 import { isCastAttendanceReview, linkedCastForActor } from './cast-self.mjs';
 import { getCalculationSettings } from './calculation-settings.mjs';
 import { getOrderLineDiscountAmount } from './order-line-discount.mjs';
@@ -150,6 +152,7 @@ function auditTicket(before, after, action) {
     const current = after.tickets.at(-1);
     return { target:target('ticket',current.id,`伝票 No. ${current.number}`),before:null,
       after:{guests:current.guests,tableIds:current.tableIds,arrivedAt:current.createdAt,endsAt:current.endsAt,
+        ...(current.companionCustomerIds?.length && {companionCustomerIds:current.companionCustomerIds}),
         lines:current.lines.map(auditLine)},reason:'来店を登録' };
   }
   const previous = before.tickets.find(({ id }) => id === action.ticketId);
@@ -157,6 +160,14 @@ function auditTicket(before, after, action) {
   if (!previous || !current) return null;
   const oldValues = ticketValues(previous);
   const newValues = ticketValues(current);
+  if (['settle','void','depart'].includes(action.type)) {
+    const assigned = (previous.castRotation ?? []).filter(({endedAt}) => endedAt === null);
+    if (assigned.length) {
+      const ids = new Set(assigned.map(({id}) => id));
+      oldValues.castRotation = assigned;
+      newValues.castRotation = current.castRotation.filter(({id}) => ids.has(id));
+    }
+  }
   let auditAction = action.type;
   let reason = textReason(action.reason);
   if (action.type === 'settle' || action.type === 'cancelSettlement') {
@@ -474,6 +485,23 @@ export function buildOperationAudit(before, after, action, at, actor) {
   let details;
   if (ticketActions.has(action.type)) {
     details = auditTicket(before, after, action);
+  } else if (action.type === 'changeCastRotation' && action.mode === 'next') {
+    const waiting = (state) => (state.tickets.find(({id}) => id === action.ticketId)?.castRotation ?? [])
+      .filter(({startedAt,endedAt}) => startedAt === null && endedAt === null).map(({castName}) => castName);
+    const ticket = after.tickets.find(({id}) => id === action.ticketId);
+    details = {target:target('ticket',ticket.id,`伝票 No. ${ticket.number}`),before:{waitingOrder:waiting(before)},
+      after:{waitingOrder:waiting(after)},reason:'交代待ちの順番を変更'};
+  } else if (action.type === 'changeCastRotation') {
+    const ticket = after.tickets.find(({id}) => id === action.ticketId);
+    const previousById = new Map(before.tickets.flatMap((row) => (row.castRotation ?? []).map((entry) => [entry.id,entry])));
+    const changes = after.tickets.flatMap((row) => (row.castRotation ?? []).flatMap((entry) => {
+      const previous = previousById.get(entry.id);
+      return sameValue(previous,entry) ? [] : [{ticketNumber:row.number,before:previous ?? null,after:entry}];
+    }));
+    const values = (key) => changes.map(({ticketNumber,[key]:row}) => ({ticketNumber,assignment:row}));
+    const reasons = {enqueue:'待機に追加',start:action.sourceId ? '接客先を移動' : '接客を開始',swap:'次の待機と交代',finish:'接客を終了',remove:'待機を取消'};
+    if (ticket && changes.length) details = {target:target('ticket',ticket.id,`伝票 No. ${ticket.number}`),
+      before:values('before'),after:values('after'),reason:reasons[action.mode]};
   } else if (['saveTicketNote','adjustTicketEnd','adjustTicketGuests','adjustPersonalSales'].includes(action.type)) {
     details = auditTicketDetails(before, after, action);
   } else if (settingActions.has(action.type)) {
@@ -504,6 +532,20 @@ export function buildOperationAudit(before, after, action, at, actor) {
       reason:textReason(action.reason)};
   } else if (isPayrollCommand(action.type) || action.type === 'castRequestDailyPay') {
     details = auditPayroll(before, after, action.type === 'castRequestDailyPay' ? {...action,type:'requestDailyPay'} : action);
+  } else if (isStaffPayrollCommand(action.type)) {
+    if (action.type === 'bindStaffPayrollAccount') {
+      const linked = (state) => state.staffPayroll?.links?.find(({uid}) => uid === action.memberUid) ?? null;
+      const old = linked(before);
+      const current = linked(after);
+      if (!sameValue(old,current)) details = {target:target('payroll',(current ?? old).personId,'従業員の支給明細アカウント'),
+        before:old,after:current,reason:'本人アカウントの連携を更新'};
+    } else {
+      const old = getStaffPayrollDraft(before,action.personId,action.month);
+      const current = getStaffPayrollDraft(after,action.personId,action.month);
+      const person = getStaffLabor(after).people.find(({id}) => id === action.personId);
+      if (!sameValue(old,current)) details = {target:target('payroll',action.personId,`${action.month} ${person.name}`),
+        before:old,after:current,reason:action.type === 'finalizeStaffPayroll' ? '従業員給与を確定' : '従業員給与の下書きを保存'};
+    }
   } else if (isStaffLaborCommand(action.type)) {
     details = auditStaffLabor(before,after,action);
   } else if (action.type === 'saveShift' || action.type === 'removeShift' || action.type === 'castRequestShift') {
@@ -520,6 +562,9 @@ export function buildOperationAudit(before, after, action, at, actor) {
     const current = after.castAccounts?.find(({uid}) => uid === action.memberUid) ?? null;
     if (!sameValue(previous,current)) details = {target:target('cast-account',action.memberUid,'キャストアカウント'),
       before:previous,after:current,reason:current ? 'アカウントのひもづけ' : 'アカウントのひもづけ解除'};
+  } else if (action.type === 'saveAttendanceBatch') {
+    details = {businessDate:action.date,target:target('attendance',null,'勤怠の一括記録'),
+      before:{rows:attendanceBatchSnapshot(before,action,false)},after:{rows:attendanceBatchSnapshot(after,action,true)},reason:textReason(action.reason)};
   } else if (action.type === 'saveManagedAttendance') {
     const previous = before.castAttendance?.find(({id})=>id === action.attendanceId) ?? null;
     const current = after.castAttendance.at(-1);
